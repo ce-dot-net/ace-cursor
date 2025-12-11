@@ -12,6 +12,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import { StatusPanel } from './webviews/statusPanel';
 import { ConfigurePanel } from './webviews/configurePanel';
 import { readContext, type AceContext } from './ace/context';
@@ -272,7 +273,12 @@ fi
 `;
 
 		if (!fs.existsSync(stopHookPath)) {
-			fs.writeFileSync(stopHookPath, stopHookScript, { mode: 0o755 });
+			// Only set Unix permissions on non-Windows (Windows ignores mode)
+			if (process.platform !== 'win32') {
+				fs.writeFileSync(stopHookPath, stopHookScript, { mode: 0o755 });
+			} else {
+				fs.writeFileSync(stopHookPath, stopHookScript);
+			}
 			console.log('[ACE] Created ace_stop_hook.sh');
 		}
 
@@ -293,7 +299,12 @@ exit 0
 `;
 
 		if (!fs.existsSync(trackEditPath)) {
-			fs.writeFileSync(trackEditPath, trackEditScript, { mode: 0o755 });
+			// Only set Unix permissions on non-Windows (Windows ignores mode)
+			if (process.platform !== 'win32') {
+				fs.writeFileSync(trackEditPath, trackEditScript, { mode: 0o755 });
+			} else {
+				fs.writeFileSync(trackEditPath, trackEditScript);
+			}
 			console.log('[ACE] Created ace_track_edit.sh');
 		}
 	}
@@ -563,7 +574,7 @@ function getAceConfig(): { serverUrl?: string; apiToken?: string; projectId?: st
 
 	// Try to read from global config
 	let globalConfig: any = null;
-	const globalConfigPath = path.join(process.env.HOME || '', '.config', 'ace', 'config.json');
+	const globalConfigPath = path.join(os.homedir(), '.config', 'ace', 'config.json');
 	if (fs.existsSync(globalConfigPath)) {
 		try {
 			globalConfig = JSON.parse(fs.readFileSync(globalConfigPath, 'utf-8'));

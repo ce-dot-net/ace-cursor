@@ -2,6 +2,7 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import { readContext, writeContext, type AceContext } from '../../ace/context';
 
 suite('ACE Extension Test Suite', () => {
@@ -236,7 +237,7 @@ suite('ACE Extension Test Suite', () => {
 	// ============================================
 
 	test('Global config path should be correct', () => {
-		const expectedPath = path.join(process.env.HOME || '', '.config', 'ace', 'config.json');
+		const expectedPath = path.join(os.homedir(), '.config', 'ace', 'config.json');
 		// Just verify the path format is correct
 		assert.ok(expectedPath.includes('.config'), 'Config path should include .config');
 		assert.ok(expectedPath.includes('ace'), 'Config path should include ace');

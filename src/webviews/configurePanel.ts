@@ -6,6 +6,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import { ensureSettingsDir, writeContext } from '../ace/context';
 
 export class ConfigurePanel {
@@ -96,7 +97,7 @@ export class ConfigurePanel {
 		projectId?: string;
 		orgs?: Record<string, { orgName: string; apiToken: string; projects: Array<string | { project_id: string; project_name?: string }> }>;
 	} | null {
-		const globalConfigPath = path.join(process.env.HOME || '', '.config', 'ace', 'config.json');
+		const globalConfigPath = path.join(os.homedir(), '.config', 'ace', 'config.json');
 
 		if (!fs.existsSync(globalConfigPath)) {
 			return null;
@@ -175,7 +176,7 @@ export class ConfigurePanel {
 		projectId: string;
 	}) {
 		try {
-			const configDir = path.join(process.env.HOME || '', '.config', 'ace');
+			const configDir = path.join(os.homedir(), '.config', 'ace');
 			const configPath = path.join(configDir, 'config.json');
 
 			// Ensure directory exists
@@ -223,8 +224,12 @@ export class ConfigurePanel {
 				projects: existingProjects
 			};
 
-			// Write config with secure permissions
-			fs.writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
+			// Write config with secure permissions (Unix only - Windows ignores mode)
+			if (process.platform !== 'win32') {
+				fs.writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
+			} else {
+				fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+			}
 
 			// Save project context to workspace
 			const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;

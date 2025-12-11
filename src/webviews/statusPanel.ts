@@ -6,6 +6,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import { readContext } from '../ace/context';
 
 export class StatusPanel {
@@ -168,7 +169,7 @@ export class StatusPanel {
 	 */
 	private _getAceConfig(): { serverUrl?: string; apiToken?: string } | null {
 		const ctx = readContext();
-		const globalConfigPath = path.join(process.env.HOME || '', '.config', 'ace', 'config.json');
+		const globalConfigPath = path.join(os.homedir(), '.config', 'ace', 'config.json');
 
 		if (!fs.existsSync(globalConfigPath)) {
 			return null;
