@@ -383,8 +383,16 @@ export class ConfigurePanel {
 			background: var(--vscode-button-background);
 			color: var(--vscode-button-foreground);
 		}
-		.btn-primary:hover {
+		.btn-primary:hover:not(:disabled) {
 			background: var(--vscode-button-hoverBackground);
+		}
+		.btn-primary:disabled {
+			opacity: 0.5;
+			cursor: not-allowed;
+		}
+		.btn-connected {
+			background: var(--vscode-testing-iconPassed) !important;
+			color: white !important;
 		}
 		.btn-secondary {
 			background: var(--vscode-button-secondaryBackground);
@@ -476,6 +484,7 @@ export class ConfigurePanel {
 				placeholder="ace_xxxxx" required>
 			<div class="help-text">
 				Get your token from <a href="https://ace.code-engine.app/settings/tokens" target="_blank">ACE Settings</a>
+				<br>Then click <strong>Connect</strong> to load your organizations.
 			</div>
 		</div>
 
@@ -491,10 +500,10 @@ export class ConfigurePanel {
 		</div>
 
 		<div class="button-group">
-			<button type="button" class="btn-secondary" id="validateBtn">
-				Validate Connection
+			<button type="button" class="btn-secondary ${orgsArray.length > 0 ? 'btn-connected' : ''}" id="connectBtn">
+				${orgsArray.length > 0 ? '✓ Connected' : 'Connect'}
 			</button>
-			<button type="submit" class="btn-primary">
+			<button type="submit" class="btn-primary" id="saveBtn" ${orgsArray.length > 0 ? '' : 'disabled title="Connect first to load organizations"'}>
 				Save Configuration
 			</button>
 		</div>
@@ -531,7 +540,7 @@ export class ConfigurePanel {
 				onOrgChange();
 			}
 
-			document.getElementById('validateBtn').addEventListener('click', validateConnection);
+			document.getElementById('connectBtn').addEventListener('click', validateConnection);
 			document.getElementById('configForm').addEventListener('submit', handleSubmit);
 			document.getElementById('initWorkspaceBtn').addEventListener('click', () => {
 				vscode.postMessage({ command: 'initializeWorkspace' });
@@ -667,6 +676,14 @@ export class ConfigurePanel {
 				case 'validationResult':
 					showStatus(message.message, message.success ? 'success' : 'error');
 					if (message.success && message.data) {
+						// Enable Save button and show connected state
+						const saveBtn = document.getElementById('saveBtn');
+						const connectBtn = document.getElementById('connectBtn');
+						saveBtn.disabled = false;
+						saveBtn.title = '';
+						connectBtn.textContent = '✓ Connected';
+						connectBtn.classList.add('btn-connected');
+
 						const orgSelect = document.getElementById('orgId');
 						const orgIdManual = document.getElementById('orgIdManual');
 
