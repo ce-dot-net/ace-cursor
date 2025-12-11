@@ -660,14 +660,25 @@ export class ConfigurePanel {
 							for (let i = 0; i < orgSelect.options.length; i++) {
 								if (orgSelect.options[i].value === message.data.orgId) {
 									orgSelect.selectedIndex = i;
-									orgSelect.dispatchEvent(new Event('change'));
 									found = true;
 									break;
 								}
 							}
-							if (!found && orgIdManual) {
-								orgIdManual.value = message.data.orgId;
-								orgIdManual.style.display = 'block';
+							// If org not in dropdown, add it dynamically
+							if (!found) {
+								const newOption = document.createElement('option');
+								newOption.value = message.data.orgId;
+								newOption.textContent = (message.data.orgName || message.data.orgId) + ' (' + message.data.orgId + ')';
+								newOption.dataset.token = document.getElementById('apiToken').value;
+								newOption.dataset.projects = JSON.stringify(message.data.projects || []);
+								orgSelect.appendChild(newOption);
+								orgSelect.value = message.data.orgId;
+							}
+							// Trigger change to populate projects
+							orgSelect.dispatchEvent(new Event('change'));
+							// Hide manual input since we have it in dropdown now
+							if (orgIdManual) {
+								orgIdManual.style.display = 'none';
 							}
 						}
 
