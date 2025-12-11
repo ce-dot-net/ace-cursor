@@ -1,0 +1,41 @@
+# Source files
+src/**
+*.ts
+!*.d.ts
+tsconfig.json
+
+# Development files
+.vscode/**
+.gitignore
+.eslintrc.json
+*.md
+!README.md
+
+# Test files
+test/**
+*.test.ts
+*.test.js
+
+# Build artifacts (keep dist/)
+*.map
+
+# Dependencies (will be installed by user if needed)
+# Note: We include node_modules for now, but can exclude if too large
+# node_modules/**
+
+# IDE files
+.idea/**
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Cache and data files
+.ace-cache/**
+.claude/**
+*.db
+
+

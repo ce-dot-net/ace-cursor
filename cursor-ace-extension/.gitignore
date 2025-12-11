@@ -1,0 +1,47 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+*.vsix
+
+# VS Code test
+.vscode-test/
+
+# IDE/Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# ACE cache (contains project/org IDs)
+.ace-cache/
+
+# Claude Code artifacts
+.claude/
+
+# Cursor user data (may contain tokens)
+.cursor/
+
+# Environment files
+.env
+.env.*
+*.env
+
+# Secrets and credentials
+*.pem
+*.key
+credentials.json
+secrets.json
+
+# Logs
+*.log
+npm-debug.log*
+
+# TypeScript build info
+*.tsbuildinfo

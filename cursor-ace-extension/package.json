@@ -1,0 +1,124 @@
+{
+  "name": "cursor-ace-extension",
+  "displayName": "ACE for Cursor",
+  "description": "Native Cursor extension for ACE pattern learning. Automatically retrieves patterns before tasks and captures learning after via MCP.",
+  "version": "0.2.1",
+  "publisher": "ce-dot-net",
+  "author": "Code Engine GmbH",
+  "license": "MIT",
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ce-dot-net/ace-cursor"
+  },
+  "bugs": {
+    "url": "https://github.com/ce-dot-net/ace-cursor/issues"
+  },
+  "homepage": "https://ace.code-engine.app",
+  "keywords": [
+    "cursor",
+    "ace",
+    "pattern-learning",
+    "mcp",
+    "ai-assistant",
+    "code-engine"
+  ],
+  "engines": {
+    "vscode": "^1.92.0"
+  },
+  "extensionDependencies": [
+    "vscode.git"
+  ],
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "ace.initializeWorkspace",
+        "title": "ACE: Initialize Workspace"
+      },
+      {
+        "command": "ace.configure",
+        "title": "ACE: Configure Connection"
+      },
+      {
+        "command": "ace.search",
+        "title": "ACE: Search Patterns"
+      },
+      {
+        "command": "ace.status",
+        "title": "ACE: Show Status"
+      },
+      {
+        "command": "ace.bootstrap",
+        "title": "ACE: Bootstrap Playbook"
+      },
+      {
+        "command": "ace.learn",
+        "title": "ACE: Capture Learning"
+      },
+      {
+        "command": "ace.taskStart",
+        "title": "ACE: Start Task (Legacy)"
+      },
+      {
+        "command": "ace.taskStop",
+        "title": "ACE: Stop Task (Legacy)"
+      },
+      {
+        "command": "ace.autoSearch",
+        "title": "ACE: Auto Search (Legacy)"
+      }
+    ],
+    "configuration": {
+      "title": "ACE",
+      "properties": {
+        "ace.serverUrl": {
+          "type": "string",
+          "default": "",
+          "description": "ACE server endpoint (https://ace-api.code-engine.app)."
+        },
+        "ace.orgId": {
+          "type": "string",
+          "default": "",
+          "description": "Default ACE organization ID."
+        },
+        "ace.projectId": {
+          "type": "string",
+          "default": "",
+          "description": "Default ACE project ID."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext .ts",
+    "test": "node ./dist/test/runTest.js",
+    "test:compile": "tsc -p ./",
+    "package": "vsce package",
+    "package:test": "npm run build && vsce package --out test-extension.vsix"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.5",
+    "@types/vscode": "^1.92.0",
+    "@types/mocha": "^10.0.6",
+    "@types/glob": "^8.1.0",
+    "@vscode/test-electron": "^2.4.0",
+    "@vscode/vsce": "^2.22.0",
+    "eslint": "^9.11.0",
+    "glob": "^10.3.10",
+    "mocha": "^10.4.0",
+    "typescript": "^5.6.3"
+  },
+  "dependencies": {
+    "fs-extra": "^11.2.0"
+  }
+}
