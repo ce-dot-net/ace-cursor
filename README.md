@@ -61,20 +61,17 @@ This creates a self-improving learning cycle where each session benefits from pr
 
 ### The Learning Cycle
 
-```mermaid
-flowchart TD
-    A["🚀 <b>1. Start Task</b><br/>You begin work in Cursor"] --> B
-    B["📖 <b>2. Retrieve Patterns</b><br/>AI calls ace_get_playbook<br/><i>Fetches learned strategies</i>"] --> C
-    C["⚡ <b>3. Execute with Knowledge</b><br/>AI completes task using patterns"] --> D
-    D["💡 <b>4. Capture Learning</b><br/>AI calls ace_learn<br/><i>Playbook grows smarter</i>"] --> E
-    E["🔄 <b>Next Session</b><br/>Enhanced patterns available"] --> A
-
-    style A fill:#e1f5fe,stroke:#01579b
-    style B fill:#f3e5f5,stroke:#4a148c
-    style C fill:#e8f5e9,stroke:#1b5e20
-    style D fill:#fff3e0,stroke:#e65100
-    style E fill:#fce4ec,stroke:#880e4f
-```
+| Step | Action | Description |
+|:----:|--------|-------------|
+| 🚀 | **Start Task** | You begin work in Cursor |
+| ⬇️ | | |
+| 📖 | **Retrieve Patterns** | AI calls `ace_get_playbook` → Fetches learned strategies |
+| ⬇️ | | |
+| ⚡ | **Execute** | AI completes task using patterns |
+| ⬇️ | | |
+| 💡 | **Capture Learning** | AI calls `ace_learn` → Playbook grows smarter |
+| ⬇️ | | |
+| 🔄 | **Next Session** | Enhanced patterns available → Back to Start! |
 
 ## Requirements
 
