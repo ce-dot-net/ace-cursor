@@ -1,5 +1,7 @@
 # ACE for Cursor
 
+> ⚠️ **BETA** - [Join the waitlist](https://ace.code-engine.app/waitlist) for early access!
+
 **Automatic Code Evolution** - Pattern learning for Cursor IDE via MCP.
 
 By [Code Engine GmbH](https://ace.code-engine.app)
