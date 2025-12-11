@@ -251,6 +251,193 @@ exit 0
 }
 
 /**
+ * Create Cursor slash commands for ACE
+ * These are .md files in .cursor/commands/ that become /ace-* commands in chat
+ */
+async function createCursorCommands(): Promise<void> {
+	const workspaceFolders = vscode.workspace.workspaceFolders;
+	if (!workspaceFolders || workspaceFolders.length === 0) {
+		return;
+	}
+
+	const workspaceRoot = workspaceFolders[0].uri.fsPath;
+	const commandsDir = path.join(workspaceRoot, '.cursor', 'commands');
+
+	// Ensure commands directory exists
+	if (!fs.existsSync(commandsDir)) {
+		fs.mkdirSync(commandsDir, { recursive: true });
+	}
+
+	// Define all ACE slash commands
+	const commands: Record<string, string> = {
+		'ace-configure.md': `# ACE Configure
+
+Configure your ACE server connection and project settings.
+
+## What This Does
+
+Opens a rich webview panel where you can:
+- Set server URL (Production or Localhost)
+- Enter API token securely
+- Configure organization and project IDs
+- Validate connection before saving
+
+## How to Execute
+
+**IMPORTANT**: You must execute the VS Code extension command \`ace.configure\` to open the configuration panel.
+
+Use one of these methods:
+1. **Command Palette**: Press \`Cmd/Ctrl+Shift+P\`, type "ACE: Configure", press Enter
+2. **Extension API**: Call \`vscode.commands.executeCommand('ace.configure')\`
+
+**First Time Setup**: Run this command after installing the extension to connect to your ACE server.
+
+**Do not just display this text - you must actually execute the command to open the panel.**`,
+
+		'ace-status.md': `# ACE Status
+
+**EXECUTE COMMAND NOW**: \`vscode.commands.executeCommand('ace.status')\`
+
+Show ACE playbook statistics and pattern counts.
+
+## Action Required
+
+**YOU MUST EXECUTE THIS COMMAND IMMEDIATELY** - Do not just display this text!
+
+Execute: \`await vscode.commands.executeCommand('ace.status')\`
+
+This opens the ACE Status webview panel showing:
+- Total patterns in your playbook
+- Average confidence score
+- Patterns by section (strategies, snippets, pitfalls, APIs)
+- Organization and project information
+
+## Alternative Methods
+
+If command execution fails:
+1. **Command Palette**: Press \`Cmd/Ctrl+Shift+P\`, type "ACE: Show Status", press Enter
+2. **Status Bar**: Click the ACE status bar item in the bottom-right corner
+
+**CRITICAL**: Execute the command, don't just show this help text!`,
+
+		'ace-search.md': `# ACE Search
+
+Search for relevant patterns in your ACE playbook.
+
+## Usage
+
+\`\`\`
+/ace-search <query>
+\`\`\`
+
+## Examples
+
+\`\`\`
+/ace-search authentication
+/ace-search error handling
+/ace-search database queries
+\`\`\`
+
+## How to Execute
+
+**IMPORTANT**: You must execute the VS Code extension command \`ace.search\` to perform the search.
+
+- **If a query is provided**: Execute \`vscode.commands.executeCommand('ace.search', query)\` with the query parameter
+- **If no query**: Prompt the user for a search query, then execute \`vscode.commands.executeCommand('ace.search', userQuery)\`
+
+**Alternative**: Use Command Palette (\`Cmd/Ctrl+Shift+P\`) → "ACE: Search Patterns"
+
+This will search your playbook for patterns matching the query and display results.
+
+**Do not just display this text - you must actually execute the command with the search query.**`,
+
+		'ace-bootstrap.md': `# ACE Bootstrap
+
+**🚀 EXECUTE IMMEDIATELY**: When user types \`/ace-bootstrap\`, you MUST immediately execute the command without asking.
+
+## Action Required
+
+**CRITICAL**: Execute this command NOW using:
+\`\`\`typescript
+await vscode.commands.executeCommand('ace.bootstrap')
+\`\`\`
+
+## What This Does
+
+Extracts patterns from your existing code and creates an initial playbook. The command will:
+1. Prompt user to select mode (hybrid, local-files, git-history, docs-only)
+2. Prompt user to select thoroughness (light, medium, deep)
+3. Analyze codebase (docs, source files, git history)
+4. Stream progress updates in real-time
+5. Send extracted patterns to ACE server
+6. Initialize your playbook
+
+## User Experience
+
+The command shows a progress dialog with:
+- "Analyzing codebase..."
+- "Scanning documentation files..."
+- "Analyzing source files..."
+- "Analyzing git history..."
+- Real-time bootstrap progress from ACE server
+
+**DO NOT** just show this help text. **EXECUTE THE COMMAND IMMEDIATELY** when user types \`/ace-bootstrap\`.`,
+
+		'ace-learn.md': `# ACE Learn
+
+Manually capture learning from a completed task.
+
+## What This Does
+
+Starts the manual learning capture process. Use this when you want to explicitly record what you learned from a task, including:
+- Task description
+- Success/failure outcome
+- Key lessons and insights
+
+## How to Execute
+
+**IMPORTANT**: You must execute the VS Code extension command \`ace.learn\` to start the learning capture.
+
+Use one of these methods:
+1. **Command Palette**: Press \`Cmd/Ctrl+Shift+P\`, type "ACE: Capture Learning", press Enter
+2. **Extension API**: Call \`vscode.commands.executeCommand('ace.learn')\`
+
+**Note**: ACE also automatically captures learning when tasks complete (if automation is enabled).
+
+**Do not just display this text - you must actually execute the command.**`,
+
+		'ace-help.md': `# ACE Help
+
+Show all available ACE commands and usage.
+
+**Action Required**: Display the following help information to the user.
+
+**Available Commands**:
+- \`/ace-status\` - Show playbook statistics (executes \`ace.status\`)
+- \`/ace-search <query>\` - Search for patterns (executes \`ace.search\`)
+- \`/ace-configure\` - Configure ACE connection (executes \`ace.configure\`)
+- \`/ace-bootstrap\` - Initialize playbook from codebase (executes \`ace.bootstrap\`)
+- \`/ace-learn\` - Manually capture learning (executes \`ace.learn\`)
+- \`/ace-help\` - Show this help
+
+**Automatic Features**:
+- ✅ Auto-search: ACE automatically searches for patterns on every prompt
+- ✅ Auto-learn: ACE automatically captures learning when tasks complete
+
+**Note**: All commands execute corresponding VS Code extension commands. Use the Command Palette (\`Cmd/Ctrl+Shift+P\`) and type "ACE" to see all available commands.`
+	};
+
+	// Write each command file (only if doesn't exist)
+	for (const [filename, content] of Object.entries(commands)) {
+		const filePath = path.join(commandsDir, filename);
+		if (!fs.existsSync(filePath)) {
+			fs.writeFileSync(filePath, content);
+			console.log(`[ACE] Created slash command: ${filename}`);
+		}
+	}
+}
+
+/**
  * Create Cursor Rules file to instruct AI to use ACE tools
  * This is the "belt + suspenders" approach - rules ensure AI calls ACE tools
  */
@@ -376,7 +563,7 @@ function updateStatusBar(): void {
 }
 
 /**
- * Initialize workspace - creates .cursor/ace directory and hooks
+ * Initialize workspace - creates .cursor/ace directory, hooks, and rules
  */
 async function initializeWorkspace(): Promise<void> {
 	const workspaceFolders = vscode.workspace.workspaceFolders;
@@ -388,13 +575,25 @@ async function initializeWorkspace(): Promise<void> {
 	const aceDir = vscode.Uri.joinPath(workspaceFolders[0].uri, '.cursor', 'ace');
 	try {
 		await vscode.workspace.fs.createDirectory(aceDir);
-		await createCursorHooks();
-		vscode.window.showInformationMessage('ACE workspace initialized. MCP tools available in Cursor chat.');
-	} catch (error) {
-		await createCursorHooks();
-		vscode.window.showInformationMessage('ACE hooks created. MCP tools available in Cursor chat.');
+	} catch {
+		// Directory may already exist
 	}
+
+	// Create hooks, rules, and slash commands
+	await createCursorHooks();
+	await createCursorRules();
+	await createCursorCommands();
+
+	// Re-register MCP server in case config changed
+	await registerMcpServer(extensionContext);
+
+	vscode.window.showInformationMessage(
+		'ACE workspace initialized! Created: hooks, rules, slash commands (/ace-help, /ace-status, etc.)'
+	);
 }
+
+// Export for use from configure panel
+export { initializeWorkspace };
 
 /**
  * Manual search command - redirects to MCP tool

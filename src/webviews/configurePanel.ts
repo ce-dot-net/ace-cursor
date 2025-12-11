@@ -33,6 +33,9 @@ export class ConfigurePanel {
 							vscode.commands.executeCommand(message.commandId, ...(message.args || []));
 						}
 						return;
+					case 'initializeWorkspace':
+						vscode.commands.executeCommand('ace.initializeWorkspace');
+						return;
 					case 'close':
 						this._panel.dispose();
 						return;
@@ -505,6 +508,14 @@ export class ConfigurePanel {
 		<p>The AI calls <code>ace_get_playbook</code> before tasks and <code>ace_learn</code> after.</p>
 	</div>
 
+	<div class="mcp-info" style="margin-top: 15px; border-left-color: var(--vscode-charts-green);">
+		<h3>First Time Setup?</h3>
+		<p>After saving your configuration, initialize your workspace to create the required hooks and rules files.</p>
+		<button type="button" class="btn-secondary" id="initWorkspaceBtn" style="margin-top: 10px; flex: none; width: auto; padding: 8px 16px;">
+			Initialize Workspace
+		</button>
+	</div>
+
 	<script nonce="${nonce}">
 		const vscode = acquireVsCodeApi();
 		const orgsData = ${orgsJson};
@@ -522,6 +533,10 @@ export class ConfigurePanel {
 
 			document.getElementById('validateBtn').addEventListener('click', validateConnection);
 			document.getElementById('configForm').addEventListener('submit', handleSubmit);
+			document.getElementById('initWorkspaceBtn').addEventListener('click', () => {
+				vscode.postMessage({ command: 'initializeWorkspace' });
+				showStatus('Initializing workspace... Creating hooks and rules.', 'info');
+			});
 		})();
 
 		function onOrgChange() {

@@ -5,6 +5,16 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.6] - 2025-12-11
+
+### Added
+- "Initialize Workspace" button in Configure panel for first-time users
+- Initialize Workspace now creates Cursor slash commands (/ace-help, /ace-status, /ace-search, /ace-configure, /ace-bootstrap, /ace-learn)
+- Initialize Workspace now also creates Cursor rules file (.cursor/rules/ace-patterns.mdc)
+
+### Fixed
+- Initialize Workspace command now creates hooks, rules, AND slash commands
+
 ## [0.2.5] - 2025-12-11
 
 ### Fixed
