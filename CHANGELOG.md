@@ -5,6 +5,13 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.10] - 2025-12-11
+
+### Added
+- **Windows**: PowerShell hooks (.ps1) instead of bash scripts
+- Platform-aware hook creation: `.sh` on Unix, `.ps1` on Windows
+- hooks.json now uses `powershell -ExecutionPolicy Bypass -File` on Windows
+
 ## [0.2.9] - 2025-12-11
 
 ### Fixed

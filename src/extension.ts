@@ -164,15 +164,9 @@ async function registerMcpServer(context: vscode.ExtensionContext): Promise<void
 /**
  * Create Cursor hooks for learning backup (belt + suspenders)
  * The stop hook sends a followup_message to remind AI to call ace_learn
- * NOTE: Hooks use bash scripts, so skip on Windows (MCP tools are primary mechanism)
+ * Creates bash scripts on Unix, PowerShell scripts on Windows
  */
 async function createCursorHooks(): Promise<void> {
-	// Skip on Windows - bash scripts won't work
-	if (process.platform === 'win32') {
-		console.log('[ACE] Skipping hook creation on Windows (bash scripts not supported)');
-		return;
-	}
-
 	const workspaceFolders = vscode.workspace.workspaceFolders;
 	if (!workspaceFolders || workspaceFolders.length === 0) {
 		return;
@@ -181,6 +175,7 @@ async function createCursorHooks(): Promise<void> {
 	const workspaceRoot = workspaceFolders[0].uri.fsPath;
 	const cursorDir = path.join(workspaceRoot, '.cursor');
 	const scriptsDir = path.join(cursorDir, 'scripts');
+	const isWindows = process.platform === 'win32';
 
 	// Ensure directories exist
 	if (!fs.existsSync(cursorDir)) {
@@ -190,16 +185,24 @@ async function createCursorHooks(): Promise<void> {
 		fs.mkdirSync(scriptsDir, { recursive: true });
 	}
 
+	// Script extensions and commands differ by platform
+	const scriptExt = isWindows ? '.ps1' : '.sh';
+	const scriptCmd = isWindows ? 'powershell -ExecutionPolicy Bypass -File' : '';
+
 	// Create hooks.json
 	const hooksPath = path.join(cursorDir, 'hooks.json');
 	const hooksConfig = {
 		version: 1,
 		hooks: {
 			stop: [{
-				command: '.cursor/scripts/ace_stop_hook.sh'
+				command: isWindows
+					? `powershell -ExecutionPolicy Bypass -File .cursor/scripts/ace_stop_hook.ps1`
+					: '.cursor/scripts/ace_stop_hook.sh'
 			}],
 			afterFileEdit: [{
-				command: '.cursor/scripts/ace_track_edit.sh'
+				command: isWindows
+					? `powershell -ExecutionPolicy Bypass -File .cursor/scripts/ace_track_edit.ps1`
+					: '.cursor/scripts/ace_track_edit.sh'
 			}]
 		}
 	};
@@ -210,9 +213,48 @@ async function createCursorHooks(): Promise<void> {
 		console.log('[ACE] Created hooks.json');
 	}
 
-	// Create stop hook script (learning reminder)
-	const stopHookPath = path.join(scriptsDir, 'ace_stop_hook.sh');
-	const stopHookScript = `#!/bin/bash
+	if (isWindows) {
+		// Windows PowerShell scripts
+		const stopHookPath = path.join(scriptsDir, 'ace_stop_hook.ps1');
+		const stopHookScript = `# ACE Stop Hook - Reminds AI to capture learning
+# This hook fires when the AI session ends
+
+$input = $input | ConvertFrom-Json -ErrorAction SilentlyContinue
+$status = $input.status
+$loopCount = $input.loop_count
+
+if ($status -eq "completed" -and $loopCount -eq 0) {
+    Write-Output '{"followup_message": "If you completed substantial work, please call the ace_learn MCP tool to capture valuable patterns for future use."}'
+} else {
+    Write-Output '{}'
+}
+`;
+
+		if (!fs.existsSync(stopHookPath)) {
+			fs.writeFileSync(stopHookPath, stopHookScript);
+			console.log('[ACE] Created ace_stop_hook.ps1');
+		}
+
+		const trackEditPath = path.join(scriptsDir, 'ace_track_edit.ps1');
+		const trackEditScript = `# ACE Edit Tracking Hook - Builds trajectory for learning
+# This hook fires after each file edit
+
+$aceDir = ".cursor\\ace"
+if (-not (Test-Path $aceDir)) {
+    New-Item -ItemType Directory -Path $aceDir -Force | Out-Null
+}
+
+$input | Out-File -Append -FilePath "$aceDir\\session_trajectory.jsonl" -Encoding utf8
+`;
+
+		if (!fs.existsSync(trackEditPath)) {
+			fs.writeFileSync(trackEditPath, trackEditScript);
+			console.log('[ACE] Created ace_track_edit.ps1');
+		}
+	} else {
+		// Unix bash scripts
+		const stopHookPath = path.join(scriptsDir, 'ace_stop_hook.sh');
+		const stopHookScript = `#!/bin/bash
 # ACE Stop Hook - Reminds AI to capture learning
 # This hook fires when the AI session ends
 
@@ -229,14 +271,13 @@ else
 fi
 `;
 
-	if (!fs.existsSync(stopHookPath)) {
-		fs.writeFileSync(stopHookPath, stopHookScript, { mode: 0o755 });
-		console.log('[ACE] Created ace_stop_hook.sh');
-	}
+		if (!fs.existsSync(stopHookPath)) {
+			fs.writeFileSync(stopHookPath, stopHookScript, { mode: 0o755 });
+			console.log('[ACE] Created ace_stop_hook.sh');
+		}
 
-	// Create edit tracking hook script
-	const trackEditPath = path.join(scriptsDir, 'ace_track_edit.sh');
-	const trackEditScript = `#!/bin/bash
+		const trackEditPath = path.join(scriptsDir, 'ace_track_edit.sh');
+		const trackEditScript = `#!/bin/bash
 # ACE Edit Tracking Hook - Builds trajectory for learning
 # This hook fires after each file edit
 
@@ -251,9 +292,10 @@ echo "$input" >> .cursor/ace/session_trajectory.jsonl
 exit 0
 `;
 
-	if (!fs.existsSync(trackEditPath)) {
-		fs.writeFileSync(trackEditPath, trackEditScript, { mode: 0o755 });
-		console.log('[ACE] Created ace_track_edit.sh');
+		if (!fs.existsSync(trackEditPath)) {
+			fs.writeFileSync(trackEditPath, trackEditScript, { mode: 0o755 });
+			console.log('[ACE] Created ace_track_edit.sh');
+		}
 	}
 }
 
