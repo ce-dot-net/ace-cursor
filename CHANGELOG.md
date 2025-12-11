@@ -5,6 +5,12 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2025-12-11
+
+### Changed
+- Learning Cycle diagram converted to interactive Mermaid flowchart
+- Enhanced visual design with colored nodes and circular flow
+
 ## [0.2.1] - 2025-12-11
 
 ### Added
