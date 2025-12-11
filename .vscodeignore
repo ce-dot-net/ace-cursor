@@ -10,6 +10,7 @@ tsconfig.json
 .eslintrc.json
 *.md
 !README.md
+!CHANGELOG.md
 
 # Test files
 test/**
