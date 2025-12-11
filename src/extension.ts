@@ -164,8 +164,15 @@ async function registerMcpServer(context: vscode.ExtensionContext): Promise<void
 /**
  * Create Cursor hooks for learning backup (belt + suspenders)
  * The stop hook sends a followup_message to remind AI to call ace_learn
+ * NOTE: Hooks use bash scripts, so skip on Windows (MCP tools are primary mechanism)
  */
 async function createCursorHooks(): Promise<void> {
+	// Skip on Windows - bash scripts won't work
+	if (process.platform === 'win32') {
+		console.log('[ACE] Skipping hook creation on Windows (bash scripts not supported)');
+		return;
+	}
+
 	const workspaceFolders = vscode.workspace.workspaceFolders;
 	if (!workspaceFolders || workspaceFolders.length === 0) {
 		return;

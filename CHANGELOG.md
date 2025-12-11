@@ -5,6 +5,12 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.9] - 2025-12-11
+
+### Fixed
+- **Windows**: Skip bash hook creation (ace_track_edit.sh was opening in text editor instead of executing)
+- Windows users now rely on MCP tools + rules file (primary mechanism) instead of bash hooks
+
 ## [0.2.8] - 2025-12-11
 
 ### Fixed
