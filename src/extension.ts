@@ -15,7 +15,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { StatusPanel } from './webviews/statusPanel';
 import { ConfigurePanel } from './webviews/configurePanel';
-import { readContext, type AceContext } from './ace/context';
+import { readContext, readWorkspaceVersion, writeWorkspaceVersion, type AceContext } from './ace/context';
 
 let statusBarItem: vscode.StatusBarItem;
 let extensionContext: vscode.ExtensionContext;
@@ -77,6 +77,9 @@ export async function activate(context: vscode.ExtensionContext) {
 		updateStatusBar();
 
 		console.log('[ACE] Extension activated successfully');
+
+		// 5. Check workspace version and prompt for update if needed
+		await checkWorkspaceVersionAndPrompt(context);
 	} catch (error) {
 		console.error('[ACE] Activation error:', error);
 		vscode.window.showErrorMessage(`ACE extension activation failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -105,6 +108,58 @@ export async function activate(context: vscode.ExtensionContext) {
 
 export function getExtensionContext(): vscode.ExtensionContext | undefined {
 	return extensionContext;
+}
+
+/**
+ * Get the current extension version from package.json
+ */
+function getExtensionVersion(context: vscode.ExtensionContext): string {
+	try {
+		const packageJson = JSON.parse(
+			fs.readFileSync(path.join(context.extensionPath, 'package.json'), 'utf-8')
+		);
+		return packageJson.version || '0.0.0';
+	} catch {
+		return '0.0.0';
+	}
+}
+
+/**
+ * Check if workspace files need updating and prompt user
+ */
+async function checkWorkspaceVersionAndPrompt(context: vscode.ExtensionContext): Promise<void> {
+	const workspaceFolders = vscode.workspace.workspaceFolders;
+	if (!workspaceFolders || workspaceFolders.length === 0) {
+		return;
+	}
+
+	const extensionVersion = getExtensionVersion(context);
+	const workspaceVersion = readWorkspaceVersion();
+
+	// No workspace version means workspace was never initialized with ACE
+	if (!workspaceVersion) {
+		return; // Let them use Initialize Workspace manually
+	}
+
+	// Compare versions (simple string comparison, works for semver)
+	if (workspaceVersion !== extensionVersion) {
+		console.log(`[ACE] Workspace version (${workspaceVersion}) differs from extension version (${extensionVersion})`);
+
+		const selection = await vscode.window.showInformationMessage(
+			`ACE extension updated to v${extensionVersion}. Your workspace files (hooks, rules, commands) are from v${workspaceVersion}. Update now?`,
+			'Update Workspace',
+			'Remind Me Later',
+			'Skip'
+		);
+
+		if (selection === 'Update Workspace') {
+			await initializeWorkspace();
+		} else if (selection === 'Skip') {
+			// Write current version to skip future prompts for this version
+			writeWorkspaceVersion(extensionVersion);
+		}
+		// 'Remind Me Later' does nothing - will prompt again next session
+	}
 }
 
 /**
@@ -208,10 +263,36 @@ async function createCursorHooks(): Promise<void> {
 		}
 	};
 
-	// Only create if doesn't exist (don't overwrite user customizations)
+	// Create or update hooks.json if needed
+	let shouldWriteHooks = false;
 	if (!fs.existsSync(hooksPath)) {
+		shouldWriteHooks = true;
+		console.log('[ACE] Creating hooks.json');
+	} else {
+		// Check if existing hooks.json has wrong platform scripts
+		try {
+			const existingHooks = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
+			const stopCmd = existingHooks?.hooks?.stop?.[0]?.command || '';
+			// On Windows, if hooks point to .sh files, update to .ps1
+			if (isWindows && stopCmd.endsWith('.sh')) {
+				shouldWriteHooks = true;
+				console.log('[ACE] Updating hooks.json for Windows (was pointing to .sh scripts)');
+			}
+			// On Unix, if hooks point to .ps1 files, update to .sh
+			if (!isWindows && stopCmd.includes('.ps1')) {
+				shouldWriteHooks = true;
+				console.log('[ACE] Updating hooks.json for Unix (was pointing to .ps1 scripts)');
+			}
+		} catch {
+			// If we can't parse existing hooks, recreate
+			shouldWriteHooks = true;
+			console.log('[ACE] Recreating invalid hooks.json');
+		}
+	}
+
+	if (shouldWriteHooks) {
 		fs.writeFileSync(hooksPath, JSON.stringify(hooksConfig, null, 2));
-		console.log('[ACE] Created hooks.json');
+		console.log('[ACE] hooks.json ready');
 	}
 
 	if (isWindows) {
@@ -647,8 +728,12 @@ async function initializeWorkspace(): Promise<void> {
 	// Re-register MCP server in case config changed
 	await registerMcpServer(extensionContext);
 
+	// Save workspace version to track future updates
+	const extensionVersion = getExtensionVersion(extensionContext);
+	writeWorkspaceVersion(extensionVersion);
+
 	vscode.window.showInformationMessage(
-		'ACE workspace initialized! Created: hooks, rules, slash commands (/ace-help, /ace-status, etc.)'
+		`ACE workspace initialized (v${extensionVersion})! Created: hooks, rules, slash commands (/ace-help, /ace-status, etc.)`
 	);
 }
 

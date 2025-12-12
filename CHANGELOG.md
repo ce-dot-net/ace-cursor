@@ -5,6 +5,17 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.12] - 2025-12-12
+
+### Added
+- **Workspace Version Tracking**: Extension now stores version in `.cursor/ace/settings.json`
+- **Update Notification**: Popup prompts to update workspace files when extension is upgraded
+- Options: "Update Workspace", "Remind Me Later", "Skip"
+
+### Fixed
+- **Windows**: hooks.json now auto-updates to point to .ps1 scripts if previously created with .sh references
+- Fixes issue where upgrading from pre-0.2.10 on Windows left hooks pointing to wrong scripts
+
 ## [0.2.11] - 2025-12-11
 
 ### Fixed
