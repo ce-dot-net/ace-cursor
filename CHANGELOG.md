@@ -5,6 +5,26 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.13] - 2025-12-14
+
+### Added
+- **AI-Trail Support** (Closes [#2](https://github.com/ce-dot-net/ace-cursor/issues/2))
+  - Full trajectory tracking using Cursor's native hooks
+  - `afterMCPExecution`: Captures all MCP tool calls (tool name, input, output, duration)
+  - `afterShellExecution`: Captures terminal commands (command, output, duration)
+  - `afterAgentResponse`: Captures agent final responses
+  - `afterFileEdit`: Captures file edits (path, changes)
+  - `stop`: Enhanced with git context aggregation (branch, hash, trajectory summary)
+- New trajectory files in `.cursor/ace/`:
+  - `mcp_trajectory.jsonl` - MCP tool execution trace
+  - `shell_trajectory.jsonl` - Shell command trace
+  - `response_trajectory.jsonl` - Agent response trace
+  - `edit_trajectory.jsonl` - File edit trace
+
+### Changed
+- Stop hook now provides AI-Trail summary with git context for `ace_learn`
+- ~80% trajectory coverage vs Claude Code's ~95% (Cursor's built-in tools don't go through MCP hooks)
+
 ## [0.2.12] - 2025-12-12
 
 ### Added

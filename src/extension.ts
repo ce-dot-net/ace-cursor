@@ -218,8 +218,8 @@ async function registerMcpServer(context: vscode.ExtensionContext): Promise<void
 }
 
 /**
- * Create Cursor hooks for learning backup (belt + suspenders)
- * The stop hook sends a followup_message to remind AI to call ace_learn
+ * Create Cursor hooks for AI-Trail trajectory tracking
+ * Full trajectory capture: MCP tools, shell commands, agent responses, file edits
  * Creates bash scripts on Unix, PowerShell scripts on Windows
  */
 async function createCursorHooks(): Promise<void> {
@@ -241,50 +241,65 @@ async function createCursorHooks(): Promise<void> {
 		fs.mkdirSync(scriptsDir, { recursive: true });
 	}
 
-	// Script extensions and commands differ by platform
+	// Helper to get script command prefix for platform
+	const scriptPrefix = isWindows ? 'powershell -ExecutionPolicy Bypass -File ' : '';
 	const scriptExt = isWindows ? '.ps1' : '.sh';
-	const scriptCmd = isWindows ? 'powershell -ExecutionPolicy Bypass -File' : '';
 
-	// Create hooks.json
+	// Create hooks.json with FULL AI-Trail support
 	const hooksPath = path.join(cursorDir, 'hooks.json');
 	const hooksConfig = {
 		version: 1,
 		hooks: {
-			stop: [{
-				command: isWindows
-					? `powershell -ExecutionPolicy Bypass -File .cursor/scripts/ace_stop_hook.ps1`
-					: '.cursor/scripts/ace_stop_hook.sh'
+			// MCP tool execution tracking (PostToolUse equivalent)
+			afterMCPExecution: [{
+				command: `${scriptPrefix}.cursor/scripts/ace_track_mcp${scriptExt}`
 			}],
+			// Shell command tracking
+			afterShellExecution: [{
+				command: `${scriptPrefix}.cursor/scripts/ace_track_shell${scriptExt}`
+			}],
+			// Agent response tracking
+			afterAgentResponse: [{
+				command: `${scriptPrefix}.cursor/scripts/ace_track_response${scriptExt}`
+			}],
+			// File edit tracking (existing)
 			afterFileEdit: [{
-				command: isWindows
-					? `powershell -ExecutionPolicy Bypass -File .cursor/scripts/ace_track_edit.ps1`
-					: '.cursor/scripts/ace_track_edit.sh'
+				command: `${scriptPrefix}.cursor/scripts/ace_track_edit${scriptExt}`
+			}],
+			// Stop hook with git context aggregation
+			stop: [{
+				command: `${scriptPrefix}.cursor/scripts/ace_stop_hook${scriptExt}`
 			}]
 		}
 	};
 
-	// Create or update hooks.json if needed
+	// Always update hooks.json to ensure all AI-Trail hooks are present
 	let shouldWriteHooks = false;
 	if (!fs.existsSync(hooksPath)) {
 		shouldWriteHooks = true;
-		console.log('[ACE] Creating hooks.json');
+		console.log('[ACE] Creating hooks.json with AI-Trail support');
 	} else {
-		// Check if existing hooks.json has wrong platform scripts
 		try {
 			const existingHooks = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
+			// Check if AI-Trail hooks are missing
+			const hasAllHooks = existingHooks?.hooks?.afterMCPExecution &&
+			                    existingHooks?.hooks?.afterShellExecution &&
+			                    existingHooks?.hooks?.afterAgentResponse;
+			if (!hasAllHooks) {
+				shouldWriteHooks = true;
+				console.log('[ACE] Updating hooks.json with AI-Trail hooks');
+			}
+			// Also check platform compatibility
 			const stopCmd = existingHooks?.hooks?.stop?.[0]?.command || '';
-			// On Windows, if hooks point to .sh files, update to .ps1
 			if (isWindows && stopCmd.endsWith('.sh')) {
 				shouldWriteHooks = true;
-				console.log('[ACE] Updating hooks.json for Windows (was pointing to .sh scripts)');
+				console.log('[ACE] Updating hooks.json for Windows platform');
 			}
-			// On Unix, if hooks point to .ps1 files, update to .sh
 			if (!isWindows && stopCmd.includes('.ps1')) {
 				shouldWriteHooks = true;
-				console.log('[ACE] Updating hooks.json for Unix (was pointing to .ps1 scripts)');
+				console.log('[ACE] Updating hooks.json for Unix platform');
 			}
 		} catch {
-			// If we can't parse existing hooks, recreate
 			shouldWriteHooks = true;
 			console.log('[ACE] Recreating invalid hooks.json');
 		}
@@ -292,103 +307,237 @@ async function createCursorHooks(): Promise<void> {
 
 	if (shouldWriteHooks) {
 		fs.writeFileSync(hooksPath, JSON.stringify(hooksConfig, null, 2));
-		console.log('[ACE] hooks.json ready');
+		console.log('[ACE] hooks.json ready with AI-Trail support');
 	}
 
+	// Create all hook scripts for the current platform
 	if (isWindows) {
-		// Windows PowerShell scripts
-		const stopHookPath = path.join(scriptsDir, 'ace_stop_hook.ps1');
-		const stopHookScript = `# ACE Stop Hook - Reminds AI to capture learning
-# This hook fires when the AI session ends
-
-$input = $input | ConvertFrom-Json -ErrorAction SilentlyContinue
-$status = $input.status
-$loopCount = $input.loop_count
-
-if ($status -eq "completed" -and $loopCount -eq 0) {
-    Write-Output '{"followup_message": "If you completed substantial work, please call the ace_learn MCP tool to capture valuable patterns for future use."}'
-} else {
-    Write-Output '{}'
+		createWindowsHookScripts(scriptsDir);
+	} else {
+		createUnixHookScripts(scriptsDir);
+	}
 }
-`;
 
-		if (!fs.existsSync(stopHookPath)) {
-			fs.writeFileSync(stopHookPath, stopHookScript);
-			console.log('[ACE] Created ace_stop_hook.ps1');
-		}
-
-		const trackEditPath = path.join(scriptsDir, 'ace_track_edit.ps1');
-		const trackEditScript = `# ACE Edit Tracking Hook - Builds trajectory for learning
-# This hook fires after each file edit
+/**
+ * Create Windows PowerShell hook scripts for AI-Trail
+ */
+function createWindowsHookScripts(scriptsDir: string): void {
+	// MCP Execution Tracking (PostToolUse equivalent)
+	const mcpTrackPath = path.join(scriptsDir, 'ace_track_mcp.ps1');
+	const mcpTrackScript = `# ACE MCP Tracking Hook - Captures tool executions for AI-Trail
+# Input: tool_name, tool_input, result_json, duration
 
 $aceDir = ".cursor\\ace"
 if (-not (Test-Path $aceDir)) {
     New-Item -ItemType Directory -Path $aceDir -Force | Out-Null
 }
 
-$input | Out-File -Append -FilePath "$aceDir\\session_trajectory.jsonl" -Encoding utf8
+$input | Out-File -Append -FilePath "$aceDir\\mcp_trajectory.jsonl" -Encoding utf8
 `;
+	if (!fs.existsSync(mcpTrackPath)) {
+		fs.writeFileSync(mcpTrackPath, mcpTrackScript);
+		console.log('[ACE] Created ace_track_mcp.ps1');
+	}
 
-		if (!fs.existsSync(trackEditPath)) {
-			fs.writeFileSync(trackEditPath, trackEditScript);
-			console.log('[ACE] Created ace_track_edit.ps1');
-		}
-	} else {
-		// Unix bash scripts
-		const stopHookPath = path.join(scriptsDir, 'ace_stop_hook.sh');
-		const stopHookScript = `#!/bin/bash
-# ACE Stop Hook - Reminds AI to capture learning
-# This hook fires when the AI session ends
+	// Shell Execution Tracking
+	const shellTrackPath = path.join(scriptsDir, 'ace_track_shell.ps1');
+	const shellTrackScript = `# ACE Shell Tracking Hook - Captures terminal commands for AI-Trail
+# Input: command, output, duration
+
+$aceDir = ".cursor\\ace"
+if (-not (Test-Path $aceDir)) {
+    New-Item -ItemType Directory -Path $aceDir -Force | Out-Null
+}
+
+$input | Out-File -Append -FilePath "$aceDir\\shell_trajectory.jsonl" -Encoding utf8
+`;
+	if (!fs.existsSync(shellTrackPath)) {
+		fs.writeFileSync(shellTrackPath, shellTrackScript);
+		console.log('[ACE] Created ace_track_shell.ps1');
+	}
+
+	// Agent Response Tracking
+	const responseTrackPath = path.join(scriptsDir, 'ace_track_response.ps1');
+	const responseTrackScript = `# ACE Response Tracking Hook - Captures agent responses for AI-Trail
+# Input: text (assistant final text)
+
+$aceDir = ".cursor\\ace"
+if (-not (Test-Path $aceDir)) {
+    New-Item -ItemType Directory -Path $aceDir -Force | Out-Null
+}
+
+$input | Out-File -Append -FilePath "$aceDir\\response_trajectory.jsonl" -Encoding utf8
+`;
+	if (!fs.existsSync(responseTrackPath)) {
+		fs.writeFileSync(responseTrackPath, responseTrackScript);
+		console.log('[ACE] Created ace_track_response.ps1');
+	}
+
+	// File Edit Tracking (existing, unchanged)
+	const editTrackPath = path.join(scriptsDir, 'ace_track_edit.ps1');
+	const editTrackScript = `# ACE Edit Tracking Hook - Captures file edits for AI-Trail
+# Input: file_path, edits[]
+
+$aceDir = ".cursor\\ace"
+if (-not (Test-Path $aceDir)) {
+    New-Item -ItemType Directory -Path $aceDir -Force | Out-Null
+}
+
+$input | Out-File -Append -FilePath "$aceDir\\edit_trajectory.jsonl" -Encoding utf8
+`;
+	if (!fs.existsSync(editTrackPath)) {
+		fs.writeFileSync(editTrackPath, editTrackScript);
+		console.log('[ACE] Created ace_track_edit.ps1');
+	}
+
+	// Stop Hook with Git Context Aggregation
+	const stopHookPath = path.join(scriptsDir, 'ace_stop_hook.ps1');
+	const stopHookScript = `# ACE Stop Hook - Aggregates AI-Trail trajectory with git context
+# Input: status, loop_count
+
+$inputJson = [Console]::In.ReadToEnd()
+$data = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
+$status = $data.status
+$loopCount = $data.loop_count
+
+if ($status -eq "completed" -and $loopCount -eq 0) {
+    # Capture git context
+    $gitBranch = git rev-parse --abbrev-ref HEAD 2>$null
+    if (-not $gitBranch) { $gitBranch = "unknown" }
+    $gitHash = git rev-parse --short HEAD 2>$null
+    if (-not $gitHash) { $gitHash = "unknown" }
+
+    # Count trajectory entries
+    $aceDir = ".cursor\\ace"
+    $mcpCount = 0; $shellCount = 0; $editCount = 0; $responseCount = 0
+    if (Test-Path "$aceDir\\mcp_trajectory.jsonl") {
+        $mcpCount = (Get-Content "$aceDir\\mcp_trajectory.jsonl" | Measure-Object -Line).Lines
+    }
+    if (Test-Path "$aceDir\\shell_trajectory.jsonl") {
+        $shellCount = (Get-Content "$aceDir\\shell_trajectory.jsonl" | Measure-Object -Line).Lines
+    }
+    if (Test-Path "$aceDir\\edit_trajectory.jsonl") {
+        $editCount = (Get-Content "$aceDir\\edit_trajectory.jsonl" | Measure-Object -Line).Lines
+    }
+    if (Test-Path "$aceDir\\response_trajectory.jsonl") {
+        $responseCount = (Get-Content "$aceDir\\response_trajectory.jsonl" | Measure-Object -Line).Lines
+    }
+
+    $summary = "MCP:$mcpCount Shell:$shellCount Edits:$editCount Responses:$responseCount"
+    $msg = "Session complete. AI-Trail: $summary. Git: $gitBranch ($gitHash). Call ace_learn to capture patterns."
+    Write-Output "{\`"followup_message\`": \`"$msg\`"}"
+} else {
+    Write-Output '{}'
+}
+`;
+	// Always update stop hook to get git context feature
+	fs.writeFileSync(stopHookPath, stopHookScript);
+	console.log('[ACE] Updated ace_stop_hook.ps1 with git context');
+}
+
+/**
+ * Create Unix bash hook scripts for AI-Trail
+ */
+function createUnixHookScripts(scriptsDir: string): void {
+	// MCP Execution Tracking (PostToolUse equivalent)
+	const mcpTrackPath = path.join(scriptsDir, 'ace_track_mcp.sh');
+	const mcpTrackScript = `#!/bin/bash
+# ACE MCP Tracking Hook - Captures tool executions for AI-Trail
+# Input: tool_name, tool_input, result_json, duration
+
+input=$(cat)
+mkdir -p .cursor/ace
+echo "$input" >> .cursor/ace/mcp_trajectory.jsonl
+exit 0
+`;
+	if (!fs.existsSync(mcpTrackPath)) {
+		fs.writeFileSync(mcpTrackPath, mcpTrackScript, { mode: 0o755 });
+		console.log('[ACE] Created ace_track_mcp.sh');
+	}
+
+	// Shell Execution Tracking
+	const shellTrackPath = path.join(scriptsDir, 'ace_track_shell.sh');
+	const shellTrackScript = `#!/bin/bash
+# ACE Shell Tracking Hook - Captures terminal commands for AI-Trail
+# Input: command, output, duration
+
+input=$(cat)
+mkdir -p .cursor/ace
+echo "$input" >> .cursor/ace/shell_trajectory.jsonl
+exit 0
+`;
+	if (!fs.existsSync(shellTrackPath)) {
+		fs.writeFileSync(shellTrackPath, shellTrackScript, { mode: 0o755 });
+		console.log('[ACE] Created ace_track_shell.sh');
+	}
+
+	// Agent Response Tracking
+	const responseTrackPath = path.join(scriptsDir, 'ace_track_response.sh');
+	const responseTrackScript = `#!/bin/bash
+# ACE Response Tracking Hook - Captures agent responses for AI-Trail
+# Input: text (assistant final text)
+
+input=$(cat)
+mkdir -p .cursor/ace
+echo "$input" >> .cursor/ace/response_trajectory.jsonl
+exit 0
+`;
+	if (!fs.existsSync(responseTrackPath)) {
+		fs.writeFileSync(responseTrackPath, responseTrackScript, { mode: 0o755 });
+		console.log('[ACE] Created ace_track_response.sh');
+	}
+
+	// File Edit Tracking
+	const editTrackPath = path.join(scriptsDir, 'ace_track_edit.sh');
+	const editTrackScript = `#!/bin/bash
+# ACE Edit Tracking Hook - Captures file edits for AI-Trail
+# Input: file_path, edits[]
+
+input=$(cat)
+mkdir -p .cursor/ace
+echo "$input" >> .cursor/ace/edit_trajectory.jsonl
+exit 0
+`;
+	if (!fs.existsSync(editTrackPath)) {
+		fs.writeFileSync(editTrackPath, editTrackScript, { mode: 0o755 });
+		console.log('[ACE] Created ace_track_edit.sh');
+	}
+
+	// Stop Hook with Git Context Aggregation
+	const stopHookPath = path.join(scriptsDir, 'ace_stop_hook.sh');
+	const stopHookScript = `#!/bin/bash
+# ACE Stop Hook - Aggregates AI-Trail trajectory with git context
+# Input: status, loop_count
 
 input=$(cat)
 status=$(echo "$input" | jq -r '.status // empty')
 loop_count=$(echo "$input" | jq -r '.loop_count // 0')
 
-# Only remind once (loop_count=0), and only on completed tasks
+# Only process once on completed tasks
 if [ "$status" = "completed" ] && [ "$loop_count" = "0" ]; then
-  # Remind AI to call ace_learn if it didn't already
-  echo '{"followup_message": "If you completed substantial work, please call the ace_learn MCP tool to capture valuable patterns for future use."}'
+  # Capture git context
+  git_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+  git_hash=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+
+  # Count trajectory entries
+  ace_dir=".cursor/ace"
+  mcp_count=$(wc -l < "$ace_dir/mcp_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
+  shell_count=$(wc -l < "$ace_dir/shell_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
+  edit_count=$(wc -l < "$ace_dir/edit_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
+  response_count=$(wc -l < "$ace_dir/response_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
+
+  # Build summary
+  summary="MCP:$mcp_count Shell:$shell_count Edits:$edit_count Responses:$response_count"
+  msg="Session complete. AI-Trail: $summary. Git: $git_branch ($git_hash). Call ace_learn to capture patterns."
+
+  echo "{\\\"followup_message\\\": \\\"$msg\\\"}"
 else
   echo '{}'
 fi
 `;
-
-		if (!fs.existsSync(stopHookPath)) {
-			// Only set Unix permissions on non-Windows (Windows ignores mode)
-			if (process.platform !== 'win32') {
-				fs.writeFileSync(stopHookPath, stopHookScript, { mode: 0o755 });
-			} else {
-				fs.writeFileSync(stopHookPath, stopHookScript);
-			}
-			console.log('[ACE] Created ace_stop_hook.sh');
-		}
-
-		const trackEditPath = path.join(scriptsDir, 'ace_track_edit.sh');
-		const trackEditScript = `#!/bin/bash
-# ACE Edit Tracking Hook - Builds trajectory for learning
-# This hook fires after each file edit
-
-input=$(cat)
-
-# Ensure ace directory exists
-mkdir -p .cursor/ace
-
-# Append to session trajectory file
-echo "$input" >> .cursor/ace/session_trajectory.jsonl
-
-exit 0
-`;
-
-		if (!fs.existsSync(trackEditPath)) {
-			// Only set Unix permissions on non-Windows (Windows ignores mode)
-			if (process.platform !== 'win32') {
-				fs.writeFileSync(trackEditPath, trackEditScript, { mode: 0o755 });
-			} else {
-				fs.writeFileSync(trackEditPath, trackEditScript);
-			}
-			console.log('[ACE] Created ace_track_edit.sh');
-		}
-	}
+	// Always update stop hook to get git context feature
+	fs.writeFileSync(stopHookPath, stopHookScript, { mode: 0o755 });
+	console.log('[ACE] Updated ace_stop_hook.sh with git context');
 }
 
 /**
