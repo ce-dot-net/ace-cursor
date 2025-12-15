@@ -165,6 +165,57 @@ suite('ACE Extension Test Suite', () => {
 		}
 	});
 
+	test('Hooks JSON should have all AI-Trail hooks if exists', () => {
+		const workspaceFolders = vscode.workspace.workspaceFolders;
+		if (workspaceFolders && workspaceFolders.length > 0) {
+			const hooksPath = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'hooks.json');
+			if (fs.existsSync(hooksPath)) {
+				const hooks = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
+				// AI-Trail requires all these hooks
+				const requiredHooks = [
+					'afterMCPExecution',
+					'afterShellExecution',
+					'afterAgentResponse',
+					'afterFileEdit',
+					'stop'
+				];
+				for (const hook of requiredHooks) {
+					assert.ok(
+						Array.isArray(hooks.hooks[hook]),
+						`hooks.${hook} should be an array`
+					);
+					assert.ok(
+						hooks.hooks[hook].length > 0,
+						`hooks.${hook} should have at least one entry`
+					);
+					assert.ok(
+						hooks.hooks[hook][0].command,
+						`hooks.${hook}[0] should have command property`
+					);
+				}
+			}
+		}
+	});
+
+	test('Hooks should reference correct script extension for platform', () => {
+		const workspaceFolders = vscode.workspace.workspaceFolders;
+		if (workspaceFolders && workspaceFolders.length > 0) {
+			const hooksPath = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'hooks.json');
+			if (fs.existsSync(hooksPath)) {
+				const hooks = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
+				const isWindows = process.platform === 'win32';
+				const expectedExt = isWindows ? '.ps1' : '.sh';
+
+				// Check stop hook command has correct extension
+				const stopCmd = hooks.hooks?.stop?.[0]?.command || '';
+				assert.ok(
+					stopCmd.includes(expectedExt),
+					`Stop hook should use ${expectedExt} extension on ${process.platform}`
+				);
+			}
+		}
+	});
+
 	test('Hook scripts should be executable if exist', () => {
 		const workspaceFolders = vscode.workspace.workspaceFolders;
 		if (workspaceFolders && workspaceFolders.length > 0) {
@@ -182,6 +233,67 @@ suite('ACE Extension Test Suite', () => {
 				if (fs.existsSync(trackEdit)) {
 					const stats = fs.statSync(trackEdit);
 					assert.ok((stats.mode & 0o100) !== 0, 'ace_track_edit.sh should be executable');
+				}
+			}
+		}
+	});
+
+	test('All AI-Trail hook scripts should exist if hooks.json exists', () => {
+		const workspaceFolders = vscode.workspace.workspaceFolders;
+		if (workspaceFolders && workspaceFolders.length > 0) {
+			const hooksPath = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'hooks.json');
+			const scriptsDir = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'scripts');
+
+			if (fs.existsSync(hooksPath) && fs.existsSync(scriptsDir)) {
+				const isWindows = process.platform === 'win32';
+				const ext = isWindows ? '.ps1' : '.sh';
+
+				const requiredScripts = [
+					`ace_track_mcp${ext}`,
+					`ace_track_shell${ext}`,
+					`ace_track_response${ext}`,
+					`ace_track_edit${ext}`,
+					`ace_stop_hook${ext}`
+				];
+
+				for (const script of requiredScripts) {
+					const scriptPath = path.join(scriptsDir, script);
+					assert.ok(
+						fs.existsSync(scriptPath),
+						`Script ${script} should exist`
+					);
+				}
+			}
+		}
+	});
+
+	test('Unix hook scripts should be executable', function() {
+		if (process.platform === 'win32') {
+			this.skip(); // Windows doesn't use Unix permissions
+			return;
+		}
+
+		const workspaceFolders = vscode.workspace.workspaceFolders;
+		if (workspaceFolders && workspaceFolders.length > 0) {
+			const scriptsDir = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'scripts');
+			if (fs.existsSync(scriptsDir)) {
+				const scripts = [
+					'ace_track_mcp.sh',
+					'ace_track_shell.sh',
+					'ace_track_response.sh',
+					'ace_track_edit.sh',
+					'ace_stop_hook.sh'
+				];
+
+				for (const script of scripts) {
+					const scriptPath = path.join(scriptsDir, script);
+					if (fs.existsSync(scriptPath)) {
+						const stats = fs.statSync(scriptPath);
+						assert.ok(
+							(stats.mode & 0o100) !== 0,
+							`${script} should be executable`
+						);
+					}
 				}
 			}
 		}
