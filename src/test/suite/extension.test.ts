@@ -3,7 +3,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
-import { readContext, writeContext, type AceContext } from '../../ace/context';
+import { readContext, writeContext, pickWorkspaceFolder, getTargetFolder, isMultiRootWorkspace, getWorkspaceRoot, type AceContext } from '../../ace/context';
 
 suite('ACE Extension Test Suite', () => {
 	vscode.window.showInformationMessage('Start all tests.');
@@ -82,6 +82,73 @@ suite('ACE Extension Test Suite', () => {
 		assert.ok(read, 'Context should be readable');
 		assert.strictEqual(read?.projectId, 'project-only', 'projectId should match');
 		assert.strictEqual(read?.orgId, undefined, 'orgId should be undefined when not set');
+	});
+
+	// ============================================
+	// MULTI-ROOT WORKSPACE TESTS
+	// ============================================
+
+	test('isMultiRootWorkspace should return correct value', () => {
+		const folders = vscode.workspace.workspaceFolders;
+		const expected = (folders?.length ?? 0) > 1;
+		assert.strictEqual(isMultiRootWorkspace(), expected, 'isMultiRootWorkspace should match folder count');
+	});
+
+	test('getWorkspaceRoot should return null for multi-root without folder param', () => {
+		const folders = vscode.workspace.workspaceFolders;
+		if (!folders || folders.length <= 1) {
+			// Single folder or no workspace - should return fsPath or null
+			const root = getWorkspaceRoot();
+			if (folders && folders.length === 1) {
+				assert.strictEqual(root, folders[0].uri.fsPath, 'Should return first folder path for single workspace');
+			} else {
+				assert.strictEqual(root, null, 'Should return null when no workspace');
+			}
+		} else {
+			// Multi-root workspace without folder param should return null
+			const root = getWorkspaceRoot();
+			assert.strictEqual(root, null, 'Should return null for multi-root without folder param');
+		}
+	});
+
+	test('getWorkspaceRoot should return folder path when folder provided', () => {
+		const folders = vscode.workspace.workspaceFolders;
+		if (folders && folders.length > 0) {
+			const folder = folders[0];
+			const root = getWorkspaceRoot(folder);
+			assert.strictEqual(root, folder.uri.fsPath, 'Should return folder fsPath when folder provided');
+		}
+	});
+
+	test('pickWorkspaceFolder should be an async function', () => {
+		assert.ok(typeof pickWorkspaceFolder === 'function', 'pickWorkspaceFolder should be a function');
+		// Verify it returns a promise
+		const result = pickWorkspaceFolder();
+		assert.ok(result instanceof Promise, 'pickWorkspaceFolder should return a promise');
+	});
+
+	test('getTargetFolder should be an async function', () => {
+		assert.ok(typeof getTargetFolder === 'function', 'getTargetFolder should be a function');
+		// Verify it returns a promise
+		const result = getTargetFolder();
+		assert.ok(result instanceof Promise, 'getTargetFolder should return a promise');
+	});
+
+	test('Context functions should accept folder parameter', function() {
+		const workspaceFolders = vscode.workspace.workspaceFolders;
+		if (!workspaceFolders || workspaceFolders.length === 0) {
+			this.skip(); // Skip when no workspace
+			return;
+		}
+		const folder = workspaceFolders[0];
+		const testCtx: AceContext = {
+			orgId: 'folder-test-org',
+			projectId: 'folder-test-project'
+		};
+		writeContext(testCtx, folder);
+		const read = readContext(folder);
+		assert.ok(read, 'Context should be readable with folder param');
+		assert.strictEqual(read?.projectId, 'folder-test-project', 'projectId should match');
 	});
 
 	// ============================================
