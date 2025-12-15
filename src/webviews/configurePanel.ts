@@ -7,7 +7,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
-import { ensureSettingsDir, writeContext } from '../ace/context';
+import { ensureSettingsDir, writeContext, pickWorkspaceFolder, isMultiRootWorkspace, readContext } from '../ace/context';
 
 export class ConfigurePanel {
 	public static currentPanel: ConfigurePanel | undefined;
@@ -106,8 +106,7 @@ export class ConfigurePanel {
 		try {
 			const config = JSON.parse(fs.readFileSync(globalConfigPath, 'utf-8'));
 
-			// Load workspace context
-			const { readContext } = require('../ace/context');
+			// Load workspace context (uses first folder for initial load - user can switch)
 			const ctx = readContext();
 
 			return {
@@ -232,19 +231,35 @@ export class ConfigurePanel {
 			}
 
 			// Save project context to workspace
-			const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-			if (workspaceRoot) {
-				ensureSettingsDir();
-				writeContext({ orgId: data.orgId, projectId: data.projectId });
+			// For multi-root workspaces, prompt user to select folder
+			let targetFolder: vscode.WorkspaceFolder | undefined;
+			if (isMultiRootWorkspace()) {
+				targetFolder = await pickWorkspaceFolder('Select folder to save ACE configuration');
+				if (!targetFolder) {
+					this._panel.webview.postMessage({
+						command: 'saveResult',
+						success: false,
+						message: 'No folder selected for workspace configuration'
+					});
+					return;
+				}
+			} else {
+				targetFolder = vscode.workspace.workspaceFolders?.[0];
 			}
 
+			if (targetFolder) {
+				ensureSettingsDir(targetFolder);
+				writeContext({ orgId: data.orgId, projectId: data.projectId }, targetFolder);
+			}
+
+			const folderInfo = isMultiRootWorkspace() && targetFolder ? ` for "${targetFolder.name}"` : '';
 			this._panel.webview.postMessage({
 				command: 'saveResult',
 				success: true,
-				message: `Configuration saved to ${configPath}`
+				message: `Configuration saved${folderInfo}`
 			});
 
-			vscode.window.showInformationMessage(`ACE configuration saved. MCP server will use these settings.`);
+			vscode.window.showInformationMessage(`ACE configuration saved${folderInfo}. MCP server will use these settings.`);
 		} catch (error) {
 			this._panel.webview.postMessage({
 				command: 'saveResult',

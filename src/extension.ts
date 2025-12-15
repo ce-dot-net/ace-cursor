@@ -15,7 +15,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { StatusPanel } from './webviews/statusPanel';
 import { ConfigurePanel } from './webviews/configurePanel';
-import { readContext, readWorkspaceVersion, writeWorkspaceVersion, type AceContext } from './ace/context';
+import { readContext, readWorkspaceVersion, writeWorkspaceVersion, pickWorkspaceFolder, getTargetFolder, isMultiRootWorkspace, type AceContext } from './ace/context';
 
 let statusBarItem: vscode.StatusBarItem;
 let extensionContext: vscode.ExtensionContext;
@@ -126,6 +126,7 @@ function getExtensionVersion(context: vscode.ExtensionContext): string {
 
 /**
  * Check if workspace files need updating and prompt user
+ * For multi-root workspaces, checks each folder that has ACE initialized
  */
 async function checkWorkspaceVersionAndPrompt(context: vscode.ExtensionContext): Promise<void> {
 	const workspaceFolders = vscode.workspace.workspaceFolders;
@@ -134,31 +135,47 @@ async function checkWorkspaceVersionAndPrompt(context: vscode.ExtensionContext):
 	}
 
 	const extensionVersion = getExtensionVersion(context);
-	const workspaceVersion = readWorkspaceVersion();
 
-	// No workspace version means workspace was never initialized with ACE
-	if (!workspaceVersion) {
-		return; // Let them use Initialize Workspace manually
-	}
+	// Check each folder for ACE initialization
+	for (const folder of workspaceFolders) {
+		const workspaceVersion = readWorkspaceVersion(folder);
 
-	// Compare versions (simple string comparison, works for semver)
-	if (workspaceVersion !== extensionVersion) {
-		console.log(`[ACE] Workspace version (${workspaceVersion}) differs from extension version (${extensionVersion})`);
-
-		const selection = await vscode.window.showInformationMessage(
-			`ACE extension updated to v${extensionVersion}. Your workspace files (hooks, rules, commands) are from v${workspaceVersion}. Update now?`,
-			'Update Workspace',
-			'Remind Me Later',
-			'Skip'
-		);
-
-		if (selection === 'Update Workspace') {
-			await initializeWorkspace();
-		} else if (selection === 'Skip') {
-			// Write current version to skip future prompts for this version
-			writeWorkspaceVersion(extensionVersion);
+		// No workspace version means this folder was never initialized with ACE
+		if (!workspaceVersion) {
+			continue; // Let them use Initialize Workspace manually
 		}
-		// 'Remind Me Later' does nothing - will prompt again next session
+
+		// Compare versions (simple string comparison, works for semver)
+		if (workspaceVersion !== extensionVersion) {
+			const folderName = workspaceFolders.length > 1 ? ` (${folder.name})` : '';
+			console.log(`[ACE] Workspace version${folderName} (${workspaceVersion}) differs from extension version (${extensionVersion})`);
+
+			const selection = await vscode.window.showInformationMessage(
+				`ACE extension updated to v${extensionVersion}. Your workspace files${folderName} (hooks, rules, commands) are from v${workspaceVersion}. Update now?`,
+				'Update Workspace',
+				'Remind Me Later',
+				'Skip'
+			);
+
+			if (selection === 'Update Workspace') {
+				// Update this specific folder
+				const aceDir = vscode.Uri.joinPath(folder.uri, '.cursor', 'ace');
+				try {
+					await vscode.workspace.fs.createDirectory(aceDir);
+				} catch {
+					// Directory may already exist
+				}
+				await createCursorHooks(folder);
+				await createCursorRules(folder);
+				await createCursorCommands(folder);
+				writeWorkspaceVersion(extensionVersion, folder);
+				vscode.window.showInformationMessage(`ACE workspace${folderName} updated to v${extensionVersion}!`);
+			} else if (selection === 'Skip') {
+				// Write current version to skip future prompts for this version
+				writeWorkspaceVersion(extensionVersion, folder);
+			}
+			// 'Remind Me Later' does nothing - will prompt again next session
+		}
 	}
 }
 
@@ -222,13 +239,13 @@ async function registerMcpServer(context: vscode.ExtensionContext): Promise<void
  * Full trajectory capture: MCP tools, shell commands, agent responses, file edits
  * Creates bash scripts on Unix, PowerShell scripts on Windows
  */
-async function createCursorHooks(): Promise<void> {
-	const workspaceFolders = vscode.workspace.workspaceFolders;
-	if (!workspaceFolders || workspaceFolders.length === 0) {
+async function createCursorHooks(folder?: vscode.WorkspaceFolder): Promise<void> {
+	const targetFolder = folder || await getTargetFolder('Select folder for ACE hooks');
+	if (!targetFolder) {
 		return;
 	}
 
-	const workspaceRoot = workspaceFolders[0].uri.fsPath;
+	const workspaceRoot = targetFolder.uri.fsPath;
 	const cursorDir = path.join(workspaceRoot, '.cursor');
 	const scriptsDir = path.join(cursorDir, 'scripts');
 	const isWindows = process.platform === 'win32';
@@ -544,13 +561,13 @@ fi
  * Create Cursor slash commands for ACE
  * These are .md files in .cursor/commands/ that become /ace-* commands in chat
  */
-async function createCursorCommands(): Promise<void> {
-	const workspaceFolders = vscode.workspace.workspaceFolders;
-	if (!workspaceFolders || workspaceFolders.length === 0) {
+async function createCursorCommands(folder?: vscode.WorkspaceFolder): Promise<void> {
+	const targetFolder = folder || await getTargetFolder('Select folder for ACE commands');
+	if (!targetFolder) {
 		return;
 	}
 
-	const workspaceRoot = workspaceFolders[0].uri.fsPath;
+	const workspaceRoot = targetFolder.uri.fsPath;
 	const commandsDir = path.join(workspaceRoot, '.cursor', 'commands');
 
 	// Ensure commands directory exists
@@ -731,13 +748,13 @@ Show all available ACE commands and usage.
  * Create Cursor Rules file to instruct AI to use ACE tools
  * This is the "belt + suspenders" approach - rules ensure AI calls ACE tools
  */
-async function createCursorRules(): Promise<void> {
-	const workspaceFolders = vscode.workspace.workspaceFolders;
-	if (!workspaceFolders || workspaceFolders.length === 0) {
+async function createCursorRules(folder?: vscode.WorkspaceFolder): Promise<void> {
+	const targetFolder = folder || await getTargetFolder('Select folder for ACE rules');
+	if (!targetFolder) {
 		return;
 	}
 
-	const workspaceRoot = workspaceFolders[0].uri.fsPath;
+	const workspaceRoot = targetFolder.uri.fsPath;
 	const rulesDir = path.join(workspaceRoot, '.cursor', 'rules');
 
 	// Ensure rules directory exists
@@ -791,16 +808,17 @@ This is NOT optional. Call the tool, review patterns, THEN proceed.
 
 /**
  * Get ACE configuration from settings and config files
+ * For multi-root workspaces, checks the specified folder
  */
-function getAceConfig(): { serverUrl?: string; apiToken?: string; projectId?: string; orgId?: string } | null {
+function getAceConfig(folder?: vscode.WorkspaceFolder): { serverUrl?: string; apiToken?: string; projectId?: string; orgId?: string } | null {
 	// Try to read from VS Code settings first
 	const config = vscode.workspace.getConfiguration('ace');
 	const serverUrl = config.get<string>('serverUrl');
 	const orgId = config.get<string>('orgId');
 	const projectId = config.get<string>('projectId');
 
-	// Try to read from context (workspace settings)
-	const ctx = readContext();
+	// Try to read from context (workspace settings for the specific folder)
+	const ctx = readContext(folder);
 
 	// Try to read from global config
 	let globalConfig: any = null;
@@ -854,35 +872,37 @@ function updateStatusBar(): void {
 
 /**
  * Initialize workspace - creates .cursor/ace directory, hooks, and rules
+ * For multi-root workspaces, prompts user to select a folder
  */
 async function initializeWorkspace(): Promise<void> {
-	const workspaceFolders = vscode.workspace.workspaceFolders;
-	if (!workspaceFolders || workspaceFolders.length === 0) {
-		vscode.window.showWarningMessage('No workspace folder open.');
+	const folder = await pickWorkspaceFolder('Select folder to initialize ACE');
+	if (!folder) {
+		vscode.window.showWarningMessage('No workspace folder selected.');
 		return;
 	}
 
-	const aceDir = vscode.Uri.joinPath(workspaceFolders[0].uri, '.cursor', 'ace');
+	const aceDir = vscode.Uri.joinPath(folder.uri, '.cursor', 'ace');
 	try {
 		await vscode.workspace.fs.createDirectory(aceDir);
 	} catch {
 		// Directory may already exist
 	}
 
-	// Create hooks, rules, and slash commands
-	await createCursorHooks();
-	await createCursorRules();
-	await createCursorCommands();
+	// Create hooks, rules, and slash commands for selected folder
+	await createCursorHooks(folder);
+	await createCursorRules(folder);
+	await createCursorCommands(folder);
 
 	// Re-register MCP server in case config changed
 	await registerMcpServer(extensionContext);
 
 	// Save workspace version to track future updates
 	const extensionVersion = getExtensionVersion(extensionContext);
-	writeWorkspaceVersion(extensionVersion);
+	writeWorkspaceVersion(extensionVersion, folder);
 
+	const folderInfo = isMultiRootWorkspace() ? ` in "${folder.name}"` : '';
 	vscode.window.showInformationMessage(
-		`ACE workspace initialized (v${extensionVersion})! Created: hooks, rules, slash commands (/ace-help, /ace-status, etc.)`
+		`ACE workspace initialized${folderInfo} (v${extensionVersion})! Created: hooks, rules, slash commands (/ace-help, /ace-status, etc.)`
 	);
 }
 
@@ -964,11 +984,15 @@ async function runLearnCommand(): Promise<void> {
 
 /**
  * Diagnostic command - checks why ACE search might not be triggering
+ * For multi-root workspaces, checks the selected folder
  */
 async function runDiagnosticCommand(): Promise<void> {
 	const diagnostics: string[] = [];
 	const issues: string[] = [];
 	const fixes: string[] = [];
+
+	// Get target folder for diagnostics
+	const targetFolder = await getTargetFolder('Select folder to diagnose');
 
 	// 1. Check Cursor MCP API availability
 	const cursorApi = getCursorApi();
@@ -983,7 +1007,7 @@ async function runDiagnosticCommand(): Promise<void> {
 	}
 
 	// 2. Check configuration
-	const aceConfig = getAceConfig();
+	const aceConfig = getAceConfig(targetFolder);
 	if (!aceConfig) {
 		issues.push('❌ ACE not configured');
 		diagnostics.push('• Configuration: MISSING');
@@ -1014,9 +1038,8 @@ async function runDiagnosticCommand(): Promise<void> {
 	}
 
 	// 3. Check rules file
-	const workspaceFolders = vscode.workspace.workspaceFolders;
-	if (workspaceFolders && workspaceFolders.length > 0) {
-		const rulesPath = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'rules', 'ace-patterns.mdc');
+	if (targetFolder) {
+		const rulesPath = path.join(targetFolder.uri.fsPath, '.cursor', 'rules', 'ace-patterns.mdc');
 		if (fs.existsSync(rulesPath)) {
 			diagnostics.push('✅ Cursor Rules: Found');
 			const rulesContent = fs.readFileSync(rulesPath, 'utf-8');
@@ -1033,8 +1056,8 @@ async function runDiagnosticCommand(): Promise<void> {
 	}
 
 	// 4. Check hooks
-	if (workspaceFolders && workspaceFolders.length > 0) {
-		const hooksPath = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'hooks.json');
+	if (targetFolder) {
+		const hooksPath = path.join(targetFolder.uri.fsPath, '.cursor', 'hooks.json');
 		if (fs.existsSync(hooksPath)) {
 			diagnostics.push('✅ Cursor Hooks: Found');
 		} else {

@@ -5,6 +5,21 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.15] - 2025-12-15
+
+### Added
+- **Multi-Root Workspace Support**: Each folder in multi-root workspaces now gets its own ACE configuration
+  - `ACE: Initialize Workspace` prompts to select which folder to initialize
+  - `ACE: Configure Connection` saves settings to selected folder
+  - Update prompts check each folder individually
+- Folder picker utilities: `pickWorkspaceFolder()`, `getTargetFolder()`, `isMultiRootWorkspace()`
+- Context-aware folder detection from active editor
+
+### Changed
+- All folder-dependent functions now accept optional `folder` parameter
+- Version update prompt now works per-folder (each folder can have different version)
+- Diagnostic command now checks selected folder's configuration
+
 ## [0.2.14] - 2025-12-15
 
 ### Changed

@@ -10,27 +10,80 @@ export type AceContext = {
 
 /**
  * Get workspace root directory (absolute path)
+ * If folder is provided, uses that folder. Otherwise:
+ * - Single folder: returns that folder
+ * - Multi-root without folder: returns null (caller should use pickWorkspaceFolder)
  */
-const getWorkspaceRoot = (): string | null => {
+export const getWorkspaceRoot = (folder?: vscode.WorkspaceFolder): string | null => {
+	if (folder) return folder.uri.fsPath;
+
 	const workspaceFolders = vscode.workspace.workspaceFolders;
 	if (!workspaceFolders || workspaceFolders.length === 0) {
 		return null;
 	}
-	return workspaceFolders[0].uri.fsPath;
+	// Single folder - safe to use [0]
+	if (workspaceFolders.length === 1) {
+		return workspaceFolders[0].uri.fsPath;
+	}
+	// Multi-root without folder param - return null
+	return null;
 };
 
-export const ensureSettingsDir = () => {
-	const workspaceRoot = getWorkspaceRoot();
+/**
+ * Pick a workspace folder - returns first if single, prompts if multi-root
+ */
+export async function pickWorkspaceFolder(
+	placeHolder = 'Select a workspace folder'
+): Promise<vscode.WorkspaceFolder | undefined> {
+	const folders = vscode.workspace.workspaceFolders;
+	if (!folders?.length) return undefined;
+	if (folders.length === 1) return folders[0];
+
+	// Multi-root: show native picker
+	return vscode.window.showWorkspaceFolderPick({ placeHolder });
+}
+
+/**
+ * Get folder from active editor context, or prompt if needed
+ */
+export async function getTargetFolder(
+	promptMessage = 'Select folder for ACE operation'
+): Promise<vscode.WorkspaceFolder | undefined> {
+	const folders = vscode.workspace.workspaceFolders;
+	if (!folders?.length) return undefined;
+	if (folders.length === 1) return folders[0];
+
+	// Try active editor
+	const activeUri = vscode.window.activeTextEditor?.document.uri;
+	if (activeUri) {
+		const folder = vscode.workspace.getWorkspaceFolder(activeUri);
+		if (folder) return folder;
+	}
+
+	// Fallback to picker
+	return pickWorkspaceFolder(promptMessage);
+}
+
+/**
+ * Check if we're in a multi-root workspace
+ */
+export function isMultiRootWorkspace(): boolean {
+	const folders = vscode.workspace.workspaceFolders;
+	return (folders?.length ?? 0) > 1;
+}
+
+export const ensureSettingsDir = (folder?: vscode.WorkspaceFolder) => {
+	const workspaceRoot = getWorkspaceRoot(folder);
 	if (!workspaceRoot) return;
-	
+
 	const dir = path.join(workspaceRoot, '.cursor', 'ace');
 	if (!fs.existsSync(dir)) {
 		fs.mkdirSync(dir, { recursive: true });
 	}
 };
 
-export const readContext = (): AceContext | null => {
-	const workspaceRoot = getWorkspaceRoot();
+export const readContext = (folder?: vscode.WorkspaceFolder): AceContext | null => {
+	const workspaceRoot = getWorkspaceRoot(folder);
 	if (!workspaceRoot) return null;
 
 	const SETTINGS_PATHS = [
@@ -58,8 +111,8 @@ export const readContext = (): AceContext | null => {
 /**
  * Read workspace version only (without requiring projectId)
  */
-export const readWorkspaceVersion = (): string | null => {
-	const workspaceRoot = getWorkspaceRoot();
+export const readWorkspaceVersion = (folder?: vscode.WorkspaceFolder): string | null => {
+	const workspaceRoot = getWorkspaceRoot(folder);
 	if (!workspaceRoot) return null;
 
 	const settingsPath = path.join(workspaceRoot, '.cursor', 'ace', 'settings.json');
@@ -76,11 +129,11 @@ export const readWorkspaceVersion = (): string | null => {
 /**
  * Write workspace version to settings
  */
-export const writeWorkspaceVersion = (version: string) => {
-	const workspaceRoot = getWorkspaceRoot();
+export const writeWorkspaceVersion = (version: string, folder?: vscode.WorkspaceFolder) => {
+	const workspaceRoot = getWorkspaceRoot(folder);
 	if (!workspaceRoot) return;
 
-	ensureSettingsDir();
+	ensureSettingsDir(folder);
 	const settingsPath = path.join(workspaceRoot, '.cursor', 'ace', 'settings.json');
 
 	let data: Record<string, any> = {};
@@ -96,13 +149,13 @@ export const writeWorkspaceVersion = (version: string) => {
 	fs.writeFileSync(settingsPath, JSON.stringify(data, null, 2));
 };
 
-export const writeContext = (ctx: AceContext) => {
-	const workspaceRoot = getWorkspaceRoot();
+export const writeContext = (ctx: AceContext, folder?: vscode.WorkspaceFolder) => {
+	const workspaceRoot = getWorkspaceRoot(folder);
 	if (!workspaceRoot) {
 		throw new Error('No workspace folder found. Cannot write context.');
 	}
-	
-	ensureSettingsDir();
+
+	ensureSettingsDir(folder);
 	const target = path.join(workspaceRoot, '.cursor', 'ace', 'settings.json');
 	const payload = {
 		env: {
@@ -112,4 +165,3 @@ export const writeContext = (ctx: AceContext) => {
 	};
 	fs.writeFileSync(target, JSON.stringify(payload, null, 2));
 };
-
