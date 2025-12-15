@@ -5,6 +5,12 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.14] - 2025-12-15
+
+### Changed
+- **README**: Clearer "CLOSED BETA" notice - account required to use extension
+- **Quick Start**: Sign up is now step 1 (required!) - makes clear extension won't work without API token
+
 ## [0.2.13] - 2025-12-14
 
 ### Added
