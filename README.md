@@ -1,6 +1,10 @@
 # ACE for Cursor
 
-> ⚠️ **BETA** - [Join the waitlist](https://ace.code-engine.app/waitlist) for early access!
+> 🔐 **CLOSED BETA** - This extension requires an ACE account to work.
+>
+> **[→ Join the Waitlist](https://ace.code-engine.app/waitlist)** to get your API token and start using ACE.
+>
+> Without an account, the extension cannot connect to the ACE server.
 
 **Automatic Code Evolution** - Pattern learning for Cursor IDE via MCP.
 
@@ -16,12 +20,14 @@ By [Code Engine GmbH](https://ace.code-engine.app)
 
 ## Quick Start
 
-1. **Install** from Cursor Extensions marketplace
-2. **Open Command Palette** (`Cmd+Shift+P` on Mac, `Ctrl+Shift+P` on Windows/Linux)
-3. **Run** `ACE: Initialize Workspace` - sets up MCP server and rules
-4. **Run** `ACE: Configure Connection` - opens setup panel
-5. **Get API token** from [ace.code-engine.app](https://ace.code-engine.app)
-6. **Enter credentials** in the Configure panel and save
+> **Step 1 is required** - The extension won't work without an ACE account!
+
+1. **[Sign up for ACE](https://ace.code-engine.app/waitlist)** - Get your API token (required!)
+2. **Install** from Cursor Extensions marketplace
+3. **Open Command Palette** (`Cmd+Shift+P` on Mac, `Ctrl+Shift+P` on Windows/Linux)
+4. **Run** `ACE: Initialize Workspace` - sets up MCP server and rules
+5. **Run** `ACE: Configure Connection` - opens setup panel
+6. **Enter your API token** and select your project
 7. **Start coding!** - AI automatically retrieves patterns before tasks
 
 ## Commands
