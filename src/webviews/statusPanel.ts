@@ -1,6 +1,6 @@
 /**
  * ACE Status Panel - Displays playbook statistics
- * Uses @ace-sdk/core AceClient for API calls (same as MCP server)
+ * Uses simple HTTP requests instead of SDK
  */
 
 import * as vscode from 'vscode';
@@ -8,7 +8,6 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { readContext } from '../ace/context';
-import { AceClient, type AceConfig } from '@ace-sdk/core';
 
 export class StatusPanel {
 	public static currentPanel: StatusPanel | undefined;
@@ -105,8 +104,7 @@ export class StatusPanel {
 	}
 
 	/**
-	 * Fetch status using AceClient from @ace-sdk/core
-	 * Same approach as MCP server's ace_status tool
+	 * Fetch status using simple HTTP request
 	 */
 	private async _fetchStatus(ctx: { orgId?: string; projectId: string }): Promise<any> {
 		const config = this._getAceConfig();
@@ -114,17 +112,21 @@ export class StatusPanel {
 			throw new Error('ACE not fully configured');
 		}
 
-		// Create AceClient (same as MCP server does)
-		const aceConfig: AceConfig = {
-			serverUrl: config.serverUrl,
-			apiToken: config.apiToken,
-			projectId: ctx.projectId,
-			cacheTtlMinutes: 5
-		};
-		const client = new AceClient(aceConfig);
+		// Fetch analytics
+		const analyticsUrl = `${config.serverUrl}/analytics`;
+		const analyticsResponse = await fetch(analyticsUrl, {
+			headers: {
+				'Authorization': `Bearer ${config.apiToken}`,
+				'Content-Type': 'application/json',
+				'X-ACE-Project': ctx.projectId
+			}
+		});
 
-		// Fetch analytics using AceClient
-		const analytics = await client.getAnalytics();
+		if (!analyticsResponse.ok) {
+			throw new Error(`HTTP ${analyticsResponse.status}`);
+		}
+
+		const analytics = await analyticsResponse.json() as Record<string, any>;
 
 		// Try to get org/project names from verify endpoint
 		let orgName = '';

@@ -19,7 +19,10 @@ test/**
 
 # Build artifacts (keep dist/)
 *.map
-dist/**/*.map
+
+# Dependencies (will be installed by user if needed)
+# Note: We include node_modules for now, but can exclude if too large
+# node_modules/**
 
 # IDE files
 .idea/**
@@ -35,86 +38,3 @@ Thumbs.db
 .ace-cache/**
 .claude/**
 *.db
-
-# node_modules optimization - exclude unnecessary files
-node_modules/**/*.md
-node_modules/**/*.markdown
-node_modules/**/LICENSE*
-node_modules/**/license*
-node_modules/**/CHANGELOG*
-node_modules/**/changelog*
-node_modules/**/HISTORY*
-node_modules/**/history*
-node_modules/**/AUTHORS*
-node_modules/**/CONTRIBUTORS*
-node_modules/**/.eslint*
-node_modules/**/.prettier*
-node_modules/**/.travis*
-node_modules/**/.github/**
-node_modules/**/test/**
-node_modules/**/tests/**
-node_modules/**/__tests__/**
-node_modules/**/spec/**
-node_modules/**/specs/**
-node_modules/**/example/**
-node_modules/**/examples/**
-node_modules/**/doc/**
-node_modules/**/docs/**
-node_modules/**/coverage/**
-node_modules/**/*.ts
-!node_modules/**/*.d.ts
-node_modules/**/tsconfig*.json
-node_modules/**/.npmignore
-node_modules/**/.gitignore
-node_modules/**/.editorconfig
-node_modules/**/Makefile
-node_modules/**/Gruntfile*
-node_modules/**/gulpfile*
-node_modules/**/*.gyp
-node_modules/**/*.gypi
-
-# Exclude heavy dependencies - SQLite cache will fallback to RAM-only
-node_modules/**/binding.gyp
-node_modules/**/prebuilds/**
-node_modules/**/build/**
-node_modules/**/*.node
-node_modules/**/Release/**
-node_modules/**/Debug/**
-
-# Exclude dev dependencies that shouldn't be in production
-node_modules/typescript/**
-node_modules/@vscode/test-electron/**
-node_modules/@vscode/vsce/**
-node_modules/mocha/**
-node_modules/eslint/**
-node_modules/@typescript-eslint/**
-node_modules/@types/**
-node_modules/glob/**
-
-# Exclude heavy @ace-sdk/core dependencies not needed for AceClient HTTP calls
-# AceClient only needs: HTTP fetch (built-in), config types
-node_modules/skott/**
-node_modules/@azure/**
-node_modules/azure-devops-node-api/**
-node_modules/effect/**
-node_modules/linguist-js/**
-node_modules/@typespec/**
-node_modules/@vue/**
-node_modules/@babel/**
-node_modules/meriyah/**
-node_modules/lodash/**
-node_modules/lodash-es/**
-node_modules/fp-ts/**
-node_modules/underscore/**
-node_modules/@parcel/**
-node_modules/@jridgewell/**
-node_modules/@nodelib/**
-node_modules/@polka/**
-node_modules/acorn/**
-node_modules/estree-walker/**
-node_modules/source-map-js/**
-node_modules/magic-string/**
-node_modules/postcss/**
-node_modules/yaml/**
-
-
