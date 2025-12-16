@@ -75,6 +75,7 @@ export async function activate(context: vscode.ExtensionContext) {
 		statusBarItem.show();
 
 		// 5. Initialize workspace monitor for real-time folder tracking
+		console.log('[ACE] Initializing workspace monitor with getAceConfig');
 		initWorkspaceMonitor(context, statusBarItem, getAceConfig);
 
 		console.log('[ACE] Extension activated successfully');
@@ -812,8 +813,10 @@ This is NOT optional. Call the tool, review patterns, THEN proceed.
  * For multi-root workspaces, uses getCurrentFolder() if no folder specified
  */
 function getAceConfig(folder?: vscode.WorkspaceFolder): { serverUrl?: string; apiToken?: string; projectId?: string; orgId?: string } | null {
+	console.log('[ACE] getAceConfig called', { folder: folder?.name });
 	// Use provided folder, or get from workspace monitor (tracks active editor)
 	const targetFolder = folder || getCurrentFolder();
+	console.log('[ACE] getAceConfig targetFolder:', targetFolder?.name);
 
 	// Try to read from VS Code settings first
 	const config = vscode.workspace.getConfiguration('ace');
@@ -847,15 +850,23 @@ function getAceConfig(folder?: vscode.WorkspaceFolder): { serverUrl?: string; ap
 	}
 
 	if (!finalProjectId) {
+		console.log('[ACE] getAceConfig: no projectId, returning null');
 		return null; // Not configured
 	}
 
-	return {
+	const result = {
 		serverUrl: finalServerUrl,
 		apiToken,
 		projectId: finalProjectId,
 		orgId: finalOrgId
 	};
+	console.log('[ACE] getAceConfig result:', {
+		hasServerUrl: !!result.serverUrl,
+		hasApiToken: !!result.apiToken,
+		hasProjectId: !!result.projectId,
+		serverUrl: result.serverUrl
+	});
+	return result;
 }
 
 /**

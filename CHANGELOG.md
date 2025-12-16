@@ -5,6 +5,12 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.18] - 2025-12-16
+
+### Fixed
+- **Status bar pattern count**: Fixed API endpoint from `/api/v1/analytics` to `/analytics`
+- Pattern count now shows correctly (e.g., "ACE (257)")
+
 ## [0.2.17] - 2025-12-16
 
 ### Fixed

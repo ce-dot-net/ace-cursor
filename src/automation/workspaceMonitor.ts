@@ -123,10 +123,12 @@ function showConfigurePrompt(folder: vscode.WorkspaceFolder): void {
  * Shows pattern count when available
  */
 async function updateStatusBar(): Promise<void> {
+	console.log('[ACE] updateStatusBar called', { hasStatusBarItem: !!statusBarItem, hasGetAceConfigFn: !!getAceConfigFn });
 	if (!statusBarItem) return;
 
 	const folder = isMultiRootWorkspace() ? currentFolder : undefined;
 	const ctx = readContext(folder);
+	console.log('[ACE] updateStatusBar context:', { folder: folder?.name, projectId: ctx?.projectId, orgId: ctx?.orgId });
 
 	// Not configured
 	if (!ctx?.projectId) {
@@ -177,14 +179,21 @@ async function fetchPatternCount(ctx: AceContext, folder?: vscode.WorkspaceFolde
 	}
 
 	// Get config for API call - use injected function or fallback
+	console.log('[ACE] fetchPatternCount: getting config', { hasGetAceConfigFn: !!getAceConfigFn });
 	const config = getAceConfigFn ? getAceConfigFn(folder) : getAceConfigForPatterns(ctx);
+	console.log('[ACE] fetchPatternCount: config result', {
+		hasConfig: !!config,
+		hasServerUrl: !!config?.serverUrl,
+		hasApiToken: !!config?.apiToken,
+		serverUrl: config?.serverUrl
+	});
 	if (!config?.serverUrl || !config?.apiToken) {
-		console.log('[ACE] Pattern count: missing config', { hasServerUrl: !!config?.serverUrl, hasApiToken: !!config?.apiToken });
+		console.log('[ACE] Pattern count: missing config - returning null');
 		return null;
 	}
 
 	try {
-		const url = `${config.serverUrl}/api/v1/analytics`;
+		const url = `${config.serverUrl}/analytics`;
 		const response = await fetch(url, {
 			method: 'GET',
 			headers: {
