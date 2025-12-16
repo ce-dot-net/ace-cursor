@@ -5,6 +5,18 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.19] - 2025-12-16
+
+### Changed
+- **@ace-sdk/core integration**: Extension now uses `AceClient` from `@ace-sdk/core` for API calls
+  - Same HTTP client as MCP server uses internally
+  - Consistent API endpoints and error handling
+  - Benefits from SDK's 3-tier caching (RAM → SQLite → Server)
+- Status bar and Status Panel now use `AceClient.getAnalytics()` instead of direct fetch()
+
+### Added
+- `@ace-sdk/core` as dependency (v2.2.0)
+
 ## [0.2.18] - 2025-12-16
 
 ### Fixed

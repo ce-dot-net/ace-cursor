@@ -13,6 +13,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { readContext, isMultiRootWorkspace, type AceContext } from '../ace/context';
+import { AceClient, type AceConfig, DEFAULT_RUNTIME_SETTINGS } from '@ace-sdk/core';
 
 // Import getAceConfig from extension - will be set via init
 let getAceConfigFn: ((folder?: vscode.WorkspaceFolder) => { serverUrl?: string; apiToken?: string; projectId?: string; orgId?: string } | null) | undefined;
@@ -167,12 +168,13 @@ async function updateStatusBar(): Promise<void> {
 }
 
 /**
- * Fetch pattern count from ACE server with caching
+ * Fetch pattern count from ACE server using AceClient
+ * Uses @ace-sdk/core for consistent API with MCP server
  */
 async function fetchPatternCount(ctx: AceContext, folder?: vscode.WorkspaceFolder): Promise<number | null> {
 	const cacheKey = ctx.projectId;
 
-	// Check cache
+	// Check local cache (in addition to AceClient's SQLite cache)
 	const cached = patternCache.get(cacheKey);
 	if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
 		return cached.count;
@@ -193,24 +195,19 @@ async function fetchPatternCount(ctx: AceContext, folder?: vscode.WorkspaceFolde
 	}
 
 	try {
-		const url = `${config.serverUrl}/analytics`;
-		const response = await fetch(url, {
-			method: 'GET',
-			headers: {
-				'Authorization': `Bearer ${config.apiToken}`,
-				'Content-Type': 'application/json',
-				'X-ACE-Project': ctx.projectId
-			}
-		});
+		// Create AceClient with config (same as MCP server does)
+		const aceConfig: AceConfig = {
+			serverUrl: config.serverUrl,
+			apiToken: config.apiToken,
+			projectId: ctx.projectId,
+			cacheTtlMinutes: 5 // Short TTL for status bar
+		};
+		const client = new AceClient(aceConfig);
 
-		if (!response.ok) {
-			console.log(`[ACE] Pattern count API error: ${response.status} ${response.statusText}`);
-			return null;
-		}
-
-		const data = await response.json() as { total_patterns?: number; total_bullets?: number };
-		const count = data.total_patterns || data.total_bullets || 0;
-		console.log(`[ACE] Pattern count fetched: ${count}`);
+		// Use getAnalytics() - same method MCP's ace_status uses
+		const stats = await client.getAnalytics();
+		const count = stats.total_patterns || stats.total_bullets || 0;
+		console.log(`[ACE] Pattern count fetched via AceClient: ${count}`);
 
 		// Cache the result
 		patternCache.set(cacheKey, { count, timestamp: Date.now() });
