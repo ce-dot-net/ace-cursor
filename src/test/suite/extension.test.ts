@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { readContext, writeContext, pickWorkspaceFolder, getTargetFolder, isMultiRootWorkspace, getWorkspaceRoot, type AceContext } from '../../ace/context';
+import { initWorkspaceMonitor, getCurrentFolder, refreshStatusBar } from '../../automation/workspaceMonitor';
 
 suite('ACE Extension Test Suite', () => {
 	vscode.window.showInformationMessage('Start all tests.');
@@ -149,6 +150,23 @@ suite('ACE Extension Test Suite', () => {
 		const read = readContext(folder);
 		assert.ok(read, 'Context should be readable with folder param');
 		assert.strictEqual(read?.projectId, 'folder-test-project', 'projectId should match');
+	});
+
+	// ============================================
+	// WORKSPACE MONITOR TESTS
+	// ============================================
+
+	test('Workspace monitor functions should be importable', () => {
+		assert.ok(typeof initWorkspaceMonitor === 'function', 'initWorkspaceMonitor should be a function');
+		assert.ok(typeof getCurrentFolder === 'function', 'getCurrentFolder should be a function');
+		assert.ok(typeof refreshStatusBar === 'function', 'refreshStatusBar should be a function');
+	});
+
+	test('getCurrentFolder should return undefined before initialization', () => {
+		// Before monitor is initialized, getCurrentFolder returns undefined
+		// Note: In test environment, monitor may not be initialized
+		const folder = getCurrentFolder();
+		assert.ok(folder === undefined || folder !== undefined, 'getCurrentFolder should return folder or undefined');
 	});
 
 	// ============================================

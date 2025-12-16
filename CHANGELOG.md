@@ -5,6 +5,21 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.16] - 2025-12-16
+
+### Added
+- **Real-Time Workspace Monitoring**: Detects folder switches and updates context automatically
+  - Status bar shows current folder name and pattern count
+  - Shows configuration popup when switching to unconfigured folder
+  - `src/automation/workspaceMonitor.ts` - Real-time workspace folder monitoring
+- `onDidChangeActiveTextEditor` listener for folder switch detection
+- `onDidChangeWorkspaceFolders` listener for workspace changes
+- Pattern count fetched from ACE server with 1-minute cache
+
+### Changed
+- Status bar now shows pattern count (e.g., "ACE: folder-name (42)")
+- `getAceConfig()` now uses `getCurrentFolder()` as default for multi-root workspaces
+
 ## [0.2.15] - 2025-12-15
 
 ### Added

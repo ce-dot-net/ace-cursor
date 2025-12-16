@@ -16,6 +16,7 @@ import * as os from 'os';
 import { StatusPanel } from './webviews/statusPanel';
 import { ConfigurePanel } from './webviews/configurePanel';
 import { readContext, readWorkspaceVersion, writeWorkspaceVersion, pickWorkspaceFolder, getTargetFolder, isMultiRootWorkspace, type AceContext } from './ace/context';
+import { initWorkspaceMonitor, getCurrentFolder, refreshStatusBar } from './automation/workspaceMonitor';
 
 let statusBarItem: vscode.StatusBarItem;
 let extensionContext: vscode.ExtensionContext;
@@ -73,12 +74,12 @@ export async function activate(context: vscode.ExtensionContext) {
 		context.subscriptions.push(statusBarItem);
 		statusBarItem.show();
 
-		// Update status bar on activation
-		updateStatusBar();
+		// 5. Initialize workspace monitor for real-time folder tracking
+		initWorkspaceMonitor(context, statusBarItem);
 
 		console.log('[ACE] Extension activated successfully');
 
-		// 5. Check workspace version and prompt for update if needed
+		// 6. Check workspace version and prompt for update if needed
 		await checkWorkspaceVersionAndPrompt(context);
 	} catch (error) {
 		console.error('[ACE] Activation error:', error);
@@ -808,9 +809,12 @@ This is NOT optional. Call the tool, review patterns, THEN proceed.
 
 /**
  * Get ACE configuration from settings and config files
- * For multi-root workspaces, checks the specified folder
+ * For multi-root workspaces, uses getCurrentFolder() if no folder specified
  */
 function getAceConfig(folder?: vscode.WorkspaceFolder): { serverUrl?: string; apiToken?: string; projectId?: string; orgId?: string } | null {
+	// Use provided folder, or get from workspace monitor (tracks active editor)
+	const targetFolder = folder || getCurrentFolder();
+
 	// Try to read from VS Code settings first
 	const config = vscode.workspace.getConfiguration('ace');
 	const serverUrl = config.get<string>('serverUrl');
@@ -818,7 +822,7 @@ function getAceConfig(folder?: vscode.WorkspaceFolder): { serverUrl?: string; ap
 	const projectId = config.get<string>('projectId');
 
 	// Try to read from context (workspace settings for the specific folder)
-	const ctx = readContext(folder);
+	const ctx = readContext(targetFolder);
 
 	// Try to read from global config
 	let globalConfig: any = null;
@@ -855,19 +859,11 @@ function getAceConfig(folder?: vscode.WorkspaceFolder): { serverUrl?: string; ap
 }
 
 /**
- * Update status bar - shows configuration state
- * Pattern count is available via MCP tools (ace_status)
+ * Update status bar - delegates to workspace monitor
+ * @deprecated Use refreshStatusBar() from workspaceMonitor instead
  */
 function updateStatusBar(): void {
-	const aceConfig = getAceConfig();
-	if (!aceConfig || !aceConfig.serverUrl || !aceConfig.apiToken || !aceConfig.projectId) {
-		statusBarItem.text = '$(warning) ACE: Not configured';
-		statusBarItem.tooltip = 'Click to configure ACE connection';
-	} else {
-		statusBarItem.text = '$(book) ACE: Ready';
-		statusBarItem.tooltip = 'ACE MCP server active. Click to view status.';
-	}
-	statusBarItem.show();
+	refreshStatusBar();
 }
 
 /**
