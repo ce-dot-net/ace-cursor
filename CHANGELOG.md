@@ -5,6 +5,12 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.17] - 2025-12-16
+
+### Fixed
+- **Status bar pattern count**: Now uses main `getAceConfig()` function to read API token from all sources (workspace settings, global config)
+- Added debug logging for pattern count fetch failures
+
 ## [0.2.16] - 2025-12-16
 
 ### Added

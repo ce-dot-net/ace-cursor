@@ -75,7 +75,7 @@ export async function activate(context: vscode.ExtensionContext) {
 		statusBarItem.show();
 
 		// 5. Initialize workspace monitor for real-time folder tracking
-		initWorkspaceMonitor(context, statusBarItem);
+		initWorkspaceMonitor(context, statusBarItem, getAceConfig);
 
 		console.log('[ACE] Extension activated successfully');
 

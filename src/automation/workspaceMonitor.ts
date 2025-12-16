@@ -14,6 +14,9 @@ import * as path from 'path';
 import * as os from 'os';
 import { readContext, isMultiRootWorkspace, type AceContext } from '../ace/context';
 
+// Import getAceConfig from extension - will be set via init
+let getAceConfigFn: ((folder?: vscode.WorkspaceFolder) => { serverUrl?: string; apiToken?: string; projectId?: string; orgId?: string } | null) | undefined;
+
 let currentFolder: vscode.WorkspaceFolder | undefined;
 let statusBarItem: vscode.StatusBarItem;
 let patternCache: Map<string, { count: number; timestamp: number }> = new Map();
@@ -24,9 +27,11 @@ const CACHE_TTL_MS = 60000; // 1 minute cache
  */
 export function initWorkspaceMonitor(
 	context: vscode.ExtensionContext,
-	statusBar: vscode.StatusBarItem
+	statusBar: vscode.StatusBarItem,
+	getAceConfig?: (folder?: vscode.WorkspaceFolder) => { serverUrl?: string; apiToken?: string; projectId?: string; orgId?: string } | null
 ): void {
 	statusBarItem = statusBar;
+	getAceConfigFn = getAceConfig;
 
 	// Track active editor's folder
 	context.subscriptions.push(
@@ -171,9 +176,10 @@ async function fetchPatternCount(ctx: AceContext, folder?: vscode.WorkspaceFolde
 		return cached.count;
 	}
 
-	// Get config for API call
-	const config = getAceConfigForPatterns(ctx);
+	// Get config for API call - use injected function or fallback
+	const config = getAceConfigFn ? getAceConfigFn(folder) : getAceConfigForPatterns(ctx);
 	if (!config?.serverUrl || !config?.apiToken) {
+		console.log('[ACE] Pattern count: missing config', { hasServerUrl: !!config?.serverUrl, hasApiToken: !!config?.apiToken });
 		return null;
 	}
 
@@ -189,17 +195,20 @@ async function fetchPatternCount(ctx: AceContext, folder?: vscode.WorkspaceFolde
 		});
 
 		if (!response.ok) {
+			console.log(`[ACE] Pattern count API error: ${response.status} ${response.statusText}`);
 			return null;
 		}
 
 		const data = await response.json() as { total_patterns?: number; total_bullets?: number };
 		const count = data.total_patterns || data.total_bullets || 0;
+		console.log(`[ACE] Pattern count fetched: ${count}`);
 
 		// Cache the result
 		patternCache.set(cacheKey, { count, timestamp: Date.now() });
 
 		return count;
-	} catch {
+	} catch (err) {
+		console.log('[ACE] Pattern count fetch error:', err);
 		return null;
 	}
 }
