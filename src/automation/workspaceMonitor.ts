@@ -20,6 +20,7 @@ let getAceConfigFn: ((folder?: vscode.WorkspaceFolder) => { serverUrl?: string; 
 let currentFolder: vscode.WorkspaceFolder | undefined;
 let statusBarItem: vscode.StatusBarItem;
 let patternCache: Map<string, { count: number; timestamp: number }> = new Map();
+let promptedFolders: Set<string> = new Set(); // Track folders we've already prompted about
 const CACHE_TTL_MS = 60000; // 1 minute cache
 
 /**
@@ -105,8 +106,20 @@ function onFolderSwitch(folder: vscode.WorkspaceFolder): void {
 
 /**
  * Show configuration prompt for unconfigured folder
+ * Tracks prompted folders to avoid repeated prompts in the same session
  */
 function showConfigurePrompt(folder: vscode.WorkspaceFolder): void {
+	const folderKey = folder.uri.toString();
+
+	// Don't prompt twice for the same folder in one session
+	if (promptedFolders.has(folderKey)) {
+		console.log(`[ACE] Already prompted for folder "${folder.name}", skipping`);
+		return;
+	}
+	promptedFolders.add(folderKey);
+
+	console.log(`[ACE] Prompting for configuration of unconfigured folder: ${folder.name}`);
+
 	vscode.window.showInformationMessage(
 		`ACE is not configured for "${folder.name}". Configure now?`,
 		'Configure',
@@ -126,7 +139,8 @@ async function updateStatusBar(): Promise<void> {
 	console.log('[ACE] updateStatusBar called', { hasStatusBarItem: !!statusBarItem, hasGetAceConfigFn: !!getAceConfigFn });
 	if (!statusBarItem) return;
 
-	const folder = isMultiRootWorkspace() ? currentFolder : undefined;
+	// Always use currentFolder - works for both single-folder and multi-root workspaces
+	const folder = currentFolder;
 	const ctx = readContext(folder);
 	console.log('[ACE] updateStatusBar context:', { folder: folder?.name, projectId: ctx?.projectId, orgId: ctx?.orgId });
 

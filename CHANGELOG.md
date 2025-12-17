@@ -5,6 +5,13 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.19] - 2025-12-17
+
+### Fixed
+- **Single-folder workspace detection**: Status bar now correctly identifies and shows configuration state for single-folder workspaces (matches VSCode extension behavior)
+- **Popup tracking**: Added `promptedFolders` Set to prevent repeated "Configure ACE?" prompts for the same folder in a session
+- Status bar now always uses `currentFolder` instead of ignoring it for single-folder workspaces
+
 ## [0.2.18] - 2025-12-16
 
 ### Fixed
