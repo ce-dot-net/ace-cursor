@@ -195,7 +195,6 @@ function showConfigurePrompt(folder: vscode.WorkspaceFolder): void {
 /**
  * Update status bar to reflect current folder's configuration state
  * Shows pattern count when available
- * In multi-root workspaces, shows folder name for clarity
  */
 async function updateStatusBar(): Promise<void> {
 	console.log('[ACE] updateStatusBar called', { hasStatusBarItem: !!statusBarItem, hasGetAceConfigFn: !!getAceConfigFn });
@@ -204,15 +203,11 @@ async function updateStatusBar(): Promise<void> {
 	// Always use currentFolder - works for both single-folder and multi-root workspaces
 	const folder = currentFolder;
 	const ctx = readContext(folder);
-	const isMultiRoot = isMultiRootWorkspace();
-	console.log('[ACE] updateStatusBar context:', { folder: folder?.name, projectId: ctx?.projectId, orgId: ctx?.orgId, isMultiRoot });
+	console.log('[ACE] updateStatusBar context:', { folder: folder?.name, projectId: ctx?.projectId, orgId: ctx?.orgId });
 
 	// Not configured - match VSCode style with warning background
 	if (!ctx?.projectId) {
-		// In multi-root, show folder name so user knows which folder is unconfigured
-		statusBarItem.text = isMultiRoot && folder
-			? `$(warning) ACE: ${folder.name} (not configured)`
-			: '$(warning) ACE: Not configured';
+		statusBarItem.text = '$(warning) ACE: Not configured';
 		statusBarItem.tooltip = folder
 			? `"${folder.name}" - Click to view status and configure ACE`
 			: 'Click to view status and configure ACE';
@@ -225,28 +220,20 @@ async function updateStatusBar(): Promise<void> {
 	statusBarItem.backgroundColor = undefined;
 
 	// Show loading state while fetching pattern count
-	// In multi-root, include folder name
-	statusBarItem.text = isMultiRoot && folder
-		? `$(sync~spin) ACE: ${folder.name}...`
-		: '$(sync~spin) ACE: Loading...';
+	statusBarItem.text = '$(sync~spin) ACE: Loading...';
 	statusBarItem.show();
 
 	// Fetch pattern count
 	const patternCount = await fetchPatternCount(ctx, folder);
 
-	// Update with pattern count
-	// In multi-root, show folder name for clarity when switching
+	// Update with pattern count - simple format
 	if (patternCount !== null) {
-		statusBarItem.text = isMultiRoot && folder
-			? `$(book) ACE: ${folder.name} (${patternCount})`
-			: `$(book) ACE: ${patternCount} patterns`;
+		statusBarItem.text = `$(book) ACE: ${patternCount} patterns`;
 		statusBarItem.tooltip = folder
 			? `"${folder.name}" - ${patternCount} patterns\nClick to view ACE playbook status`
-			: `${patternCount} patterns - Click to view ACE playbook status`;
+			: 'Click to view ACE playbook status';
 	} else {
-		statusBarItem.text = isMultiRoot && folder
-			? `$(book) ACE: ${folder.name}`
-			: '$(book) ACE: Ready';
+		statusBarItem.text = '$(book) ACE: Ready';
 		statusBarItem.tooltip = folder
 			? `"${folder.name}" - Click to view ACE playbook status`
 			: 'Click to view ACE playbook status';

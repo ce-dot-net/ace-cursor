@@ -5,6 +5,14 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.25] - 2025-12-17
+
+### Changed
+- **Simplified status bar**: Reverted to cleaner format without folder name
+  - Configured: `ACE: 257 patterns`
+  - Not configured: `ACE: Not configured`
+  - Folder name shown in tooltip only
+
 ## [0.2.24] - 2025-12-17
 
 ### Fixed
@@ -14,10 +22,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Dismissing popup (clicking elsewhere) allows it to reappear on next switch
 
 ### Changed
-- **Multi-root status bar**: Now shows folder name for clarity when switching
-  - Configured: `ACE: folder-name (257)` instead of `ACE: 257 patterns`
-  - Unconfigured: `ACE: folder-name (not configured)` with warning background
-  - Loading: `ACE: folder-name...`
 - Enhanced logging with `***` markers for easy console filtering
 
 ## [0.2.23] - 2025-12-17
