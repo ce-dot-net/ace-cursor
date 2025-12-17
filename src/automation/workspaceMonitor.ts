@@ -52,12 +52,6 @@ export function initWorkspaceMonitor(
 			const folderCount = folders?.length ?? 0;
 			console.log(`[ACE] *** onDidChangeActiveTextEditor *** folders: ${folderCount}, editor: ${editor?.document.uri.fsPath?.split('/').pop() || 'none'}`);
 
-			// Only monitor folder switches in multi-root workspaces
-			if (!isMultiRootWorkspace()) {
-				console.log('[ACE] Single-folder workspace - skipping folder switch detection');
-				return;
-			}
-
 			const uri = editor?.document.uri;
 			if (!uri) {
 				console.log('[ACE] No document URI');
@@ -73,6 +67,7 @@ export function initWorkspaceMonitor(
 			const folder = vscode.workspace.getWorkspaceFolder(uri);
 			console.log(`[ACE] Editor folder: ${folder?.name}, Current folder: ${currentFolder?.name}, Same: ${isSameFolder(folder, currentFolder)}`);
 
+			// Check if folder changed - works for both single and multi-root workspaces
 			if (folder && !isSameFolder(folder, currentFolder)) {
 				console.log(`[ACE] *** FOLDER CHANGED *** ${currentFolder?.name || 'none'} → ${folder.name}`);
 				onFolderSwitch(folder);
@@ -82,9 +77,17 @@ export function initWorkspaceMonitor(
 
 	// Track workspace folder changes (add/remove)
 	context.subscriptions.push(
-		vscode.workspace.onDidChangeWorkspaceFolders(_e => {
+		vscode.workspace.onDidChangeWorkspaceFolders(e => {
+			console.log(`[ACE] Workspace folders changed: added=${e.added.length}, removed=${e.removed.length}`);
 			// Refresh status bar when folders change
 			updateStatusBar();
+			// Prompt for newly added unconfigured folders
+			for (const added of e.added) {
+				const ctx = readContext(added);
+				if (!ctx?.projectId) {
+					showConfigurePrompt(added);
+				}
+			}
 		})
 	);
 
@@ -117,9 +120,8 @@ function initializeCurrentFolder(): void {
 
 	updateStatusBar();
 
-	// For single-folder workspaces, prompt to configure if not configured
-	// (Multi-root workspaces get prompted on folder switch instead)
-	if (!isMultiRootWorkspace() && currentFolder) {
+	// Prompt to configure if current folder is unconfigured (works for both single and multi-root)
+	if (currentFolder) {
 		const ctx = readContext(currentFolder);
 		if (!ctx?.projectId) {
 			// Delay prompt slightly to let extension fully activate

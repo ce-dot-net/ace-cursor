@@ -69,7 +69,9 @@ export async function getTargetFolder(
  */
 export function isMultiRootWorkspace(): boolean {
 	const folders = vscode.workspace.workspaceFolders;
-	return (folders?.length ?? 0) > 1;
+	const result = (folders?.length ?? 0) > 1;
+	console.log(`[ACE] isMultiRootWorkspace: folders=${folders?.length ?? 0}, result=${result}`);
+	return result;
 }
 
 export const ensureSettingsDir = (folder?: vscode.WorkspaceFolder) => {

@@ -5,6 +5,20 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.26] - 2025-12-17
+
+### Fixed
+- **Critical: Workspace monitor now detects folder switches correctly**
+  - Root cause: `isMultiRootWorkspace()` guard was blocking ALL folder tracking
+  - Removed guard from `onDidChangeActiveTextEditor` handler
+  - Now status bar updates immediately when switching between folders
+  - Popup appears for each unconfigured folder (not just on startup)
+- **Startup prompt now works for both single and multi-root workspaces**
+- **Handle newly added workspace folders** - prompts to configure when folder added
+
+### Changed
+- Added debug logging to `isMultiRootWorkspace()` for diagnostics
+
 ## [0.2.25] - 2025-12-17
 
 ### Changed
