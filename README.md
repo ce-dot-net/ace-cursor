@@ -113,10 +113,10 @@ ACE fully supports VS Code multi-root workspaces:
 
 ### Status Bar
 
-The status bar shows:
-- **Pattern count**: `$(book) ACE (257)` - number of patterns in your playbook
-- **Folder context**: `$(book) ACE: my-project (42)` - for multi-root workspaces
-- **Configuration state**: `$(warning) ACE: Not configured` - when setup is needed
+The status bar shows (matches VSCode extension styling):
+- **Ready**: `$(book) ACE: 257 patterns` - configured and showing pattern count
+- **Loading**: `$(sync~spin) ACE: Loading...` - fetching pattern count
+- **Unconfigured**: `$(warning) ACE: Not configured` - with warning background color
 
 Click the status bar item to open the Status panel.
 

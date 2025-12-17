@@ -107,6 +107,7 @@ function onFolderSwitch(folder: vscode.WorkspaceFolder): void {
 /**
  * Show configuration prompt for unconfigured folder
  * Tracks prompted folders to avoid repeated prompts in the same session
+ * Uses warning message style to match VSCode extension
  */
 function showConfigurePrompt(folder: vscode.WorkspaceFolder): void {
 	const folderKey = folder.uri.toString();
@@ -120,12 +121,13 @@ function showConfigurePrompt(folder: vscode.WorkspaceFolder): void {
 
 	console.log(`[ACE] Prompting for configuration of unconfigured folder: ${folder.name}`);
 
-	vscode.window.showInformationMessage(
-		`ACE is not configured for "${folder.name}". Configure now?`,
-		'Configure',
+	// Match VSCode style: warning message with "Configure Now" button
+	vscode.window.showWarningMessage(
+		`ACE not configured for "${folder.name}"`,
+		'Configure Now',
 		'Later'
 	).then(selection => {
-		if (selection === 'Configure') {
+		if (selection === 'Configure Now') {
 			vscode.commands.executeCommand('ace.configure');
 		}
 	});
@@ -144,38 +146,34 @@ async function updateStatusBar(): Promise<void> {
 	const ctx = readContext(folder);
 	console.log('[ACE] updateStatusBar context:', { folder: folder?.name, projectId: ctx?.projectId, orgId: ctx?.orgId });
 
-	// Not configured
+	// Not configured - match VSCode style with warning background
 	if (!ctx?.projectId) {
-		const folderInfo = folder ? `: ${folder.name}` : '';
-		statusBarItem.text = `$(warning) ACE${folderInfo}`;
+		statusBarItem.text = '$(warning) ACE: Not configured';
 		statusBarItem.tooltip = folder
-			? `"${folder.name}" - Not configured. Click to configure.`
-			: 'Click to configure ACE connection';
+			? `"${folder.name}" - Click to view status and configure ACE`
+			: 'Click to view status and configure ACE';
+		statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
 		statusBarItem.show();
 		return;
 	}
 
+	// Clear any warning background from unconfigured state
+	statusBarItem.backgroundColor = undefined;
+
 	// Show loading state while fetching pattern count
-	const folderName = folder?.name;
-	statusBarItem.text = folderName ? `$(sync~spin) ACE: ${folderName}` : '$(sync~spin) ACE';
+	statusBarItem.text = '$(sync~spin) ACE: Loading...';
 	statusBarItem.show();
 
 	// Fetch pattern count
 	const patternCount = await fetchPatternCount(ctx, folder);
 
-	// Update with pattern count
+	// Update with pattern count - match VSCode style: "ACE: {count} patterns"
 	if (patternCount !== null) {
-		statusBarItem.text = folderName
-			? `$(book) ACE: ${folderName} (${patternCount})`
-			: `$(book) ACE (${patternCount})`;
-		statusBarItem.tooltip = folderName
-			? `"${folderName}" - ${patternCount} patterns. Click to view status.`
-			: `${patternCount} patterns. Click to view status.`;
+		statusBarItem.text = `$(book) ACE: ${patternCount} patterns`;
+		statusBarItem.tooltip = 'Click to view ACE playbook status';
 	} else {
-		statusBarItem.text = folderName ? `$(book) ACE: ${folderName}` : '$(book) ACE: Ready';
-		statusBarItem.tooltip = folderName
-			? `"${folderName}" - Project: ${ctx.projectId}`
-			: 'ACE MCP server active. Click to view status.';
+		statusBarItem.text = '$(book) ACE: ? patterns';
+		statusBarItem.tooltip = 'Click to view ACE playbook status';
 	}
 	statusBarItem.show();
 }

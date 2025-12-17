@@ -5,6 +5,17 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.20] - 2025-12-17
+
+### Changed
+- **Status bar styling**: Now matches VSCode extension exactly
+  - Shows `$(book) ACE: 257 patterns` format (was "ACE (257)")
+  - Shows `$(warning) ACE: Not configured` with warning background color
+  - Loading state shows `$(sync~spin) ACE: Loading...`
+- **Configure popup**: Uses warning message style like VSCode
+  - Text: `ACE not configured for "folder-name"`
+  - Buttons: "Configure Now", "Later"
+
 ## [0.2.19] - 2025-12-17
 
 ### Fixed
