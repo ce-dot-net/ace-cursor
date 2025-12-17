@@ -135,13 +135,20 @@ function onFolderSwitch(folder: vscode.WorkspaceFolder): void {
 	currentFolder = folder;
 
 	console.log(`[ACE] Folder switch: ${previousFolder?.name || 'none'} → ${folder.name}`);
+	console.log(`[ACE] Folder URI: ${folder.uri.toString()}`);
+	console.log(`[ACE] Folder fsPath: ${folder.uri.fsPath}`);
 
 	updateStatusBar();
 
 	// Check if folder is configured
 	const ctx = readContext(folder);
+	console.log(`[ACE] readContext result for "${folder.name}":`, JSON.stringify(ctx));
+
 	if (!ctx?.projectId) {
+		console.log(`[ACE] No projectId found - will show configure prompt`);
 		showConfigurePrompt(folder);
+	} else {
+		console.log(`[ACE] Folder "${folder.name}" is configured with projectId: ${ctx.projectId}`);
 	}
 }
 
@@ -152,6 +159,8 @@ function onFolderSwitch(folder: vscode.WorkspaceFolder): void {
  */
 function showConfigurePrompt(folder: vscode.WorkspaceFolder): void {
 	const folderKey = folder.uri.toString();
+	console.log(`[ACE] showConfigurePrompt called for "${folder.name}", folderKey: ${folderKey}`);
+	console.log(`[ACE] Current promptedFolders:`, Array.from(promptedFolders));
 
 	// Don't prompt twice for the same folder in one session
 	if (promptedFolders.has(folderKey)) {
@@ -160,7 +169,7 @@ function showConfigurePrompt(folder: vscode.WorkspaceFolder): void {
 	}
 	promptedFolders.add(folderKey);
 
-	console.log(`[ACE] Prompting for configuration of unconfigured folder: ${folder.name}`);
+	console.log(`[ACE] Showing warning message for folder: ${folder.name}`);
 
 	// Match VSCode style: warning message with "Configure Now" button
 	vscode.window.showWarningMessage(
@@ -168,6 +177,7 @@ function showConfigurePrompt(folder: vscode.WorkspaceFolder): void {
 		'Configure Now',
 		'Later'
 	).then(selection => {
+		console.log(`[ACE] User selection: ${selection}`);
 		if (selection === 'Configure Now') {
 			vscode.commands.executeCommand('ace.configure');
 		}

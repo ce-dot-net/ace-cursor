@@ -84,7 +84,11 @@ export const ensureSettingsDir = (folder?: vscode.WorkspaceFolder) => {
 
 export const readContext = (folder?: vscode.WorkspaceFolder): AceContext | null => {
 	const workspaceRoot = getWorkspaceRoot(folder);
-	if (!workspaceRoot) return null;
+	console.log(`[ACE] readContext: folder=${folder?.name}, workspaceRoot=${workspaceRoot}`);
+	if (!workspaceRoot) {
+		console.log(`[ACE] readContext: no workspaceRoot, returning null`);
+		return null;
+	}
 
 	const SETTINGS_PATHS = [
 		path.join(workspaceRoot, '.cursor', 'ace', 'settings.json'),
@@ -92,19 +96,25 @@ export const readContext = (folder?: vscode.WorkspaceFolder): AceContext | null 
 	];
 
 	for (const candidate of SETTINGS_PATHS) {
-		if (!fs.existsSync(candidate)) continue;
+		const exists = fs.existsSync(candidate);
+		console.log(`[ACE] readContext: checking ${candidate}, exists=${exists}`);
+		if (!exists) continue;
 		try {
 			const data = JSON.parse(fs.readFileSync(candidate, 'utf-8'));
+			console.log(`[ACE] readContext: parsed data from ${candidate}:`, JSON.stringify(data));
 			const orgId = data.orgId ?? data.env?.ACE_ORG_ID ?? data.env?.orgId;
 			const projectId = data.projectId ?? data.env?.ACE_PROJECT_ID ?? data.env?.projectId;
 			const aceWorkspaceVersion = data.aceWorkspaceVersion;
+			console.log(`[ACE] readContext: extracted orgId=${orgId}, projectId=${projectId}`);
 			if (projectId) {
 				return { orgId, projectId, aceWorkspaceVersion };
 			}
-		} catch {
+		} catch (err) {
+			console.log(`[ACE] readContext: error parsing ${candidate}:`, err);
 			continue;
 		}
 	}
+	console.log(`[ACE] readContext: no valid settings found, returning null`);
 	return null;
 };
 
