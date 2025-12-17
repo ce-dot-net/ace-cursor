@@ -24,6 +24,16 @@ let promptedFolders: Set<string> = new Set(); // Track folders we've already pro
 const CACHE_TTL_MS = 60000; // 1 minute cache
 
 /**
+ * Compare two workspace folders by URI (not object reference)
+ * VSCode may create new folder objects, so we need to compare by URI
+ */
+function isSameFolder(a: vscode.WorkspaceFolder | undefined, b: vscode.WorkspaceFolder | undefined): boolean {
+	if (!a && !b) return true;
+	if (!a || !b) return false;
+	return a.uri.toString() === b.uri.toString();
+}
+
+/**
  * Initialize workspace monitor with event listeners
  */
 export function initWorkspaceMonitor(
@@ -47,7 +57,7 @@ export function initWorkspaceMonitor(
 			if (uri.scheme !== 'file') return;
 
 			const folder = vscode.workspace.getWorkspaceFolder(uri);
-			if (folder && folder !== currentFolder) {
+			if (folder && !isSameFolder(folder, currentFolder)) {
 				onFolderSwitch(folder);
 			}
 		})
