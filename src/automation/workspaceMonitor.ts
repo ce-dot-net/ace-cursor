@@ -47,7 +47,10 @@ export function initWorkspaceMonitor(
 	// Track active editor's folder
 	context.subscriptions.push(
 		vscode.window.onDidChangeActiveTextEditor(editor => {
-			console.log(`[ACE] onDidChangeActiveTextEditor fired. isMultiRoot: ${isMultiRootWorkspace()}`);
+			// Log immediately to verify event fires
+			const folders = vscode.workspace.workspaceFolders;
+			const folderCount = folders?.length ?? 0;
+			console.log(`[ACE] *** onDidChangeActiveTextEditor *** folders: ${folderCount}, editor: ${editor?.document.uri.fsPath?.split('/').pop() || 'none'}`);
 
 			// Only monitor folder switches in multi-root workspaces
 			if (!isMultiRootWorkspace()) {
@@ -68,10 +71,10 @@ export function initWorkspaceMonitor(
 			}
 
 			const folder = vscode.workspace.getWorkspaceFolder(uri);
-			console.log(`[ACE] Editor folder: ${folder?.name}, Current folder: ${currentFolder?.name}`);
+			console.log(`[ACE] Editor folder: ${folder?.name}, Current folder: ${currentFolder?.name}, Same: ${isSameFolder(folder, currentFolder)}`);
 
 			if (folder && !isSameFolder(folder, currentFolder)) {
-				console.log(`[ACE] Folder changed! Triggering onFolderSwitch`);
+				console.log(`[ACE] *** FOLDER CHANGED *** ${currentFolder?.name || 'none'} → ${folder.name}`);
 				onFolderSwitch(folder);
 			}
 		})
@@ -154,22 +157,22 @@ function onFolderSwitch(folder: vscode.WorkspaceFolder): void {
 
 /**
  * Show configuration prompt for unconfigured folder
- * Tracks prompted folders to avoid repeated prompts in the same session
+ * Only skips if user explicitly chose "Later" for this specific folder
  * Uses warning message style to match VSCode extension
  */
 function showConfigurePrompt(folder: vscode.WorkspaceFolder): void {
 	const folderKey = folder.uri.toString();
-	console.log(`[ACE] showConfigurePrompt called for "${folder.name}", folderKey: ${folderKey}`);
-	console.log(`[ACE] Current promptedFolders:`, Array.from(promptedFolders));
+	console.log(`[ACE] *** showConfigurePrompt *** folder: "${folder.name}"`);
+	console.log(`[ACE] folderKey: ${folderKey}`);
+	console.log(`[ACE] promptedFolders:`, Array.from(promptedFolders));
 
-	// Don't prompt twice for the same folder in one session
+	// Only skip if user explicitly chose "Later" for this folder
 	if (promptedFolders.has(folderKey)) {
-		console.log(`[ACE] Already prompted for folder "${folder.name}", skipping`);
+		console.log(`[ACE] User previously chose "Later" for "${folder.name}", skipping prompt`);
 		return;
 	}
-	promptedFolders.add(folderKey);
 
-	console.log(`[ACE] Showing warning message for folder: ${folder.name}`);
+	console.log(`[ACE] *** SHOWING POPUP *** for folder: ${folder.name}`);
 
 	// Match VSCode style: warning message with "Configure Now" button
 	vscode.window.showWarningMessage(
@@ -177,16 +180,22 @@ function showConfigurePrompt(folder: vscode.WorkspaceFolder): void {
 		'Configure Now',
 		'Later'
 	).then(selection => {
-		console.log(`[ACE] User selection: ${selection}`);
+		console.log(`[ACE] User selection for "${folder.name}": ${selection}`);
 		if (selection === 'Configure Now') {
 			vscode.commands.executeCommand('ace.configure');
+		} else if (selection === 'Later') {
+			// Only add to promptedFolders if user explicitly chose "Later"
+			promptedFolders.add(folderKey);
+			console.log(`[ACE] User chose Later - will not prompt again for "${folder.name}" this session`);
 		}
+		// If dismissed (no selection), we'll prompt again on next folder switch
 	});
 }
 
 /**
  * Update status bar to reflect current folder's configuration state
  * Shows pattern count when available
+ * In multi-root workspaces, shows folder name for clarity
  */
 async function updateStatusBar(): Promise<void> {
 	console.log('[ACE] updateStatusBar called', { hasStatusBarItem: !!statusBarItem, hasGetAceConfigFn: !!getAceConfigFn });
@@ -195,11 +204,15 @@ async function updateStatusBar(): Promise<void> {
 	// Always use currentFolder - works for both single-folder and multi-root workspaces
 	const folder = currentFolder;
 	const ctx = readContext(folder);
-	console.log('[ACE] updateStatusBar context:', { folder: folder?.name, projectId: ctx?.projectId, orgId: ctx?.orgId });
+	const isMultiRoot = isMultiRootWorkspace();
+	console.log('[ACE] updateStatusBar context:', { folder: folder?.name, projectId: ctx?.projectId, orgId: ctx?.orgId, isMultiRoot });
 
 	// Not configured - match VSCode style with warning background
 	if (!ctx?.projectId) {
-		statusBarItem.text = '$(warning) ACE: Not configured';
+		// In multi-root, show folder name so user knows which folder is unconfigured
+		statusBarItem.text = isMultiRoot && folder
+			? `$(warning) ACE: ${folder.name} (not configured)`
+			: '$(warning) ACE: Not configured';
 		statusBarItem.tooltip = folder
 			? `"${folder.name}" - Click to view status and configure ACE`
 			: 'Click to view status and configure ACE';
@@ -212,19 +225,31 @@ async function updateStatusBar(): Promise<void> {
 	statusBarItem.backgroundColor = undefined;
 
 	// Show loading state while fetching pattern count
-	statusBarItem.text = '$(sync~spin) ACE: Loading...';
+	// In multi-root, include folder name
+	statusBarItem.text = isMultiRoot && folder
+		? `$(sync~spin) ACE: ${folder.name}...`
+		: '$(sync~spin) ACE: Loading...';
 	statusBarItem.show();
 
 	// Fetch pattern count
 	const patternCount = await fetchPatternCount(ctx, folder);
 
-	// Update with pattern count - match VSCode style: "ACE: {count} patterns"
+	// Update with pattern count
+	// In multi-root, show folder name for clarity when switching
 	if (patternCount !== null) {
-		statusBarItem.text = `$(book) ACE: ${patternCount} patterns`;
-		statusBarItem.tooltip = 'Click to view ACE playbook status';
+		statusBarItem.text = isMultiRoot && folder
+			? `$(book) ACE: ${folder.name} (${patternCount})`
+			: `$(book) ACE: ${patternCount} patterns`;
+		statusBarItem.tooltip = folder
+			? `"${folder.name}" - ${patternCount} patterns\nClick to view ACE playbook status`
+			: `${patternCount} patterns - Click to view ACE playbook status`;
 	} else {
-		statusBarItem.text = '$(book) ACE: ? patterns';
-		statusBarItem.tooltip = 'Click to view ACE playbook status';
+		statusBarItem.text = isMultiRoot && folder
+			? `$(book) ACE: ${folder.name}`
+			: '$(book) ACE: Ready';
+		statusBarItem.tooltip = folder
+			? `"${folder.name}" - Click to view ACE playbook status`
+			: 'Click to view ACE playbook status';
 	}
 	statusBarItem.show();
 }
