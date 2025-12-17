@@ -15,7 +15,9 @@ By [Code Engine GmbH](https://ace.code-engine.app)
 - 🔄 **Automatic pattern retrieval** before tasks via MCP
 - 📚 **Learning capture** after substantial work
 - 🔌 **Native MCP integration** with Cursor
-- 📊 **Status panel** for playbook statistics
+- 📊 **Status bar** shows pattern count (e.g., "ACE (257)") and configuration state
+- 📁 **Multi-root workspace support** - each folder gets its own ACE configuration
+- 🔄 **Real-time folder monitoring** - status bar updates when switching folders
 - ⚙️ **Configure panel** for easy setup
 
 ## Quick Start
@@ -99,6 +101,24 @@ Configure in Cursor Settings (`Cmd+,`):
 - `ace.serverUrl` - ACE server endpoint (default: https://ace-api.code-engine.app)
 - `ace.orgId` - Default organization ID
 - `ace.projectId` - Default project ID
+
+## Multi-Root Workspace Support
+
+ACE fully supports VS Code multi-root workspaces:
+
+- **Per-folder configuration**: Each folder in a multi-root workspace can have its own ACE project
+- **Automatic detection**: Status bar updates when you switch between folders
+- **Configuration prompts**: Shows popup when switching to an unconfigured folder
+- **Initialize per folder**: `ACE: Initialize Workspace` lets you select which folder to configure
+
+### Status Bar
+
+The status bar shows:
+- **Pattern count**: `$(book) ACE (257)` - number of patterns in your playbook
+- **Folder context**: `$(book) ACE: my-project (42)` - for multi-root workspaces
+- **Configuration state**: `$(warning) ACE: Not configured` - when setup is needed
+
+Click the status bar item to open the Status panel.
 
 ## Links
 
