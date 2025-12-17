@@ -47,17 +47,31 @@ export function initWorkspaceMonitor(
 	// Track active editor's folder
 	context.subscriptions.push(
 		vscode.window.onDidChangeActiveTextEditor(editor => {
-			// Only monitor in multi-root workspaces
-			if (!isMultiRootWorkspace()) return;
+			console.log(`[ACE] onDidChangeActiveTextEditor fired. isMultiRoot: ${isMultiRootWorkspace()}`);
+
+			// Only monitor folder switches in multi-root workspaces
+			if (!isMultiRootWorkspace()) {
+				console.log('[ACE] Single-folder workspace - skipping folder switch detection');
+				return;
+			}
 
 			const uri = editor?.document.uri;
-			if (!uri) return;
+			if (!uri) {
+				console.log('[ACE] No document URI');
+				return;
+			}
 
 			// Skip non-file schemes (output panels, git diffs, etc.)
-			if (uri.scheme !== 'file') return;
+			if (uri.scheme !== 'file') {
+				console.log(`[ACE] Skipping non-file scheme: ${uri.scheme}`);
+				return;
+			}
 
 			const folder = vscode.workspace.getWorkspaceFolder(uri);
+			console.log(`[ACE] Editor folder: ${folder?.name}, Current folder: ${currentFolder?.name}`);
+
 			if (folder && !isSameFolder(folder, currentFolder)) {
+				console.log(`[ACE] Folder changed! Triggering onFolderSwitch`);
 				onFolderSwitch(folder);
 			}
 		})
@@ -77,10 +91,13 @@ export function initWorkspaceMonitor(
 
 /**
  * Set initial folder from active editor or first workspace folder
+ * Also prompts to configure if folder is unconfigured (first time only)
  */
 function initializeCurrentFolder(): void {
 	const folders = vscode.workspace.workspaceFolders;
 	if (!folders || folders.length === 0) return;
+
+	console.log(`[ACE] Initializing workspace monitor. Folders: ${folders.length}, isMultiRoot: ${isMultiRootWorkspace()}`);
 
 	// Try to get folder from active editor
 	const activeUri = vscode.window.activeTextEditor?.document.uri;
@@ -93,7 +110,21 @@ function initializeCurrentFolder(): void {
 		currentFolder = folders[0];
 	}
 
+	console.log(`[ACE] Current folder set to: ${currentFolder?.name}`);
+
 	updateStatusBar();
+
+	// For single-folder workspaces, prompt to configure if not configured
+	// (Multi-root workspaces get prompted on folder switch instead)
+	if (!isMultiRootWorkspace() && currentFolder) {
+		const ctx = readContext(currentFolder);
+		if (!ctx?.projectId) {
+			// Delay prompt slightly to let extension fully activate
+			setTimeout(() => {
+				showConfigurePrompt(currentFolder!);
+			}, 2000);
+		}
+	}
 }
 
 /**
