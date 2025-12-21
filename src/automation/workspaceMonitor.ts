@@ -18,10 +18,86 @@ import { readContext, isMultiRootWorkspace, type AceContext } from '../ace/conte
 let getAceConfigFn: ((folder?: vscode.WorkspaceFolder) => { serverUrl?: string; apiToken?: string; projectId?: string; orgId?: string } | null) | undefined;
 
 let currentFolder: vscode.WorkspaceFolder | undefined;
+let currentDomain: string = 'general';
 let statusBarItem: vscode.StatusBarItem;
 let patternCache: Map<string, { count: number; timestamp: number }> = new Map();
 let promptedFolders: Set<string> = new Set(); // Track folders we've already prompted about
 const CACHE_TTL_MS = 60000; // 1 minute cache
+
+/**
+ * Domain detection based on file path patterns
+ * Used for domain-aware pattern search (Issue #3)
+ */
+function detectDomain(filePath: string): string {
+	const lowerPath = filePath.toLowerCase();
+
+	// Auth domain
+	if (/\/(auth|login|session|jwt|oauth|sso)\//.test(lowerPath) ||
+		/(auth|login|session|jwt|oauth)/.test(path.basename(lowerPath))) {
+		return 'auth';
+	}
+
+	// API domain
+	if (/\/(api|routes|endpoint|controller|handler)\//.test(lowerPath) ||
+		/(route|endpoint|controller|handler)/.test(path.basename(lowerPath))) {
+		return 'api';
+	}
+
+	// Cache domain
+	if (/\/(cache|redis|memo)\//.test(lowerPath) ||
+		/(cache|redis|memo)/.test(path.basename(lowerPath))) {
+		return 'cache';
+	}
+
+	// Database domain
+	if (/\/(db|database|migration|model|schema|repository)\//.test(lowerPath) ||
+		/(model|schema|migration|repository)/.test(path.basename(lowerPath))) {
+		return 'database';
+	}
+
+	// UI domain
+	if (/\/(component|ui|view|page|layout)\//.test(lowerPath) ||
+		/\.(tsx|jsx)$/.test(lowerPath)) {
+		return 'ui';
+	}
+
+	// Test domain
+	if (/\/(test|spec|__tests__|__mocks__)\//.test(lowerPath) ||
+		/\.(test|spec)\.(ts|js|tsx|jsx)$/.test(lowerPath)) {
+		return 'test';
+	}
+
+	return 'general';
+}
+
+/**
+ * Log domain shift to trajectory file
+ */
+function logDomainShift(fromDomain: string, toDomain: string, filePath: string): void {
+	const folder = currentFolder;
+	if (!folder) return;
+
+	const aceDir = path.join(folder.uri.fsPath, '.cursor', 'ace');
+	const shiftLogPath = path.join(aceDir, 'domain_shifts.log');
+
+	try {
+		// Ensure directory exists
+		if (!fs.existsSync(aceDir)) {
+			fs.mkdirSync(aceDir, { recursive: true });
+		}
+
+		const entry = JSON.stringify({
+			from: fromDomain,
+			to: toDomain,
+			file: filePath,
+			timestamp: new Date().toISOString()
+		});
+
+		fs.appendFileSync(shiftLogPath, entry + '\n');
+	} catch (err) {
+		console.log('[ACE] Failed to log domain shift:', err);
+	}
+}
 
 /**
  * Compare two workspace folders by URI (not object reference)
@@ -64,8 +140,17 @@ export function initWorkspaceMonitor(
 				return;
 			}
 
+			const filePath = uri.fsPath;
 			const folder = vscode.workspace.getWorkspaceFolder(uri);
 			console.log(`[ACE] Editor folder: ${folder?.name}, Current folder: ${currentFolder?.name}, Same: ${isSameFolder(folder, currentFolder)}`);
+
+			// Domain tracking - detect and log domain shifts
+			const newDomain = detectDomain(filePath);
+			if (newDomain !== currentDomain) {
+				console.log(`[ACE] Domain shift: ${currentDomain} → ${newDomain} (${path.basename(filePath)})`);
+				logDomainShift(currentDomain, newDomain, filePath);
+				currentDomain = newDomain;
+			}
 
 			// Check if folder changed - works for both single and multi-root workspaces
 			if (folder && !isSameFolder(folder, currentFolder)) {
@@ -333,6 +418,14 @@ function getAceConfigForPatterns(ctx: AceContext): { serverUrl?: string; apiToke
  */
 export function getCurrentFolder(): vscode.WorkspaceFolder | undefined {
 	return currentFolder;
+}
+
+/**
+ * Get the current domain context
+ * Used for domain-aware pattern search (Issue #3)
+ */
+export function getCurrentDomain(): string {
+	return currentDomain;
 }
 
 /**

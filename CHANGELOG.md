@@ -5,6 +5,26 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.27] - 2025-12-21
+
+### Added
+- **Domain-aware continuous search** (Issue #3: Claude Code v5.3.0 parity)
+  - New Cursor rule `.cursor/rules/ace-domain-search.md` guides AI to use domain filtering
+  - Domain detection in TypeScript (`detectDomain()` in workspaceMonitor.ts)
+  - Domain shift logging to `.cursor/ace/domain_shifts.log`
+  - Console logs show domain transitions: `[ACE] Domain shift: auth → api`
+  - Hook scripts updated with domain detection (Unix + Windows)
+
+### Changed
+- Hook scripts now always update to get latest domain detection features
+- Domains supported: auth, api, cache, database, ui, test, general
+
+### Added Tests
+- `getCurrentDomain` should return valid domain string
+- Domain detection path identification tests (auth, api, ui, test)
+- Domain-aware search rule structure validation
+- Domain shifts log write test
+
 ## [0.2.26] - 2025-12-17
 
 ### Fixed

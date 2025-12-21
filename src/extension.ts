@@ -392,9 +392,9 @@ $input | Out-File -Append -FilePath "$aceDir\\response_trajectory.jsonl" -Encodi
 		console.log('[ACE] Created ace_track_response.ps1');
 	}
 
-	// File Edit Tracking (existing, unchanged)
+	// File Edit Tracking with Domain Detection
 	const editTrackPath = path.join(scriptsDir, 'ace_track_edit.ps1');
-	const editTrackScript = `# ACE Edit Tracking Hook - Captures file edits for AI-Trail
+	const editTrackScript = `# ACE Edit Tracking Hook - Captures file edits with domain detection
 # Input: file_path, edits[]
 
 $aceDir = ".cursor\\ace"
@@ -402,12 +402,53 @@ if (-not (Test-Path $aceDir)) {
     New-Item -ItemType Directory -Path $aceDir -Force | Out-Null
 }
 
-$input | Out-File -Append -FilePath "$aceDir\\edit_trajectory.jsonl" -Encoding utf8
+$inputJson = [Console]::In.ReadToEnd()
+$inputJson | Out-File -Append -FilePath "$aceDir\\edit_trajectory.jsonl" -Encoding utf8
+
+# Domain detection function
+function Detect-Domain {
+    param([string]$FilePath)
+    switch -Regex ($FilePath) {
+        '(auth|login|session|jwt)' { return 'auth' }
+        '(api|routes|endpoint|controller)' { return 'api' }
+        '(cache|redis|memo)' { return 'cache' }
+        '(db|migration|model|schema)' { return 'database' }
+        '(component|ui|view|\\.tsx|\\.jsx)' { return 'ui' }
+        '(test|spec|mock)' { return 'test' }
+        default { return 'general' }
+    }
+}
+
+# Extract file path and detect domain
+try {
+    $data = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
+    $filePath = $data.file_path
+    if (-not $filePath) { $filePath = $data.path }
+
+    if ($filePath) {
+        $currentDomain = Detect-Domain -FilePath $filePath
+        $lastDomainFile = "$aceDir\\last_domain.txt"
+        $lastDomain = if (Test-Path $lastDomainFile) { Get-Content $lastDomainFile } else { "" }
+
+        if ($currentDomain -ne $lastDomain -and $lastDomain) {
+            $shift = @{
+                from = $lastDomain
+                to = $currentDomain
+                file = $filePath
+                timestamp = (Get-Date -Format "o")
+            } | ConvertTo-Json -Compress
+            $shift | Out-File -Append -FilePath "$aceDir\\domain_shifts.log" -Encoding utf8
+        }
+
+        $currentDomain | Out-File -FilePath $lastDomainFile -Encoding utf8
+    }
+} catch {
+    # Silently continue on parse errors
+}
 `;
-	if (!fs.existsSync(editTrackPath)) {
-		fs.writeFileSync(editTrackPath, editTrackScript);
-		console.log('[ACE] Created ace_track_edit.ps1');
-	}
+	// Always update to get domain detection
+	fs.writeFileSync(editTrackPath, editTrackScript);
+	console.log('[ACE] Updated ace_track_edit.ps1 with domain detection');
 
 	// Stop Hook with Git Context Aggregation
 	const stopHookPath = path.join(scriptsDir, 'ace_stop_hook.ps1');
@@ -506,21 +547,50 @@ exit 0
 		console.log('[ACE] Created ace_track_response.sh');
 	}
 
-	// File Edit Tracking
+	// File Edit Tracking with Domain Detection
 	const editTrackPath = path.join(scriptsDir, 'ace_track_edit.sh');
 	const editTrackScript = `#!/bin/bash
-# ACE Edit Tracking Hook - Captures file edits for AI-Trail
+# ACE Edit Tracking Hook - Captures file edits with domain detection
 # Input: file_path, edits[]
 
 input=$(cat)
 mkdir -p .cursor/ace
 echo "$input" >> .cursor/ace/edit_trajectory.jsonl
+
+# Domain detection function
+detect_domain() {
+  local file_path="$1"
+  case "$file_path" in
+    */auth/*|*login*|*session*|*jwt*) echo "auth" ;;
+    */api/*|*routes*|*endpoint*|*controller*) echo "api" ;;
+    */cache/*|*redis*|*memo*) echo "cache" ;;
+    */db/*|*migration*|*model*|*schema*) echo "database" ;;
+    */component*|*/ui/*|*/view*|*.tsx|*.jsx) echo "ui" ;;
+    */test*|*spec*|*mock*) echo "test" ;;
+    *) echo "general" ;;
+  esac
+}
+
+# Extract file path from input JSON
+file_path=$(echo "$input" | jq -r '.file_path // .path // empty' 2>/dev/null)
+
+if [ -n "$file_path" ]; then
+  current_domain=$(detect_domain "$file_path")
+  last_domain=$(cat .cursor/ace/last_domain.txt 2>/dev/null || echo "")
+
+  # Log domain transition if changed
+  if [ "$current_domain" != "$last_domain" ] && [ -n "$last_domain" ]; then
+    echo "{\\"from\\": \\"$last_domain\\", \\"to\\": \\"$current_domain\\", \\"file\\": \\"$file_path\\", \\"timestamp\\": \\"$(date -Iseconds)\\"}" >> .cursor/ace/domain_shifts.log
+  fi
+
+  echo "$current_domain" > .cursor/ace/last_domain.txt
+fi
+
 exit 0
 `;
-	if (!fs.existsSync(editTrackPath)) {
-		fs.writeFileSync(editTrackPath, editTrackScript, { mode: 0o755 });
-		console.log('[ACE] Created ace_track_edit.sh');
-	}
+	// Always update to get domain detection
+	fs.writeFileSync(editTrackPath, editTrackScript, { mode: 0o755 });
+	console.log('[ACE] Updated ace_track_edit.sh with domain detection');
 
 	// Stop Hook with Git Context Aggregation
 	const stopHookPath = path.join(scriptsDir, 'ace_stop_hook.sh');
@@ -806,6 +876,59 @@ This is NOT optional. Call the tool, review patterns, THEN proceed.
 		fs.writeFileSync(rulesPath, rulesContent);
 		console.log('[ACE] Created ace-patterns.mdc rules file');
 	}
+
+	// Create domain-aware search rule (Issue #3)
+	const domainRulePath = path.join(rulesDir, 'ace-domain-search.md');
+	const domainRuleContent = `---
+description: Domain-aware ACE pattern search for focused code retrieval
+alwaysApply: true
+---
+
+# Domain-Aware Pattern Search
+
+## Identify Domain Before Implementation
+
+When starting a task, identify the domain context:
+
+| Domain | Keywords/Paths |
+|--------|----------------|
+| auth | authentication, login, JWT, sessions, /auth/, /login/ |
+| cache | caching, Redis, memoization, /cache/ |
+| api | endpoints, REST, GraphQL, HTTP, /api/, /routes/ |
+| database | queries, migrations, ORM, /db/, /models/ |
+| ui | components, styling, layouts, /components/, /views/ |
+| test | testing, specs, mocks, /test/, /__tests__/ |
+
+## Use Domain Filtering with ace_search
+
+**MANDATORY**: Call \`ace_search\` with domain filtering:
+
+\`\`\`
+# Focus on specific domain
+ace_search("authentication patterns", allowed_domains=["auth", "security"])
+
+# Exclude test patterns during implementation
+ace_search("API endpoint", blocked_domains=["test"])
+\`\`\`
+
+## Examples by Task Type
+
+- **Implementing login** → \`ace_search("JWT refresh", allowed_domains=["auth"])\`
+- **Adding API endpoint** → \`ace_search("error handling", allowed_domains=["api"])\`
+- **Database query** → \`ace_search("query optimization", allowed_domains=["database"])\`
+- **UI component** → \`ace_search("form validation", allowed_domains=["ui"])\`
+
+## Domain Transition Awareness
+
+When switching between domains (e.g., from \`auth\` to \`api\`), consider:
+1. How the domains interact (auth tokens in API calls)
+2. Cross-domain patterns that might be relevant
+3. Using multiple domains: \`allowed_domains=["auth", "api"]\`
+`;
+
+	// Always update domain rule to get latest patterns
+	fs.writeFileSync(domainRulePath, domainRuleContent);
+	console.log('[ACE] Updated ace-domain-search.md rules file');
 }
 
 /**
