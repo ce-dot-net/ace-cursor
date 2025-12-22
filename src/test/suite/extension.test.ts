@@ -475,6 +475,43 @@ suite('ACE Extension Test Suite', () => {
 		}
 	});
 
+	test('Continuous search rule should exist and have correct structure (v0.2.28)', () => {
+		const workspaceFolders = vscode.workspace.workspaceFolders;
+		if (workspaceFolders && workspaceFolders.length > 0) {
+			const continuousRulePath = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'rules', 'ace-continuous-search.md');
+			if (fs.existsSync(continuousRulePath)) {
+				const content = fs.readFileSync(continuousRulePath, 'utf-8');
+				// Check frontmatter
+				assert.ok(content.includes('alwaysApply: true'), 'Continuous search rule should have alwaysApply: true');
+				// Check domain instructions
+				assert.ok(content.includes('domain'), 'Continuous search rule should mention domain');
+				assert.ok(content.includes('hook'), 'Continuous search rule should mention hook output');
+				assert.ok(content.includes('allowed_domains'), 'Continuous search rule should mention allowed_domains');
+				assert.ok(content.includes('ace_search'), 'Continuous search rule should mention ace_search tool');
+				// Check domain reference table
+				assert.ok(content.includes('auth'), 'Continuous search rule should list auth domain');
+				assert.ok(content.includes('api'), 'Continuous search rule should list api domain');
+			}
+		}
+	});
+
+	test('Hook script should output domain in JSON (v0.2.28)', () => {
+		const workspaceFolders = vscode.workspace.workspaceFolders;
+		if (workspaceFolders && workspaceFolders.length > 0) {
+			const scriptsDir = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'scripts');
+			const ext = process.platform === 'win32' ? '.ps1' : '.sh';
+			const editHookPath = path.join(scriptsDir, `ace_track_edit${ext}`);
+
+			if (fs.existsSync(editHookPath)) {
+				const content = fs.readFileSync(editHookPath, 'utf-8');
+				// Check that hook outputs domain
+				assert.ok(content.includes('domain'), 'Edit hook should output domain');
+				assert.ok(content.includes('domain_hint'), 'Edit hook should output domain_hint');
+				assert.ok(content.includes('allowed_domains'), 'Edit hook domain_hint should mention allowed_domains');
+			}
+		}
+	});
+
 	test('Domain shifts log should be writable', () => {
 		const workspaceFolders = vscode.workspace.workspaceFolders;
 		if (workspaceFolders && workspaceFolders.length > 0) {

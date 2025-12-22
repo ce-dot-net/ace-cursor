@@ -441,6 +441,13 @@ try {
         }
 
         $currentDomain | Out-File -FilePath $lastDomainFile -Encoding utf8
+
+        # Output domain context for AI to use in ace_search
+        @{
+            file = $filePath
+            domain = $currentDomain
+            domain_hint = "Use allowed_domains=['$currentDomain'] for focused patterns"
+        } | ConvertTo-Json
     }
 } catch {
     # Silently continue on parse errors
@@ -584,6 +591,15 @@ if [ -n "$file_path" ]; then
   fi
 
   echo "$current_domain" > .cursor/ace/last_domain.txt
+
+  # Output domain context for AI to use in ace_search
+  cat << DOMAINEOF
+{
+  "file": "$file_path",
+  "domain": "$current_domain",
+  "domain_hint": "Use allowed_domains=['$current_domain'] for focused patterns"
+}
+DOMAINEOF
 fi
 
 exit 0
@@ -929,6 +945,62 @@ When switching between domains (e.g., from \`auth\` to \`api\`), consider:
 	// Always update domain rule to get latest patterns
 	fs.writeFileSync(domainRulePath, domainRuleContent);
 	console.log('[ACE] Updated ace-domain-search.md rules file');
+
+	// Create continuous search rule (v0.2.28)
+	const continuousSearchRulePath = path.join(rulesDir, 'ace-continuous-search.md');
+	const continuousSearchRuleContent = `---
+description: Use domain from hook output for continuous pattern search
+alwaysApply: true
+---
+
+# Continuous Search with Domain Context
+
+## Reading Domain from Hook Output
+
+When you edit a file, the afterFileEdit hook outputs:
+
+\`\`\`json
+{"file": "src/api/routes.ts", "domain": "api", "domain_hint": "Use allowed_domains=['api'] for focused patterns"}
+\`\`\`
+
+**Use this domain** when calling ace_search:
+
+\`\`\`
+ace_search("your query", allowed_domains=["api"])
+\`\`\`
+
+## When to Re-Search Patterns
+
+Call \`ace_search\` again when:
+
+1. **Domain shift** - Hook output shows different domain than last search
+2. **Extended work** - 5+ tool calls since last pattern retrieval
+3. **Hitting errors** - Encountering issues not covered by current patterns
+4. **New context** - Switching to different file type or codebase area
+
+## Domain Reference
+
+| Domain | Triggered By |
+|--------|--------------|
+| auth | auth/, login/, jwt, oauth, session files |
+| api | api/, routes/, endpoint, controller files |
+| cache | cache/, redis/, memo files |
+| database | db/, model/, schema/, migration files |
+| ui | component/, view/, .tsx/.jsx files |
+| test | test/, spec/, __tests__ directories |
+| general | all other files |
+
+## Example Workflow
+
+1. Edit \`src/api/routes.ts\` → hook outputs \`{"domain": "api"}\`
+2. Call \`ace_search("error handling", allowed_domains=["api"])\`
+3. Edit \`src/auth/login.ts\` → hook outputs \`{"domain": "auth"}\`
+4. Call \`ace_search("session management", allowed_domains=["auth"])\`
+`;
+
+	// Always update continuous search rule
+	fs.writeFileSync(continuousSearchRulePath, continuousSearchRuleContent);
+	console.log('[ACE] Updated ace-continuous-search.md rules file');
 }
 
 /**

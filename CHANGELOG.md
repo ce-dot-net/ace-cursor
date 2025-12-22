@@ -5,6 +5,24 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.28] - 2025-12-22
+
+### Added
+- **Continuous search with domain output** (extends Issue #3)
+  - Hook scripts now output domain JSON for AI to use
+  - `afterFileEdit` hook outputs: `{"file": "...", "domain": "api", "domain_hint": "..."}`
+  - AI can read domain from hook output and use `allowed_domains` in ace_search
+  - New rule `.cursor/rules/ace-continuous-search.md` instructs AI on domain-aware re-search
+  - No MCP changes needed - uses existing `allowed_domains` parameter
+
+### Changed
+- Hook script templates (Unix + Windows) updated to output domain context
+- Domain reference table in rules for auth, api, cache, database, ui, test, general
+
+### Added Tests
+- Continuous search rule structure validation
+- Hook script domain output verification
+
 ## [0.2.27] - 2025-12-21
 
 ### Added
