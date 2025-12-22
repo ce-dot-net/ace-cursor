@@ -12,6 +12,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import * as crypto from 'crypto';
 import { readContext, isMultiRootWorkspace, type AceContext } from '../ace/context';
 
 // Import getAceConfig from extension - will be set via init
@@ -100,6 +101,28 @@ function logDomainShift(fromDomain: string, toDomain: string, filePath: string):
 }
 
 /**
+ * Write domain state to temp file for MCP Resources
+ * MCP server reads this to expose ace://domain/current resource
+ */
+function writeDomainStateForMcp(domain: string, filePath: string): void {
+	const ctx = readContext(currentFolder);
+	const projectId = ctx?.projectId || 'default';
+	const hash = crypto.createHash('md5').update(projectId).digest('hex').slice(0, 8);
+	const tempPath = path.join(os.tmpdir(), `ace-domain-${hash}.json`);
+
+	try {
+		fs.writeFileSync(tempPath, JSON.stringify({
+			domain,
+			file: filePath,
+			timestamp: new Date().toISOString()
+		}));
+		console.log(`[ACE] Domain state written to ${tempPath}: ${domain}`);
+	} catch (err) {
+		console.log('[ACE] Failed to write domain state:', err);
+	}
+}
+
+/**
  * Compare two workspace folders by URI (not object reference)
  * VSCode may create new folder objects, so we need to compare by URI
  */
@@ -150,6 +173,7 @@ export function initWorkspaceMonitor(
 				console.log(`[ACE] Domain shift: ${currentDomain} → ${newDomain} (${path.basename(filePath)})`);
 				logDomainShift(currentDomain, newDomain, filePath);
 				currentDomain = newDomain;
+				writeDomainStateForMcp(newDomain, filePath);
 			}
 
 			// Check if folder changed - works for both single and multi-root workspaces

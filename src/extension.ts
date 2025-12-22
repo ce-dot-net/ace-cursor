@@ -396,6 +396,7 @@ $input | Out-File -Append -FilePath "$aceDir\\response_trajectory.jsonl" -Encodi
 	const editTrackPath = path.join(scriptsDir, 'ace_track_edit.ps1');
 	const editTrackScript = `# ACE Edit Tracking Hook - Captures file edits with domain detection
 # Input: file_path, edits[]
+# Writes domain state to temp file for MCP Resources (Issue #3 fix)
 
 $aceDir = ".cursor\\ace"
 if (-not (Test-Path $aceDir)) {
@@ -442,12 +443,25 @@ try {
 
         $currentDomain | Out-File -FilePath $lastDomainFile -Encoding utf8
 
-        # Output domain context for AI to use in ace_search
+        # Write domain state to temp file for MCP Resources
+        # MCP server reads this to expose ace://domain/current resource
+        $settingsPath = "$aceDir\\settings.json"
+        $projectId = "default"
+        if (Test-Path $settingsPath) {
+            try {
+                $settings = Get-Content $settingsPath | ConvertFrom-Json
+                if ($settings.projectId) { $projectId = $settings.projectId }
+            } catch {}
+        }
+        $md5 = [System.Security.Cryptography.MD5]::Create()
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($projectId)
+        $hash = [BitConverter]::ToString($md5.ComputeHash($bytes)).Replace("-","").Substring(0,8).ToLower()
+        $tempFile = "$env:TEMP\\ace-domain-$hash.json"
         @{
-            file = $filePath
             domain = $currentDomain
-            domain_hint = "Use allowed_domains=['$currentDomain'] for focused patterns"
-        } | ConvertTo-Json
+            file = $filePath
+            timestamp = (Get-Date -Format "o")
+        } | ConvertTo-Json | Out-File -FilePath $tempFile -Encoding utf8
     }
 } catch {
     # Silently continue on parse errors
@@ -455,7 +469,7 @@ try {
 `;
 	// Always update to get domain detection
 	fs.writeFileSync(editTrackPath, editTrackScript);
-	console.log('[ACE] Updated ace_track_edit.ps1 with domain detection');
+	console.log('[ACE] Updated ace_track_edit.ps1 with MCP temp file');
 
 	// Stop Hook with Git Context Aggregation
 	const stopHookPath = path.join(scriptsDir, 'ace_stop_hook.ps1');
@@ -559,6 +573,7 @@ exit 0
 	const editTrackScript = `#!/bin/bash
 # ACE Edit Tracking Hook - Captures file edits with domain detection
 # Input: file_path, edits[]
+# Writes domain state to temp file for MCP Resources (Issue #3 fix)
 
 input=$(cat)
 mkdir -p .cursor/ace
@@ -592,14 +607,14 @@ if [ -n "$file_path" ]; then
 
   echo "$current_domain" > .cursor/ace/last_domain.txt
 
-  # Output domain context for AI to use in ace_search
-  cat << DOMAINEOF
-{
-  "file": "$file_path",
-  "domain": "$current_domain",
-  "domain_hint": "Use allowed_domains=['$current_domain'] for focused patterns"
-}
-DOMAINEOF
+  # Write domain state to temp file for MCP Resources
+  # MCP server reads this to expose ace://domain/current resource
+  # Uses $TMPDIR (macOS) with fallback to /tmp (Linux)
+  project_id=$(jq -r '.projectId // "default"' .cursor/ace/settings.json 2>/dev/null || echo "default")
+  hash=$(echo -n "$project_id" | md5sum | cut -c1-8)
+  temp_dir="\${TMPDIR:-/tmp}"
+  temp_file="\${temp_dir%/}/ace-domain-\${hash}.json"
+  echo "{\\"domain\\": \\"$current_domain\\", \\"file\\": \\"$file_path\\", \\"timestamp\\": \\"$(date -Iseconds)\\"}" > "$temp_file"
 fi
 
 exit 0
