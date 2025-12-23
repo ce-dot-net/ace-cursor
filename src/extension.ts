@@ -160,16 +160,16 @@ async function checkWorkspaceVersionAndPrompt(context: vscode.ExtensionContext):
 			);
 
 			if (selection === 'Update Workspace') {
-				// Update this specific folder
+				// Update this specific folder with forceUpdate=true to overwrite existing files
 				const aceDir = vscode.Uri.joinPath(folder.uri, '.cursor', 'ace');
 				try {
 					await vscode.workspace.fs.createDirectory(aceDir);
 				} catch {
 					// Directory may already exist
 				}
-				await createCursorHooks(folder);
-				await createCursorRules(folder);
-				await createCursorCommands(folder);
+				await createCursorHooks(folder, true);    // forceUpdate=true
+				await createCursorRules(folder, true);    // forceUpdate=true
+				await createCursorCommands(folder, true); // forceUpdate=true
 				writeWorkspaceVersion(extensionVersion, folder);
 				vscode.window.showInformationMessage(`ACE workspace${folderName} updated to v${extensionVersion}!`);
 			} else if (selection === 'Skip') {
@@ -240,8 +240,10 @@ async function registerMcpServer(context: vscode.ExtensionContext): Promise<void
  * Create Cursor hooks for AI-Trail trajectory tracking
  * Full trajectory capture: MCP tools, shell commands, agent responses, file edits
  * Creates bash scripts on Unix, PowerShell scripts on Windows
+ * @param folder - Target workspace folder
+ * @param forceUpdate - If true, overwrite existing files (used during version upgrade)
  */
-async function createCursorHooks(folder?: vscode.WorkspaceFolder): Promise<void> {
+async function createCursorHooks(folder?: vscode.WorkspaceFolder, forceUpdate: boolean = false): Promise<void> {
 	const targetFolder = folder || await getTargetFolder('Select folder for ACE hooks');
 	if (!targetFolder) {
 		return;
@@ -293,8 +295,10 @@ async function createCursorHooks(folder?: vscode.WorkspaceFolder): Promise<void>
 	};
 
 	// Always update hooks.json to ensure all AI-Trail hooks are present
-	let shouldWriteHooks = false;
-	if (!fs.existsSync(hooksPath)) {
+	let shouldWriteHooks = forceUpdate;  // Force update if version upgrade
+	if (forceUpdate) {
+		console.log('[ACE] Force updating hooks.json (version upgrade)');
+	} else if (!fs.existsSync(hooksPath)) {
 		shouldWriteHooks = true;
 		console.log('[ACE] Creating hooks.json with AI-Trail support');
 	} else {
@@ -329,18 +333,20 @@ async function createCursorHooks(folder?: vscode.WorkspaceFolder): Promise<void>
 		console.log('[ACE] hooks.json ready with AI-Trail support');
 	}
 
-	// Create all hook scripts for the current platform
+	// Create all hook scripts for the current platform (pass forceUpdate)
 	if (isWindows) {
-		createWindowsHookScripts(scriptsDir);
+		createWindowsHookScripts(scriptsDir, forceUpdate);
 	} else {
-		createUnixHookScripts(scriptsDir);
+		createUnixHookScripts(scriptsDir, forceUpdate);
 	}
 }
 
 /**
  * Create Windows PowerShell hook scripts for AI-Trail
+ * @param scriptsDir - Directory to write scripts to
+ * @param forceUpdate - If true, overwrite existing files (used during version upgrade)
  */
-function createWindowsHookScripts(scriptsDir: string): void {
+function createWindowsHookScripts(scriptsDir: string, forceUpdate: boolean = false): void {
 	// MCP Execution Tracking (PostToolUse equivalent)
 	const mcpTrackPath = path.join(scriptsDir, 'ace_track_mcp.ps1');
 	const mcpTrackScript = `# ACE MCP Tracking Hook - Captures tool executions for AI-Trail
@@ -353,9 +359,9 @@ if (-not (Test-Path $aceDir)) {
 
 $input | Out-File -Append -FilePath "$aceDir\\mcp_trajectory.jsonl" -Encoding utf8
 `;
-	if (!fs.existsSync(mcpTrackPath)) {
+	if (forceUpdate || !fs.existsSync(mcpTrackPath)) {
 		fs.writeFileSync(mcpTrackPath, mcpTrackScript);
-		console.log('[ACE] Created ace_track_mcp.ps1');
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_track_mcp.ps1`);
 	}
 
 	// Shell Execution Tracking
@@ -370,9 +376,9 @@ if (-not (Test-Path $aceDir)) {
 
 $input | Out-File -Append -FilePath "$aceDir\\shell_trajectory.jsonl" -Encoding utf8
 `;
-	if (!fs.existsSync(shellTrackPath)) {
+	if (forceUpdate || !fs.existsSync(shellTrackPath)) {
 		fs.writeFileSync(shellTrackPath, shellTrackScript);
-		console.log('[ACE] Created ace_track_shell.ps1');
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_track_shell.ps1`);
 	}
 
 	// Agent Response Tracking
@@ -387,9 +393,9 @@ if (-not (Test-Path $aceDir)) {
 
 $input | Out-File -Append -FilePath "$aceDir\\response_trajectory.jsonl" -Encoding utf8
 `;
-	if (!fs.existsSync(responseTrackPath)) {
+	if (forceUpdate || !fs.existsSync(responseTrackPath)) {
 		fs.writeFileSync(responseTrackPath, responseTrackScript);
-		console.log('[ACE] Created ace_track_response.ps1');
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_track_response.ps1`);
 	}
 
 	// File Edit Tracking with Domain Detection
@@ -518,8 +524,10 @@ if ($status -eq "completed" -and $loopCount -eq 0) {
 
 /**
  * Create Unix bash hook scripts for AI-Trail
+ * @param scriptsDir - Directory to write scripts to
+ * @param forceUpdate - If true, overwrite existing files (used during version upgrade)
  */
-function createUnixHookScripts(scriptsDir: string): void {
+function createUnixHookScripts(scriptsDir: string, forceUpdate: boolean = false): void {
 	// MCP Execution Tracking (PostToolUse equivalent)
 	const mcpTrackPath = path.join(scriptsDir, 'ace_track_mcp.sh');
 	const mcpTrackScript = `#!/bin/bash
@@ -531,9 +539,9 @@ mkdir -p .cursor/ace
 echo "$input" >> .cursor/ace/mcp_trajectory.jsonl
 exit 0
 `;
-	if (!fs.existsSync(mcpTrackPath)) {
+	if (forceUpdate || !fs.existsSync(mcpTrackPath)) {
 		fs.writeFileSync(mcpTrackPath, mcpTrackScript, { mode: 0o755 });
-		console.log('[ACE] Created ace_track_mcp.sh');
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_track_mcp.sh`);
 	}
 
 	// Shell Execution Tracking
@@ -547,9 +555,9 @@ mkdir -p .cursor/ace
 echo "$input" >> .cursor/ace/shell_trajectory.jsonl
 exit 0
 `;
-	if (!fs.existsSync(shellTrackPath)) {
+	if (forceUpdate || !fs.existsSync(shellTrackPath)) {
 		fs.writeFileSync(shellTrackPath, shellTrackScript, { mode: 0o755 });
-		console.log('[ACE] Created ace_track_shell.sh');
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_track_shell.sh`);
 	}
 
 	// Agent Response Tracking
@@ -563,9 +571,9 @@ mkdir -p .cursor/ace
 echo "$input" >> .cursor/ace/response_trajectory.jsonl
 exit 0
 `;
-	if (!fs.existsSync(responseTrackPath)) {
+	if (forceUpdate || !fs.existsSync(responseTrackPath)) {
 		fs.writeFileSync(responseTrackPath, responseTrackScript, { mode: 0o755 });
-		console.log('[ACE] Created ace_track_response.sh');
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_track_response.sh`);
 	}
 
 	// File Edit Tracking with Domain Detection
@@ -663,8 +671,10 @@ fi
 /**
  * Create Cursor slash commands for ACE
  * These are .md files in .cursor/commands/ that become /ace-* commands in chat
+ * @param folder - Target workspace folder
+ * @param forceUpdate - If true, overwrite existing files (used during version upgrade)
  */
-async function createCursorCommands(folder?: vscode.WorkspaceFolder): Promise<void> {
+async function createCursorCommands(folder?: vscode.WorkspaceFolder, forceUpdate: boolean = false): Promise<void> {
 	const targetFolder = folder || await getTargetFolder('Select folder for ACE commands');
 	if (!targetFolder) {
 		return;
@@ -837,12 +847,12 @@ Show all available ACE commands and usage.
 **Note**: All commands execute corresponding VS Code extension commands. Use the Command Palette (\`Cmd/Ctrl+Shift+P\`) and type "ACE" to see all available commands.`
 	};
 
-	// Write each command file (only if doesn't exist)
+	// Write each command file (create if doesn't exist OR if force update)
 	for (const [filename, content] of Object.entries(commands)) {
 		const filePath = path.join(commandsDir, filename);
-		if (!fs.existsSync(filePath)) {
+		if (forceUpdate || !fs.existsSync(filePath)) {
 			fs.writeFileSync(filePath, content);
-			console.log(`[ACE] Created slash command: ${filename}`);
+			console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} slash command: ${filename}`);
 		}
 	}
 }
@@ -850,8 +860,10 @@ Show all available ACE commands and usage.
 /**
  * Create Cursor Rules file to instruct AI to use ACE tools
  * This is the "belt + suspenders" approach - rules ensure AI calls ACE tools
+ * @param folder - Target workspace folder
+ * @param forceUpdate - If true, overwrite existing files (used during version upgrade)
  */
-async function createCursorRules(folder?: vscode.WorkspaceFolder): Promise<void> {
+async function createCursorRules(folder?: vscode.WorkspaceFolder, forceUpdate: boolean = false): Promise<void> {
 	const targetFolder = folder || await getTargetFolder('Select folder for ACE rules');
 	if (!targetFolder) {
 		return;
@@ -903,10 +915,10 @@ This is NOT optional. Call the tool, review patterns, THEN proceed.
 5. \`ace_status\` - View playbook statistics
 `;
 
-	// Only create if doesn't exist (don't overwrite user customizations)
-	if (!fs.existsSync(rulesPath)) {
+	// Create if doesn't exist OR if force update requested (during version upgrade)
+	if (forceUpdate || !fs.existsSync(rulesPath)) {
 		fs.writeFileSync(rulesPath, rulesContent);
-		console.log('[ACE] Created ace-patterns.mdc rules file');
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace-patterns.mdc rules file`);
 	}
 
 	// Create domain-aware search rule (Issue #3) - Updated for ace_list_domains (v0.2.30)

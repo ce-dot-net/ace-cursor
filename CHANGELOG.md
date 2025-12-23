@@ -5,6 +5,20 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.31] - 2025-12-23
+
+### Fixed
+- **"Update Workspace" now actually updates all files** (v0.2.30 follow-up fix)
+  - Previously: Clicking "Update Workspace" called update functions but they didn't overwrite existing files
+  - Root cause: `if (!fs.existsSync())` checks prevented updates to existing files
+  - Added `forceUpdate` parameter to: `createCursorRules()`, `createCursorCommands()`, `createCursorHooks()`, `createWindowsHookScripts()`, `createUnixHookScripts()`
+  - Version upgrade popup now passes `forceUpdate=true` to force overwrite stale files
+
+### Technical
+- Files now updated on version upgrade: hook scripts (.sh/.ps1), ace-patterns.mdc, all slash commands
+- Initial workspace setup (forceUpdate=false) still only creates missing files
+- Version update (forceUpdate=true) overwrites all workspace files with latest templates
+
 ## [0.2.30] - 2025-12-23
 
 ### Fixed
