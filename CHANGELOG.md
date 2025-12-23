@@ -5,6 +5,34 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.30] - 2025-12-23
+
+### Fixed
+- **Domain filtering now works** (Issue #3 final fix)
+  - Updated Cursor rules to use `ace_list_domains` for dynamic domain discovery
+  - Rule files now instruct AI to call `ace_list_domains` BEFORE using `allowed_domains`
+  - Fixes 0-result issue caused by hardcoded domain names that don't exist on server
+
+### Changed
+- `ace-patterns.mdc` - Added `ace_list_domains` to available tools list
+- `ace-domain-search.md` - Complete rewrite for dynamic domain discovery workflow
+- `ace-continuous-search.md` - Removed hardcoded domain references, simplified to retrieval focus
+
+### Technical
+- Server domains are SEMANTIC (e.g., "typescript-development-practices")
+- Previous hardcoded "auth", "api", "test" domains returned 0 results
+- Now AI discovers actual domain names via `ace_list_domains` MCP tool
+
+## [0.2.29] - 2025-12-22
+
+### Added
+- MCP Resources exploration (later reverted - Cursor doesn't support MCP Resources yet)
+- Temp file domain state writing for MCP integration attempts
+
+### Note
+- This version was an intermediate step exploring MCP Resources approach
+- Changes were reverted after discovering Cursor only supports MCP Tools, not Resources
+
 ## [0.2.28] - 2025-12-22
 
 ### Added

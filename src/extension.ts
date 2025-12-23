@@ -897,9 +897,10 @@ This is NOT optional. Call the tool, review patterns, THEN proceed.
 ## Available ACE MCP Tools
 
 1. \`ace_get_playbook\` - **CALL FIRST** - Get all learned patterns
-2. \`ace_search\` - Search patterns by query
-3. \`ace_learn\` - **CALL AFTER** - Capture learning
-4. \`ace_status\` - View playbook statistics
+2. \`ace_search\` - Search patterns by query (supports domain filtering)
+3. \`ace_list_domains\` - List available domains for filtering
+4. \`ace_learn\` - **CALL AFTER** - Capture learning
+5. \`ace_status\` - View playbook statistics
 `;
 
 	// Only create if doesn't exist (don't overwrite user customizations)
@@ -908,109 +909,108 @@ This is NOT optional. Call the tool, review patterns, THEN proceed.
 		console.log('[ACE] Created ace-patterns.mdc rules file');
 	}
 
-	// Create domain-aware search rule (Issue #3)
+	// Create domain-aware search rule (Issue #3) - Updated for ace_list_domains (v0.2.30)
 	const domainRulePath = path.join(rulesDir, 'ace-domain-search.md');
 	const domainRuleContent = `---
-description: Domain-aware ACE pattern search for focused code retrieval
+description: Domain-aware ACE pattern search - discover and use actual domain names
 alwaysApply: true
 ---
 
 # Domain-Aware Pattern Search
 
-## Identify Domain Before Implementation
+## CRITICAL: Discover Domains First
 
-When starting a task, identify the domain context:
+**NEVER guess domain names** like "auth", "api", "test".
+Server domains are SEMANTIC like "typescript-development-practices".
 
-| Domain | Keywords/Paths |
-|--------|----------------|
-| auth | authentication, login, JWT, sessions, /auth/, /login/ |
-| cache | caching, Redis, memoization, /cache/ |
-| api | endpoints, REST, GraphQL, HTTP, /api/, /routes/ |
-| database | queries, migrations, ORM, /db/, /models/ |
-| ui | components, styling, layouts, /components/, /views/ |
-| test | testing, specs, mocks, /test/, /__tests__/ |
+### Step 1: Call ace_list_domains
 
-## Use Domain Filtering with ace_search
-
-**MANDATORY**: Call \`ace_search\` with domain filtering:
+**BEFORE using domain filtering**, discover available domains:
 
 \`\`\`
-# Focus on specific domain
-ace_search("authentication patterns", allowed_domains=["auth", "security"])
-
-# Exclude test patterns during implementation
-ace_search("API endpoint", blocked_domains=["test"])
+ace_list_domains()
+→ Returns: {
+    "domains": [
+      { "name": "mcp-cli-testing-and-api-resilience", "count": 34 },
+      { "name": "typescript-development-practices", "count": 27 },
+      { "name": "cli-and-package-version-diagnostics", "count": 23 }
+    ],
+    "total_domains": 17,
+    "total_patterns": 206
+  }
 \`\`\`
 
-## Examples by Task Type
+### Step 2: Match Domain to Task
 
-- **Implementing login** → \`ace_search("JWT refresh", allowed_domains=["auth"])\`
-- **Adding API endpoint** → \`ace_search("error handling", allowed_domains=["api"])\`
-- **Database query** → \`ace_search("query optimization", allowed_domains=["database"])\`
-- **UI component** → \`ace_search("form validation", allowed_domains=["ui"])\`
+Read domain names semantically to find the best match:
 
-## Domain Transition Awareness
+| Task Context | Look for domains containing |
+|--------------|----------------------------|
+| TypeScript code | "typescript", "development", "practices" |
+| Testing work | "testing", "test", "resilience" |
+| CLI/API work | "cli", "api", "config" |
+| Debugging | "diagnostics", "troubleshooting" |
 
-When switching between domains (e.g., from \`auth\` to \`api\`), consider:
-1. How the domains interact (auth tokens in API calls)
-2. Cross-domain patterns that might be relevant
-3. Using multiple domains: \`allowed_domains=["auth", "api"]\`
+### Step 3: Use Actual Domain Names
+
+\`\`\`
+# CORRECT - use exact domain name from ace_list_domains
+ace_search("testing patterns", allowed_domains=["mcp-cli-testing-and-api-resilience"])
+
+# WRONG - hardcoded domain that doesn't exist on server
+ace_search("testing patterns", allowed_domains=["test"])
+\`\`\`
+
+## Workflow
+
+1. \`ace_list_domains()\` - See what domains exist
+2. Pick relevant domain(s) based on task context
+3. \`ace_search("query", allowed_domains=["picked-domain"])\`
+
+## Why This Matters
+
+Using non-existent domains returns 0 results. Always verify domain names exist first.
 `;
 
 	// Always update domain rule to get latest patterns
 	fs.writeFileSync(domainRulePath, domainRuleContent);
 	console.log('[ACE] Updated ace-domain-search.md rules file');
 
-	// Create continuous search rule (v0.2.28)
+	// Create continuous search rule (v0.2.28) - Updated for ace_list_domains (v0.2.30)
 	const continuousSearchRulePath = path.join(rulesDir, 'ace-continuous-search.md');
 	const continuousSearchRuleContent = `---
-description: Use domain from hook output for continuous pattern search
+description: Continuous pattern retrieval during extended work
 alwaysApply: true
 ---
 
-# Continuous Search with Domain Context
-
-## Reading Domain from Hook Output
-
-When you edit a file, the afterFileEdit hook outputs:
-
-\`\`\`json
-{"file": "src/api/routes.ts", "domain": "api", "domain_hint": "Use allowed_domains=['api'] for focused patterns"}
-\`\`\`
-
-**Use this domain** when calling ace_search:
-
-\`\`\`
-ace_search("your query", allowed_domains=["api"])
-\`\`\`
+# Continuous Pattern Retrieval
 
 ## When to Re-Search Patterns
 
-Call \`ace_search\` again when:
+Call \`ace_search\` again during extended work sessions when:
 
-1. **Domain shift** - Hook output shows different domain than last search
-2. **Extended work** - 5+ tool calls since last pattern retrieval
-3. **Hitting errors** - Encountering issues not covered by current patterns
-4. **New context** - Switching to different file type or codebase area
+1. **Extended work** - 5+ tool calls since last pattern retrieval
+2. **Hitting errors** - Encountering issues not covered by current patterns
+3. **New context** - Switching to different file type or codebase area
+4. **Task shift** - Moving from one feature area to another
 
-## Domain Reference
+## Domain Filtering for Focused Results
 
-| Domain | Triggered By |
-|--------|--------------|
-| auth | auth/, login/, jwt, oauth, session files |
-| api | api/, routes/, endpoint, controller files |
-| cache | cache/, redis/, memo files |
-| database | db/, model/, schema/, migration files |
-| ui | component/, view/, .tsx/.jsx files |
-| test | test/, spec/, __tests__ directories |
-| general | all other files |
+For focused results, use domain filtering:
+
+1. **First**: Call \`ace_list_domains()\` to see available domains
+2. **Match**: Pick domain(s) that match your current task context
+3. **Search**: Call \`ace_search("query", allowed_domains=["picked-domain"])\`
+
+**IMPORTANT**: Domain names are semantic (e.g., "typescript-development-practices"),
+not simple paths. Always use \`ace_list_domains\` to discover actual domain names.
 
 ## Example Workflow
 
-1. Edit \`src/api/routes.ts\` → hook outputs \`{"domain": "api"}\`
-2. Call \`ace_search("error handling", allowed_domains=["api"])\`
-3. Edit \`src/auth/login.ts\` → hook outputs \`{"domain": "auth"}\`
-4. Call \`ace_search("session management", allowed_domains=["auth"])\`
+1. Start task → \`ace_get_playbook()\` to retrieve all patterns
+2. 5+ edits later → \`ace_search("error handling")\` for fresh patterns
+3. Need focused results → \`ace_list_domains()\` then \`ace_search(..., allowed_domains=[...])\`
+4. Task complete → \`ace_learn(...)\` to capture lessons
 `;
 
 	// Always update continuous search rule
