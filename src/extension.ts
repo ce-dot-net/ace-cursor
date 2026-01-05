@@ -879,13 +879,21 @@ async function createCursorRules(folder?: vscode.WorkspaceFolder, forceUpdate: b
 
 	const rulesPath = path.join(rulesDir, 'ace-patterns.mdc');
 	const rulesContent = `---
-description: ACE Pattern Learning - MANDATORY playbook retrieval
+description: ACE Pattern Learning - MANDATORY playbook retrieval EVERY SESSION
 alwaysApply: true
 ---
 
-# MANDATORY: ACE Pattern Retrieval
+# MANDATORY: ACE Pattern Retrieval - EVERY SESSION
 
 **CRITICAL INSTRUCTION - DO NOT SKIP**
+
+## PER-SESSION REQUIREMENT
+
+**On EVERY NEW CHAT SESSION, you MUST call \`ace_get_playbook\` FIRST.**
+
+Do NOT assume you "already know" the patterns from a previous session.
+Do NOT skip because patterns seem "familiar" or "unchanged".
+EVERY session is a fresh context - patterns MUST be retrieved again.
 
 ## BEFORE ANY Implementation Task
 
@@ -898,6 +906,13 @@ alwaysApply: true
 **FAILURE TO CALL ace_get_playbook = INCOMPLETE TASK**
 
 This is NOT optional. Call the tool, review patterns, THEN proceed.
+
+## WHY EVERY SESSION?
+
+1. Your context resets between sessions - previous patterns are NOT retained
+2. Playbook may have been updated since your last session
+3. New patterns from other team members may be available
+4. Caching ensures fast retrieval (RAM → SQLite → Server)
 
 ## AFTER Completing Substantial Work
 
