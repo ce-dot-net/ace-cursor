@@ -5,6 +5,11 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.33] - 2026-01-05
+
+### Fixed
+- **Changelog now visible on Open VSX** - v0.2.32 was published before changelog was committed
+
 ## [0.2.32] - 2026-01-05
 
 ### Added
