@@ -21,6 +21,10 @@ import { initWorkspaceMonitor, getCurrentFolder, refreshStatusBar } from './auto
 let statusBarItem: vscode.StatusBarItem;
 let extensionContext: vscode.ExtensionContext;
 
+// Preloaded pattern info for status bar display
+let preloadedPatternCount: number = 0;
+let preloadedDomains: string[] = [];
+
 // Cursor MCP API types (not in @types/vscode)
 // These are injected at runtime by Cursor
 interface CursorMcpApi {
@@ -42,6 +46,79 @@ interface CursorApi {
 const getCursorApi = (): CursorApi | undefined => {
 	return (vscode as any).cursor;
 };
+
+/**
+ * Preload patterns on extension activation using ace_search (semantic search)
+ * Uses HTTP API directly for fastest startup (no subprocess overhead)
+ * Returns 5-10 relevant patterns, NOT all 1000+ like ace_get_playbook
+ */
+async function preloadPatterns(): Promise<void> {
+	try {
+		const config = getAceConfig();
+		if (!config?.serverUrl || !config?.projectId) {
+			console.log('[ACE] Preload skipped: no config');
+			return;
+		}
+
+		const headers: Record<string, string> = {
+			'Content-Type': 'application/json',
+			'X-ACE-Project': config.projectId
+		};
+		if (config.orgId) {
+			headers['X-ACE-Org'] = config.orgId;
+		}
+		if (config.apiToken) {
+			headers['Authorization'] = `Bearer ${config.apiToken}`;
+		}
+
+		// Use ace_search (semantic) NOT ace_get_playbook (all patterns)
+		const response = await fetch(`${config.serverUrl}/patterns/search`, {
+			method: 'POST',
+			headers,
+			body: JSON.stringify({
+				query: 'general development patterns strategies',
+				threshold: 0.5,
+				top_k: 20
+			})
+		});
+
+		if (!response.ok) {
+			console.log(`[ACE] Preload failed: ${response.status} ${response.statusText}`);
+			return;
+		}
+
+		const result = await response.json() as {
+			similar_patterns?: Array<{ domain?: string }>;
+			count?: number;
+		};
+
+		// Extract pattern count and domains for status bar
+		preloadedPatternCount = result.count || result.similar_patterns?.length || 0;
+		const domainSet = new Set<string>();
+		for (const pattern of result.similar_patterns || []) {
+			if (pattern.domain) {
+				domainSet.add(pattern.domain);
+			}
+		}
+		preloadedDomains = Array.from(domainSet);
+
+		console.log(`[ACE] Preloaded ${preloadedPatternCount} patterns from ${preloadedDomains.length} domains`);
+
+		// Update status bar with pattern count
+		if (statusBarItem && preloadedPatternCount > 0) {
+			statusBarItem.text = `$(book) ACE: ${preloadedPatternCount} patterns`;
+			statusBarItem.tooltip = `ACE Pattern Learning\n${preloadedPatternCount} patterns preloaded\nDomains: ${preloadedDomains.slice(0, 3).join(', ')}${preloadedDomains.length > 3 ? ` (+${preloadedDomains.length - 3} more)` : ''}\n\nClick for status`;
+		}
+	} catch (error) {
+		console.log('[ACE] Preload error:', error instanceof Error ? error.message : String(error));
+		// Non-fatal: continue without preload
+	}
+}
+
+// Export for external access (e.g., status panel)
+export function getPreloadedPatternInfo(): { count: number; domains: string[] } {
+	return { count: preloadedPatternCount, domains: preloadedDomains };
+}
 
 export async function activate(context: vscode.ExtensionContext) {
 	console.log('[ACE] Extension activating...');
@@ -78,9 +155,15 @@ export async function activate(context: vscode.ExtensionContext) {
 		console.log('[ACE] Initializing workspace monitor with getAceConfig');
 		initWorkspaceMonitor(context, statusBarItem, getAceConfig);
 
+		// 6. Preload patterns in background (non-blocking)
+		// Uses ace_search with generic query to get pattern count + domains for status bar
+		preloadPatterns().catch(err => {
+			console.log('[ACE] Background preload failed (non-fatal):', err);
+		});
+
 		console.log('[ACE] Extension activated successfully');
 
-		// 6. Check workspace version and prompt for update if needed
+		// 7. Check workspace version and prompt for update if needed
 		await checkWorkspaceVersionAndPrompt(context);
 	} catch (error) {
 		console.error('[ACE] Activation error:', error);
@@ -879,17 +962,17 @@ async function createCursorRules(folder?: vscode.WorkspaceFolder, forceUpdate: b
 
 	const rulesPath = path.join(rulesDir, 'ace-patterns.mdc');
 	const rulesContent = `---
-description: ACE Pattern Learning - MANDATORY playbook retrieval EVERY SESSION
+description: ACE Pattern Learning - MANDATORY pattern search EVERY SESSION
 alwaysApply: true
 ---
 
-# MANDATORY: ACE Pattern Retrieval - EVERY SESSION
+# MANDATORY: ACE Pattern Search - EVERY SESSION
 
 **CRITICAL INSTRUCTION - DO NOT SKIP**
 
 ## PER-SESSION REQUIREMENT
 
-**On EVERY NEW CHAT SESSION, you MUST call \`ace_get_playbook\` FIRST.**
+**On EVERY NEW CHAT SESSION, you MUST call \`ace_search\` FIRST.**
 
 Do NOT assume you "already know" the patterns from a previous session.
 Do NOT skip because patterns seem "familiar" or "unchanged".
@@ -897,15 +980,35 @@ EVERY session is a fresh context - patterns MUST be retrieved again.
 
 ## BEFORE ANY Implementation Task
 
-**You MUST call \`ace_get_playbook\` MCP tool FIRST** before:
+**You MUST call \`ace_search\` MCP tool FIRST** before:
 - Writing ANY code
 - Implementing ANY feature
 - Fixing ANY bug
 - Making ANY architectural decision
 
-**FAILURE TO CALL ace_get_playbook = INCOMPLETE TASK**
+## HOW TO USE ace_search
 
-This is NOT optional. Call the tool, review patterns, THEN proceed.
+1. **Read the user's task/request**
+2. **Call ace_search with the task as query:**
+   \`\`\`
+   ace_search(query="<user's task description>")
+   \`\`\`
+3. **Review returned patterns** (5-10 relevant ones)
+4. **Apply patterns to implementation**
+
+**Example:**
+- User: "Implement JWT authentication"
+- You call: \`ace_search(query="JWT authentication")\`
+- Returns: 5-10 patterns about JWT, auth, tokens, security
+
+**FAILURE TO CALL ace_search = INCOMPLETE TASK**
+
+## WHY ace_search (NOT ace_get_playbook)?
+
+- \`ace_search\` → Returns 5-10 RELEVANT patterns (semantic search)
+- \`ace_get_playbook\` → Returns ALL 1000+ patterns (context explosion!)
+
+Always prefer ace_search with user's task as query.
 
 ## WHY EVERY SESSION?
 
@@ -923,11 +1026,11 @@ This is NOT optional. Call the tool, review patterns, THEN proceed.
 
 ## Available ACE MCP Tools
 
-1. \`ace_get_playbook\` - **CALL FIRST** - Get all learned patterns
-2. \`ace_search\` - Search patterns by query (supports domain filtering)
-3. \`ace_list_domains\` - List available domains for filtering
-4. \`ace_learn\` - **CALL AFTER** - Capture learning
-5. \`ace_status\` - View playbook statistics
+1. \`ace_search\` - **CALL FIRST** - Search patterns by query (5-10 relevant)
+2. \`ace_list_domains\` - List available domains for filtering
+3. \`ace_learn\` - **CALL AFTER** - Capture learning
+4. \`ace_status\` - View playbook statistics
+5. \`ace_get_playbook\` - Get ALL patterns (only for export/backup)
 `;
 
 	// Create if doesn't exist OR if force update requested (during version upgrade)

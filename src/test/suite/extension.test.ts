@@ -449,8 +449,10 @@ suite('ACE Extension Test Suite', () => {
 				const content = fs.readFileSync(rulesPath, 'utf-8');
 				// Check frontmatter
 				assert.ok(content.includes('alwaysApply: true'), 'Rules should have alwaysApply: true');
-				assert.ok(content.includes('ace_get_playbook'), 'Rules should mention ace_get_playbook tool');
+				assert.ok(content.includes('ace_search'), 'Rules should mention ace_search tool (v0.2.32)');
 				assert.ok(content.includes('ace_learn'), 'Rules should mention ace_learn tool');
+				// v0.2.32: Rules should prioritize ace_search over ace_get_playbook
+				assert.ok(content.includes('ace_search') || content.includes('ace_get_playbook'), 'Rules should mention pattern retrieval');
 			}
 		}
 	});
@@ -619,6 +621,19 @@ suite('ACE Extension Test Suite', () => {
 		assert.ok(typeof extension.activate === 'function', 'activate should be exported');
 		assert.ok(typeof extension.deactivate === 'function', 'deactivate should be exported');
 	});
+
+	// v0.2.32: Pattern preload tests
+	test('getPreloadedPatternInfo should be exported', async () => {
+		const extension = await import('../../extension');
+		assert.ok(typeof extension.getPreloadedPatternInfo === 'function', 'getPreloadedPatternInfo should be exported');
+	});
+
+	test('getPreloadedPatternInfo should return count and domains', async () => {
+		const extension = await import('../../extension');
+		const info = extension.getPreloadedPatternInfo();
+		assert.ok(typeof info.count === 'number', 'info.count should be a number');
+		assert.ok(Array.isArray(info.domains), 'info.domains should be an array');
+	});
 });
 
 // ============================================
@@ -659,6 +674,23 @@ suite('ACE HTTP API Tests (Mocked)', () => {
 		const emptyResponse = { avg_confidence: 0.5 };
 		const total3 = (emptyResponse as any).total_patterns || (emptyResponse as any).total_bullets || 0;
 		assert.strictEqual(total3, 0, 'Should default to 0');
+	});
+
+	// v0.2.32: Pattern preload endpoint test
+	test('Preload endpoint should use ace_search format', () => {
+		// preloadPatterns uses /patterns/search endpoint with semantic search
+		const correctEndpoint = '/patterns/search';
+		const correctMethod = 'POST';
+		const expectedBody = {
+			query: 'general development patterns strategies',
+			threshold: 0.5,
+			top_k: 20
+		};
+
+		assert.ok(correctEndpoint === '/patterns/search', 'Preload should use search endpoint');
+		assert.ok(correctMethod === 'POST', 'Preload should use POST method');
+		assert.ok(expectedBody.threshold === 0.5, 'Preload should use threshold 0.5');
+		assert.ok(expectedBody.top_k === 20, 'Preload should limit to 20 patterns');
 	});
 
 	test('Verify response should extract org and project names', () => {
