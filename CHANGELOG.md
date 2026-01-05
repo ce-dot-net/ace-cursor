@@ -5,6 +5,30 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.32] - 2026-01-05
+
+### Added
+- **HTTP pattern preload on activation** - Preloads patterns via `ace_search` API in background
+- **Pattern count in status bar** - Shows "ACE: X patterns" after preload completes
+- **New tests** - Added tests for `getPreloadedPatternInfo` and preload endpoint format
+
+### Changed
+- **Cursor rules prioritize `ace_search` over `ace_get_playbook`**
+  - `ace_search(query="<task>")` returns 5-10 relevant patterns (semantic search)
+  - `ace_get_playbook()` returns ALL 1000+ patterns (context explosion risk)
+  - Rules now include "HOW TO USE ace_search" instructions with examples
+- Updated test to verify rules mention `ace_search`
+
+### Technical
+- `preloadPatterns()` uses `/patterns/search` endpoint with generic query
+- Status bar updated after preload with pattern count and domain tooltip
+- Exported `getPreloadedPatternInfo()` for external access
+
+### Companion Release
+- **@ace-sdk/mcp v2.5.0** adds MCP Resources (future-ready for when Cursor fixes Resources support):
+  - `ace://playbook/search?query=...` - Semantic search resource
+  - `ace://domains` - Domain listing resource
+
 ## [0.2.31] - 2025-12-23
 
 ### Fixed
