@@ -5,6 +5,19 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.34] - 2026-01-05
+
+### Changed
+- **Single ace_learn call at end** - Wait for AI-Trail summary before calling ace_learn
+  - Previous: ace_learn called twice (after implementation + after summary)
+  - Now: Single call at end with full AI-Trail stats + git context
+  - More efficient, captures complete execution trace
+
+### Technical
+- Updated `.cursor/rules/ace-patterns.mdc` with explicit "SINGLE ace_learn Call" instructions
+- AI now waits for "Session complete. AI-Trail: MCP:X Shell:Y..." before calling ace_learn
+- Includes git context (branch + commit hash) from AI-Trail
+
 ## [0.2.33] - 2026-01-05
 
 ### Fixed

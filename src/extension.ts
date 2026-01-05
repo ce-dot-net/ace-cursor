@@ -1017,12 +1017,32 @@ Always prefer ace_search with user's task as query.
 3. New patterns from other team members may be available
 4. Caching ensures fast retrieval (RAM → SQLite → Server)
 
-## AFTER Completing Substantial Work
+## AFTER Completing Substantial Work - SINGLE ace_learn Call
 
-**You MUST call \`ace_learn\` MCP tool** after:
-- Successfully implementing features
-- Fixing bugs (especially tricky ones)
-- Discovering gotchas or edge cases
+**Wait for the AI-Trail summary, THEN call \`ace_learn\` ONCE.**
+
+Do NOT call ace_learn immediately after each implementation step.
+Wait until you see the session summary with AI-Trail statistics:
+\`\`\`
+Session complete. AI-Trail: MCP:X Shell:Y Edits:Z Responses:W. Git: branch (hash).
+\`\`\`
+
+**THEN call ace_learn with the full context:**
+\`\`\`
+ace_learn(
+  task="<what you accomplished>",
+  trajectory=["<key steps>"],
+  success=true,
+  output="<lessons learned>",
+  git={commit_hash: "<from AI-Trail>", branch: "<from AI-Trail>"}
+)
+\`\`\`
+
+**WHY single call at end?**
+- AI-Trail summary includes full execution statistics
+- Git context (branch + commit hash) is available
+- Avoids redundant captures
+- More efficient server processing
 
 ## Available ACE MCP Tools
 
