@@ -678,11 +678,18 @@ suite('ACE HTTP API Tests (Mocked)', () => {
 
 	// v0.2.32: Pattern preload endpoint test
 	test('Preload endpoint should use ace_search format', () => {
-		// preloadPatterns uses /patterns/search endpoint with semantic search
+		// preloadPatterns uses /patterns/search endpoint with pattern object format
+		// Server expects: { pattern: { id, content, confidence, created_at, section }, threshold, top_k }
 		const correctEndpoint = '/patterns/search';
 		const correctMethod = 'POST';
 		const expectedBody = {
-			query: 'general development patterns strategies',
+			pattern: {
+				id: 'temp_search_123', // Dynamic in actual code
+				content: 'general development patterns strategies',
+				confidence: 0.8,
+				created_at: '2026-01-08T00:00:00.000Z', // Dynamic in actual code
+				section: 'general'
+			},
 			threshold: 0.5,
 			top_k: 20
 		};
@@ -691,6 +698,8 @@ suite('ACE HTTP API Tests (Mocked)', () => {
 		assert.ok(correctMethod === 'POST', 'Preload should use POST method');
 		assert.ok(expectedBody.threshold === 0.5, 'Preload should use threshold 0.5');
 		assert.ok(expectedBody.top_k === 20, 'Preload should limit to 20 patterns');
+		assert.ok(expectedBody.pattern.content === 'general development patterns strategies', 'Pattern content should be search query');
+		assert.ok(expectedBody.pattern.section === 'general', 'Pattern section should be general');
 	});
 
 	test('Verify response should extract org and project names', () => {

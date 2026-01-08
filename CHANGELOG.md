@@ -5,6 +5,14 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.35] - 2026-01-08
+
+### Fixed
+- **HTTP preload request format** - Server returned 422 because wrong body format
+  - Was: `{ query: "..." }` (wrong)
+  - Now: `{ pattern: { id, content, confidence, created_at, section }, threshold, top_k }` (correct)
+  - Matches `@ace-sdk/core` searchPatterns() format
+
 ## [0.2.34] - 2026-01-05
 
 ### Changed

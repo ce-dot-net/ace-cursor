@@ -76,7 +76,13 @@ async function preloadPatterns(): Promise<void> {
 			method: 'POST',
 			headers,
 			body: JSON.stringify({
-				query: 'general development patterns strategies',
+				pattern: {
+					id: `temp_search_${Date.now()}`,
+					content: 'general development patterns strategies',
+					confidence: 0.8,
+					created_at: new Date().toISOString(),
+					section: 'general'
+				},
 				threshold: 0.5,
 				top_k: 20
 			})
