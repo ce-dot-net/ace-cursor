@@ -32,22 +32,28 @@ async function build() {
   console.log('Extension build complete');
 
   // Build test runner and tests (bundles @ace-sdk/core inline to avoid ESM/CJS issues)
-  if (!production) {
-    await esbuild.build({
-      ...commonOptions,
-      entryPoints: ['src/test/suite/index.ts'],
-      outfile: 'dist/test/suite/index.js',
-      external: [...commonOptions.external, 'mocha', 'glob'],
-    });
+  // Always build tests - CI needs them
+  await esbuild.build({
+    ...commonOptions,
+    entryPoints: ['src/test/runTest.ts'],
+    outfile: 'dist/test/runTest.js',
+    external: [...commonOptions.external, '@vscode/test-electron'],
+  });
 
-    await esbuild.build({
-      ...commonOptions,
-      entryPoints: ['src/test/suite/extension.test.ts'],
-      outfile: 'dist/test/suite/extension.test.js',
-      external: [...commonOptions.external, 'mocha', 'glob'],
-    });
-    console.log('Test build complete');
-  }
+  await esbuild.build({
+    ...commonOptions,
+    entryPoints: ['src/test/suite/index.ts'],
+    outfile: 'dist/test/suite/index.js',
+    external: [...commonOptions.external, 'mocha', 'glob'],
+  });
+
+  await esbuild.build({
+    ...commonOptions,
+    entryPoints: ['src/test/suite/extension.test.ts'],
+    outfile: 'dist/test/suite/extension.test.js',
+    external: [...commonOptions.external, 'mocha', 'glob'],
+  });
+  console.log('Test build complete');
 
   console.log('Build complete');
 }
