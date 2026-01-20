@@ -9,11 +9,11 @@
  */
 
 import * as vscode from 'vscode';
-import * as fs from 'fs';
 import * as path from 'path';
+import * as fs from 'fs';
 import * as os from 'os';
 import * as crypto from 'crypto';
-import { readContext, isMultiRootWorkspace, type AceContext } from '../ace/context';
+import { readContext, isMultiRootWorkspace } from '../ace/context';
 
 // Import getAceConfig from extension - will be set via init
 let getAceConfigFn: ((folder?: vscode.WorkspaceFolder) => { serverUrl?: string; apiToken?: string; projectId?: string; orgId?: string } | null) | undefined;
@@ -21,9 +21,7 @@ let getAceConfigFn: ((folder?: vscode.WorkspaceFolder) => { serverUrl?: string; 
 let currentFolder: vscode.WorkspaceFolder | undefined;
 let currentDomain: string = 'general';
 let statusBarItem: vscode.StatusBarItem;
-let patternCache: Map<string, { count: number; timestamp: number }> = new Map();
 let promptedFolders: Set<string> = new Set(); // Track folders we've already prompted about
-const CACHE_TTL_MS = 60000; // 1 minute cache
 
 /**
  * Domain detection based on file path patterns
@@ -309,130 +307,51 @@ function showConfigurePrompt(folder: vscode.WorkspaceFolder): void {
  */
 async function updateStatusBar(): Promise<void> {
 	console.log('[ACE] updateStatusBar called', { hasStatusBarItem: !!statusBarItem, hasGetAceConfigFn: !!getAceConfigFn });
-	if (!statusBarItem) return;
-
-	// Always use currentFolder - works for both single-folder and multi-root workspaces
-	const folder = currentFolder;
-	const ctx = readContext(folder);
-	console.log('[ACE] updateStatusBar context:', { folder: folder?.name, projectId: ctx?.projectId, orgId: ctx?.orgId });
-
-	// Not configured - match VSCode style with warning background
-	if (!ctx?.projectId) {
-		statusBarItem.text = '$(warning) ACE: Not configured';
-		statusBarItem.tooltip = folder
-			? `"${folder.name}" - Click to view status and configure ACE`
-			: 'Click to view status and configure ACE';
-		statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
-		statusBarItem.show();
+	if (!statusBarItem) {
+		console.log('[ACE] updateStatusBar: No statusBarItem, returning');
 		return;
 	}
 
-	// Clear any warning background from unconfigured state
-	statusBarItem.backgroundColor = undefined;
+	try {
+		// Always use currentFolder - works for both single-folder and multi-root workspaces
+		const folder = currentFolder;
+		const ctx = readContext(folder);
+		console.log('[ACE] updateStatusBar context:', { folder: folder?.name, projectId: ctx?.projectId, orgId: ctx?.orgId });
 
-	// Show loading state while fetching pattern count
-	statusBarItem.text = '$(sync~spin) ACE: Loading...';
-	statusBarItem.show();
+		// Not configured - match VSCode style with warning background
+		if (!ctx?.projectId) {
+			statusBarItem.text = '$(warning) ACE: Not configured';
+			statusBarItem.tooltip = folder
+				? `"${folder.name}" - Click to view status and configure ACE`
+				: 'Click to view status and configure ACE';
+			statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+			statusBarItem.show();
+			return;
+		}
 
-	// Fetch pattern count
-	const patternCount = await fetchPatternCount(ctx, folder);
+		// Clear any warning background from unconfigured state
+		statusBarItem.backgroundColor = undefined;
 
-	// Update with pattern count - simple format
-	if (patternCount !== null) {
-		statusBarItem.text = `$(book) ACE: ${patternCount} patterns`;
-		statusBarItem.tooltip = folder
-			? `"${folder.name}" - ${patternCount} patterns\nClick to view ACE playbook status`
-			: 'Click to view ACE playbook status';
-	} else {
+		// Don't overwrite status bar if preloadPatterns already set a pattern count
+		// This avoids race condition where workspaceMonitor overwrites correct count
+		const currentText = statusBarItem.text;
+		if (currentText.includes('patterns')) {
+			console.log('[ACE] updateStatusBar: status bar already has pattern count, not overwriting');
+			return;
+		}
+
+		// Just show "Ready" state - let preloadPatterns handle pattern count
+		// The actual count is available in the status page
 		statusBarItem.text = '$(book) ACE: Ready';
 		statusBarItem.tooltip = folder
 			? `"${folder.name}" - Click to view ACE playbook status`
 			: 'Click to view ACE playbook status';
-	}
-	statusBarItem.show();
-}
-
-/**
- * Fetch pattern count from ACE server with caching
- */
-async function fetchPatternCount(ctx: AceContext, folder?: vscode.WorkspaceFolder): Promise<number | null> {
-	const cacheKey = ctx.projectId;
-
-	// Check cache
-	const cached = patternCache.get(cacheKey);
-	if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
-		return cached.count;
-	}
-
-	// Get config for API call - use injected function or fallback
-	console.log('[ACE] fetchPatternCount: getting config', { hasGetAceConfigFn: !!getAceConfigFn });
-	const config = getAceConfigFn ? getAceConfigFn(folder) : getAceConfigForPatterns(ctx);
-	console.log('[ACE] fetchPatternCount: config result', {
-		hasConfig: !!config,
-		hasServerUrl: !!config?.serverUrl,
-		hasApiToken: !!config?.apiToken,
-		serverUrl: config?.serverUrl
-	});
-	if (!config?.serverUrl || !config?.apiToken) {
-		console.log('[ACE] Pattern count: missing config - returning null');
-		return null;
-	}
-
-	try {
-		const url = `${config.serverUrl}/analytics`;
-		const response = await fetch(url, {
-			method: 'GET',
-			headers: {
-				'Authorization': `Bearer ${config.apiToken}`,
-				'Content-Type': 'application/json',
-				'X-ACE-Project': ctx.projectId
-			}
-		});
-
-		if (!response.ok) {
-			console.log(`[ACE] Pattern count API error: ${response.status} ${response.statusText}`);
-			return null;
-		}
-
-		const data = await response.json() as { total_patterns?: number; total_bullets?: number };
-		const count = data.total_patterns || data.total_bullets || 0;
-		console.log(`[ACE] Pattern count fetched: ${count}`);
-
-		// Cache the result
-		patternCache.set(cacheKey, { count, timestamp: Date.now() });
-
-		return count;
+		statusBarItem.show();
 	} catch (err) {
-		console.log('[ACE] Pattern count fetch error:', err);
-		return null;
-	}
-}
-
-/**
- * Get ACE config for pattern fetching
- */
-function getAceConfigForPatterns(ctx: AceContext): { serverUrl?: string; apiToken?: string } | null {
-	const globalConfigPath = path.join(os.homedir(), '.config', 'ace', 'config.json');
-
-	if (!fs.existsSync(globalConfigPath)) {
-		return null;
-	}
-
-	try {
-		const config = JSON.parse(fs.readFileSync(globalConfigPath, 'utf-8'));
-		let apiToken = config.apiToken;
-
-		// Get org-specific token if available
-		if (ctx.orgId && config.orgs?.[ctx.orgId]?.apiToken) {
-			apiToken = config.orgs[ctx.orgId].apiToken;
-		}
-
-		return {
-			serverUrl: config.serverUrl || 'https://ace-api.code-engine.app',
-			apiToken
-		};
-	} catch {
-		return null;
+		console.error('[ACE] updateStatusBar error:', err);
+		// Show fallback status on error
+		statusBarItem.text = '$(book) ACE: Ready';
+		statusBarItem.show();
 	}
 }
 

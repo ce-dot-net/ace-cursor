@@ -5,6 +5,66 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.40] - 2026-01-20
+
+### Added
+- **Logout button in Configure panel** - Users can now logout directly from the configure panel
+  - Shows next to "Login with Browser" when authenticated
+  - Clears auth tokens and resets UI to logged-out state
+- **Status bar pattern count fix** - Now correctly shows actual pattern count (e.g., 620 instead of 13)
+  - Uses `/analytics` API directly (same as status panel)
+  - Removed duplicate `fetchPatternCount()` that was overwriting correct count
+
+### Fixed
+- **better-sqlite3 module bundling** - Extension now properly bundles native dependencies
+  - VSIX includes `node_modules/better-sqlite3` for `@ace-sdk/core` caching
+  - Fixes "Cannot find module 'better-sqlite3'" error on extension load
+
+### Technical
+- Removed race condition between `preloadPatterns()` and `workspaceMonitor.updateStatusBar()`
+- Status bar updates now only come from `preloadPatterns()` for pattern count
+
+## [0.2.39] - 2026-01-19
+
+### Fixed
+- **Status panel X-ACE-Org header** - Fixed HTTP 400 errors when using user tokens
+  - Added required `X-ACE-Org` header to all authenticated API requests
+  - Affects: statusPanel.ts, workspaceMonitor.ts
+
+## [0.2.38] - 2026-01-19
+
+### Changed
+- **Configure panel cleanup** - Removed legacy `validateConnection` function and "Connect" button
+  - Device code login is now the only authentication method
+  - Simplified UI flow: Login → Select Org/Project → Save
+
+## [0.2.37] - 2026-01-19
+
+### Added
+- **Device management command** - `ACE: Manage Devices` to view and manage logged-in devices
+- **Hard cap display in Status panel** - Shows 7-day session hard cap expiry
+- **Session expiry info** - Configure panel shows access token + hard cap expiry times
+
+### Changed
+- Updated `@ace-sdk/core` to v2.7.0 for device management APIs
+
+## [0.2.36] - 2026-01-16
+
+### Changed
+- **Browser-based login** - Replaced API token authentication with device code flow
+  - Click "Login with Browser" to authenticate via your browser
+  - No more manual API token entry
+  - Automatic token refresh with sliding window (8h access, 30d refresh, 7d hard cap)
+- **Updated README** - Removed all API token references, documented new login flow
+
+### Added
+- **ACE: Login command** - Standalone command for browser-based authentication
+- **ACE: Logout command** - Clear authentication tokens
+
+### Technical
+- Uses `@ace-sdk/core` device code flow (`login()`, `logout()`, `ensureValidToken()`)
+- Server-authoritative token validation
+
 ## [0.2.35] - 2026-01-08
 
 ### Fixed

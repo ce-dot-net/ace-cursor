@@ -1,13 +1,12 @@
 /**
  * ACE Status Panel - Displays playbook statistics
- * Uses simple HTTP requests instead of SDK
+ * Uses @ace-sdk/core for config and auth
  */
 
 import * as vscode from 'vscode';
-import * as path from 'path';
-import * as fs from 'fs';
-import * as os from 'os';
 import { readContext } from '../ace/context';
+import { getValidToken, getHardCapInfo } from '../commands/login';
+import { loadConfig, loadUserAuth, getDefaultOrgId } from '@ace-sdk/core';
 
 export class StatusPanel {
 	public static currentPanel: StatusPanel | undefined;
@@ -105,19 +104,35 @@ export class StatusPanel {
 
 	/**
 	 * Fetch status using simple HTTP request
+	 * Uses getValidToken for auto-refresh (sliding window TTL)
 	 */
 	private async _fetchStatus(ctx: { orgId?: string; projectId: string }): Promise<any> {
 		const config = this._getAceConfig();
-		if (!config || !config.serverUrl || !config.apiToken) {
+		if (!config || !config.serverUrl) {
 			throw new Error('ACE not fully configured');
 		}
 
-		// Fetch analytics
+		// Get valid token with auto-refresh (sliding window TTL)
+		const tokenResult = await getValidToken(config.serverUrl);
+		const token = tokenResult?.token || config.apiToken;
+
+		if (!token) {
+			throw new Error('No valid authentication token');
+		}
+
+		// For user tokens, we need the org ID
+		const orgId = ctx.orgId || config.auth?.default_org_id;
+		if (!orgId) {
+			throw new Error('Organization ID required. Please configure ACE.');
+		}
+
+		// Fetch analytics - include X-ACE-Org header for user token auth
 		const analyticsUrl = `${config.serverUrl}/analytics`;
 		const analyticsResponse = await fetch(analyticsUrl, {
 			headers: {
-				'Authorization': `Bearer ${config.apiToken}`,
+				'Authorization': `Bearer ${token}`,
 				'Content-Type': 'application/json',
+				'X-ACE-Org': orgId,
 				'X-ACE-Project': ctx.projectId
 			}
 		});
@@ -135,8 +150,9 @@ export class StatusPanel {
 			const verifyUrl = `${config.serverUrl}/api/v1/config/verify`;
 			const verifyResponse = await fetch(verifyUrl, {
 				headers: {
-					'Authorization': `Bearer ${config.apiToken}`,
-					'Content-Type': 'application/json'
+					'Authorization': `Bearer ${token}`,
+					'Content-Type': 'application/json',
+					'X-ACE-Org': orgId
 				}
 			});
 			if (verifyResponse.ok) {
@@ -153,40 +169,66 @@ export class StatusPanel {
 			// Ignore verify errors - names are optional
 		}
 
+		// Fetch top patterns for display
+		let topPatterns: any[] = [];
+		try {
+			const topUrl = `${config.serverUrl}/top?limit=5&min_helpful=1`;
+			const topResponse = await fetch(topUrl, {
+				headers: {
+					'Authorization': `Bearer ${token}`,
+					'Content-Type': 'application/json',
+					'X-ACE-Org': orgId,
+					'X-ACE-Project': ctx.projectId
+				}
+			});
+			if (topResponse.ok) {
+				const topData = await topResponse.json() as Record<string, any>;
+				topPatterns = topData.bullets || topData.patterns || [];
+			}
+		} catch {
+			// Ignore top patterns errors - optional display
+		}
+
 		return {
 			...analytics,
 			// Support both old and new field names
 			total_bullets: analytics.total_patterns || analytics.total_bullets || 0,
-			org_id: ctx.orgId,
+			org_id: orgId,
 			org_name: orgName,
 			project_id: ctx.projectId,
-			project_name: projectName
+			project_name: projectName,
+			top_patterns: topPatterns,
+			helpful_total: analytics.helpful_total || 0,
+			harmful_total: analytics.harmful_total || 0,
+			by_domain: analytics.by_domain || {}
 		};
 	}
 
 	/**
 	 * Get ACE configuration from global config file
 	 */
-	private _getAceConfig(): { serverUrl?: string; apiToken?: string } | null {
-		const ctx = readContext();
-		const globalConfigPath = path.join(os.homedir(), '.config', 'ace', 'config.json');
-
-		if (!fs.existsSync(globalConfigPath)) {
-			return null;
-		}
-
+	private _getAceConfig(): { serverUrl?: string; apiToken?: string; auth?: { token?: string; default_org_id?: string } } | null {
 		try {
-			const config = JSON.parse(fs.readFileSync(globalConfigPath, 'utf-8'));
-			let apiToken = config.apiToken;
+			// Use SDK to load config - loadConfig returns AceConfig directly
+			const config = loadConfig();
+			const userAuth = loadUserAuth();
+			const ctx = readContext();
 
-			// Get org-specific token if available
-			if (ctx?.orgId && config.orgs?.[ctx.orgId]?.apiToken) {
-				apiToken = config.orgs[ctx.orgId].apiToken;
+			// Get token - prefer user auth token (device login)
+			let apiToken = userAuth?.token || (config as any)?.apiToken;
+
+			// Get org-specific token if available (legacy)
+			if (ctx?.orgId && (config as any)?.orgs?.[ctx.orgId]?.apiToken) {
+				apiToken = (config as any).orgs[ctx.orgId].apiToken;
 			}
 
 			return {
-				serverUrl: config.serverUrl || 'https://ace-api.code-engine.app',
-				apiToken
+				serverUrl: config?.serverUrl || 'https://ace-api.code-engine.app',
+				apiToken,
+				auth: userAuth ? {
+					token: userAuth.token,
+					default_org_id: getDefaultOrgId() || undefined
+				} : undefined
 			};
 		} catch {
 			return null;
@@ -202,12 +244,62 @@ export class StatusPanel {
 		return text;
 	}
 
+	/**
+	 * Generate HTML for hard cap display
+	 * Shows 7-day session hard limit status
+	 */
+	private _getHardCapHtml(hardCap: { daysRemaining: number; hoursRemaining: number; isApproaching: boolean; isExpired: boolean }): string {
+		if (hardCap.isExpired) {
+			return `
+				<div class="hard-cap-warning expired">
+					<div class="hard-cap-icon">⚠️</div>
+					<div class="hard-cap-content">
+						<div class="hard-cap-title">Session Expired</div>
+						<div class="hard-cap-desc">Your 7-day session has expired. Please login again.</div>
+					</div>
+					<button class="hard-cap-btn" id="loginBtn">Login</button>
+				</div>`;
+		}
+
+		if (hardCap.isApproaching) {
+			return `
+				<div class="hard-cap-warning approaching">
+					<div class="hard-cap-icon">⏳</div>
+					<div class="hard-cap-content">
+						<div class="hard-cap-title">Session Expiring Soon</div>
+						<div class="hard-cap-desc">Hard cap in ${hardCap.daysRemaining > 0 ? hardCap.daysRemaining + ' day(s)' : hardCap.hoursRemaining + ' hour(s)'}. Re-login before it expires.</div>
+					</div>
+					<button class="hard-cap-btn" id="loginBtn">Login Now</button>
+				</div>`;
+		}
+
+		// Normal status - show remaining time
+		return `
+			<div class="hard-cap-info">
+				<span class="hard-cap-label">Session Hard Cap (7d):</span>
+				<span class="hard-cap-value">${hardCap.daysRemaining} days remaining</span>
+			</div>`;
+	}
+
 	private _getStatusHtml(stats: any) {
 		const bySection = stats.by_section || {};
 		const total = stats.total_bullets || 0;
 		const avgConf = stats.avg_confidence ? Math.round(stats.avg_confidence * 100) : 0;
 		const nonce = this._getNonce();
 		const cspSource = this._panel.webview.cspSource;
+
+		// Enhanced metrics
+		const topPatterns = stats.top_patterns || [];
+		const helpfulTotal = stats.helpful_total || 0;
+		const harmfulTotal = stats.harmful_total || 0;
+		const byDomain = stats.by_domain || {};
+		const trustScore = helpfulTotal + harmfulTotal > 0 
+			? Math.round((helpfulTotal / (helpfulTotal + harmfulTotal)) * 100) 
+			: 100;
+
+		// Get hard cap info for session expiration display
+		const hardCap = getHardCapInfo();
+		const hardCapHtml = hardCap ? this._getHardCapHtml(hardCap) : '';
 
 		return `<!DOCTYPE html>
 <html lang="en">
@@ -348,6 +440,194 @@ export class StatusPanel {
 			font-size: 13px;
 			color: var(--vscode-descriptionForeground);
 		}
+		.hard-cap-info {
+			margin-top: 15px;
+			padding: 10px 15px;
+			background: var(--vscode-editor-background);
+			border: 1px solid var(--vscode-panel-border);
+			border-radius: 6px;
+			display: flex;
+			justify-content: space-between;
+			align-items: center;
+		}
+		.hard-cap-label {
+			color: var(--vscode-descriptionForeground);
+			font-size: 13px;
+		}
+		.hard-cap-value {
+			color: var(--vscode-textLink-foreground);
+			font-weight: 500;
+		}
+		.hard-cap-warning {
+			margin-top: 15px;
+			padding: 15px;
+			border-radius: 6px;
+			display: flex;
+			align-items: center;
+			gap: 12px;
+		}
+		.hard-cap-warning.approaching {
+			background: var(--vscode-inputValidation-warningBackground);
+			border: 1px solid var(--vscode-inputValidation-warningBorder);
+		}
+		.hard-cap-warning.expired {
+			background: var(--vscode-inputValidation-errorBackground);
+			border: 1px solid var(--vscode-inputValidation-errorBorder);
+		}
+		.hard-cap-icon {
+			font-size: 24px;
+		}
+		.hard-cap-content {
+			flex: 1;
+		}
+		.hard-cap-title {
+			font-weight: 600;
+			margin-bottom: 4px;
+		}
+		.hard-cap-desc {
+			font-size: 13px;
+			color: var(--vscode-descriptionForeground);
+		}
+		.hard-cap-btn {
+			padding: 6px 12px;
+			background: var(--vscode-button-background);
+			color: var(--vscode-button-foreground);
+			border: none;
+			border-radius: 4px;
+			cursor: pointer;
+			font-size: 13px;
+		}
+		.hard-cap-btn:hover {
+			background: var(--vscode-button-hoverBackground);
+		}
+		/* Quality metrics */
+		.quality-metrics {
+			display: flex;
+			gap: 15px;
+			margin: 15px 0;
+		}
+		.quality-item {
+			flex: 1;
+			padding: 12px;
+			background: var(--vscode-list-inactiveSelectionBackground);
+			border-radius: 6px;
+			text-align: center;
+		}
+		.quality-value {
+			font-size: 24px;
+			font-weight: bold;
+		}
+		.quality-value.positive { color: var(--vscode-testing-iconPassed); }
+		.quality-value.negative { color: var(--vscode-testing-iconFailed); }
+		.quality-value.neutral { color: var(--vscode-textLink-foreground); }
+		.quality-label {
+			font-size: 11px;
+			color: var(--vscode-descriptionForeground);
+			text-transform: uppercase;
+			margin-top: 4px;
+		}
+		/* Top patterns */
+		.top-patterns {
+			margin-top: 25px;
+		}
+		.top-patterns h2 {
+			font-size: 16px;
+			margin-bottom: 12px;
+			display: flex;
+			align-items: center;
+			gap: 8px;
+		}
+		.pattern-item {
+			padding: 12px 15px;
+			margin: 8px 0;
+			background: var(--vscode-editor-background);
+			border: 1px solid var(--vscode-panel-border);
+			border-left: 3px solid var(--vscode-textLink-foreground);
+			border-radius: 4px;
+			font-size: 13px;
+			line-height: 1.5;
+		}
+		.pattern-meta {
+			display: flex;
+			gap: 12px;
+			margin-top: 8px;
+			font-size: 11px;
+			color: var(--vscode-descriptionForeground);
+		}
+		.pattern-badge {
+			padding: 2px 6px;
+			border-radius: 10px;
+			background: var(--vscode-badge-background);
+			color: var(--vscode-badge-foreground);
+		}
+		/* Domain breakdown - collapsible */
+		.domain-breakdown {
+			margin-top: 25px;
+		}
+		.domain-header {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			cursor: pointer;
+			padding: 8px 0;
+		}
+		.domain-header h2 {
+			margin: 0;
+			font-size: 16px;
+		}
+		.domain-toggle {
+			padding: 4px 12px;
+			background: var(--vscode-button-secondaryBackground);
+			color: var(--vscode-button-secondaryForeground);
+			border: none;
+			border-radius: 4px;
+			cursor: pointer;
+			font-size: 12px;
+		}
+		.domain-toggle:hover {
+			background: var(--vscode-button-secondaryHoverBackground);
+		}
+		.domain-grid {
+			display: grid;
+			grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+			gap: 10px;
+			margin-top: 10px;
+		}
+		.domain-grid.collapsed .domain-item:nth-child(n+13) {
+			display: none;
+		}
+		.domain-item {
+			padding: 12px 10px;
+			background: var(--vscode-list-inactiveSelectionBackground);
+			border-radius: 8px;
+			text-align: center;
+			transition: transform 0.2s, box-shadow 0.2s;
+		}
+		.domain-item:hover {
+			transform: translateY(-2px);
+			box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+		}
+		.domain-name {
+			font-size: 11px;
+			font-weight: 500;
+			margin-bottom: 6px;
+			color: var(--vscode-descriptionForeground);
+			word-break: break-word;
+		}
+		.domain-count {
+			font-size: 24px;
+			font-weight: bold;
+			color: var(--vscode-textLink-foreground);
+		}
+		.domain-summary {
+			margin-top: 8px;
+			padding: 8px 12px;
+			background: var(--vscode-editor-background);
+			border: 1px solid var(--vscode-panel-border);
+			border-radius: 4px;
+			font-size: 12px;
+			color: var(--vscode-descriptionForeground);
+		}
 	</style>
 </head>
 <body>
@@ -379,6 +659,8 @@ export class StatusPanel {
 		</div>
 	</div>
 
+	${hardCapHtml}
+
 	<div class="section-breakdown">
 		<h2>Patterns by Section</h2>
 		<div class="section-item">
@@ -398,6 +680,69 @@ export class StatusPanel {
 			<span class="section-count">${bySection.apis_to_use || 0}</span>
 		</div>
 	</div>
+
+	<!-- Quality Metrics -->
+	<div class="quality-metrics">
+		<div class="quality-item">
+			<div class="quality-value positive">${helpfulTotal}</div>
+			<div class="quality-label">👍 Helpful</div>
+		</div>
+		<div class="quality-item">
+			<div class="quality-value negative">${harmfulTotal}</div>
+			<div class="quality-label">👎 Harmful</div>
+		</div>
+		<div class="quality-item">
+			<div class="quality-value neutral">${trustScore}%</div>
+			<div class="quality-label">🎯 Trust Score</div>
+		</div>
+	</div>
+
+	<!-- Top Patterns -->
+	${topPatterns.length > 0 ? `
+	<div class="top-patterns">
+		<h2>🏆 Top Performing Patterns</h2>
+		${topPatterns.slice(0, 5).map((p: any) => `
+			<div class="pattern-item">
+				${p.content?.substring(0, 200)}${p.content?.length > 200 ? '...' : ''}
+				<div class="pattern-meta">
+					<span class="pattern-badge">${p.section?.replace(/_/g, ' ') || 'general'}</span>
+					<span>👍 ${p.helpful || 0}</span>
+					<span>📊 ${Math.round((p.confidence || 0) * 100)}% confidence</span>
+					${p.domain ? `<span>🏷️ ${p.domain}</span>` : ''}
+				</div>
+			</div>
+		`).join('')}
+	</div>
+	` : ''}
+
+	<!-- Domain Breakdown -->
+	${Object.keys(byDomain).length > 0 ? `
+	<div class="domain-breakdown">
+		<div class="domain-header" id="domainHeader">
+			<h2>🗂️ Patterns by Domain (${Object.keys(byDomain).length} domains)</h2>
+			<button class="domain-toggle" id="domainToggle">${Object.keys(byDomain).length > 12 ? 'Show All' : ''}</button>
+		</div>
+		<div class="domain-grid ${Object.keys(byDomain).length > 12 ? 'collapsed' : ''}" id="domainGrid">
+			${Object.entries(byDomain)
+				.sort((a: [string, any], b: [string, any]) => (b[1] as number) - (a[1] as number))
+				.map(([domain, count]: [string, any]) => `
+				<div class="domain-item">
+					<div class="domain-name">${domain.replace(/-/g, ' ')}</div>
+					<div class="domain-count">${count}</div>
+				</div>
+			`).join('')}
+		</div>
+		${Object.keys(byDomain).length > 12 ? `
+		<div class="domain-summary" id="domainSummary">
+			Showing top 12 of ${Object.keys(byDomain).length} domains · Total: ${Object.values(byDomain).reduce((a: number, b: any) => a + (b as number), 0)} patterns
+		</div>
+		` : `
+		<div class="domain-summary">
+			${Object.keys(byDomain).length} domains · Total: ${Object.values(byDomain).reduce((a: number, b: any) => a + (b as number), 0)} patterns
+		</div>
+		`}
+	</div>
+	` : ''}
 
 	<div class="mcp-info">
 		<h3>Automatic Pattern Learning via MCP</h3>
@@ -430,6 +775,37 @@ export class StatusPanel {
 			if (configureBtn) {
 				configureBtn.addEventListener('click', () => {
 					executeCommand('ace.configure');
+				});
+			}
+
+			const loginBtn = document.getElementById('loginBtn');
+			if (loginBtn) {
+				loginBtn.addEventListener('click', () => {
+					executeCommand('ace.login');
+				});
+			}
+
+			// Domain breakdown expand/collapse toggle
+			const domainToggle = document.getElementById('domainToggle');
+			const domainGrid = document.getElementById('domainGrid');
+			const domainSummary = document.getElementById('domainSummary');
+			if (domainToggle && domainGrid) {
+				domainToggle.addEventListener('click', () => {
+					const isCollapsed = domainGrid.classList.contains('collapsed');
+					if (isCollapsed) {
+						domainGrid.classList.remove('collapsed');
+						domainToggle.textContent = 'Show Less';
+						if (domainSummary) {
+							domainSummary.textContent = 'Showing all domains';
+						}
+					} else {
+						domainGrid.classList.add('collapsed');
+						domainToggle.textContent = 'Show All';
+						if (domainSummary) {
+							const totalDomains = domainGrid.children.length;
+							domainSummary.textContent = 'Showing top 12 of ' + totalDomains + ' domains';
+						}
+					}
 				});
 			}
 		})();

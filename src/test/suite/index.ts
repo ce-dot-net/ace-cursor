@@ -10,11 +10,11 @@ export async function run(): Promise<void> {
 		timeout: 10000
 	});
 
-	const testsRoot = path.resolve(__dirname, '..');
+	const testsRoot = path.resolve(__dirname, '.');
 
 	try {
-		// Use modern glob API (v10+)
-		const files = await glob('**/*.test.js', { cwd: testsRoot });
+		// Use modern glob API (v10+) - only look in suite folder, not unit tests
+		const files = await glob('*.test.js', { cwd: testsRoot });
 
 		// Add files to the test suite
 		for (const file of files) {

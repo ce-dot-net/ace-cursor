@@ -1,6 +1,6 @@
 /**
  * ACE Configuration Panel - Configure server connection
- * Uses simple HTTP requests instead of SDK
+ * Uses @ace-sdk/core for auth and config management
  */
 
 import * as vscode from 'vscode';
@@ -8,6 +8,15 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { ensureSettingsDir, writeContext, pickWorkspaceFolder, isMultiRootWorkspace, readContext } from '../ace/context';
+import { runLoginCommand } from '../commands/login';
+import {
+	listProjects,
+	isAuthenticated,
+	loadUserAuth,
+	getDefaultOrgId,
+	loadConfig,
+	logout
+} from '@ace-sdk/core';
 
 export class ConfigurePanel {
 	public static currentPanel: ConfigurePanel | undefined;
@@ -23,9 +32,6 @@ export class ConfigurePanel {
 		this._panel.webview.onDidReceiveMessage(
 			message => {
 				switch (message.command) {
-					case 'validate':
-						this._validateConnection(message.data);
-						return;
 					case 'save':
 						this._saveConfiguration(message.data);
 						return;
@@ -37,7 +43,16 @@ export class ConfigurePanel {
 					case 'initializeWorkspace':
 						vscode.commands.executeCommand('ace.initializeWorkspace');
 						return;
-					case 'close':
+				case 'login':
+					this._handleLogin();
+					return;
+				case 'logout':
+					this._handleLogout();
+					return;
+				case 'fetchProjects':
+					this._fetchProjectsForOrg(message.serverUrl, message.orgId);
+					return;
+				case 'close':
 						this._panel.dispose();
 						return;
 				}
@@ -92,75 +107,190 @@ export class ConfigurePanel {
 	 */
 	private _loadExistingConfig(): {
 		serverUrl?: string;
-		apiToken?: string;
 		orgId?: string;
 		projectId?: string;
-		orgs?: Record<string, { orgName: string; apiToken: string; projects: Array<string | { project_id: string; project_name?: string }> }>;
+		orgs?: Record<string, { orgName: string; projects: Array<string | { project_id: string; project_name?: string }> }>;
+		auth?: {
+			isLoggedIn: boolean;
+			email?: string;
+			organizations?: Array<{ org_id: string; name?: string; role?: string }>;
+			expiresAt?: string;
+			refreshExpiresAt?: string;
+			absoluteExpiresAt?: string;
+		};
 	} | null {
-		const globalConfigPath = path.join(os.homedir(), '.config', 'ace', 'config.json');
-
-		if (!fs.existsSync(globalConfigPath)) {
-			return null;
-		}
-
 		try {
-			const config = JSON.parse(fs.readFileSync(globalConfigPath, 'utf-8'));
+			// Use SDK to load config - handles all the path resolution
+			const config = loadConfig();
+			const userAuth = loadUserAuth();
 
-			// Load workspace context (uses first folder for initial load - user can switch)
+			// Load workspace context
 			const ctx = readContext();
 
-			return {
-				serverUrl: config.serverUrl,
-				apiToken: config.apiToken,
-				orgId: ctx?.orgId || Object.keys(config.orgs || {})[0],
-				projectId: ctx?.projectId || config.projectId,
-				orgs: config.orgs
+			// Build orgs map from user auth organizations
+			const orgs: Record<string, { orgName: string; projects: Array<string | { project_id: string; project_name?: string }> }> = {};
+
+			// Add orgs from legacy config.orgs if any
+			if ((config as any)?.orgs) {
+				for (const [orgId, orgData] of Object.entries((config as any).orgs as Record<string, any>)) {
+					orgs[orgId] = {
+						orgName: orgData.orgName || orgId,
+						projects: orgData.projects || []
+					};
+				}
+			}
+
+			// Add orgs from user auth (device code flow) - SDK provides this
+			if (userAuth?.organizations) {
+				for (const org of userAuth.organizations) {
+					if (org.org_id && !orgs[org.org_id]) {
+						orgs[org.org_id] = {
+							orgName: org.name || org.org_id,
+							projects: [] // Projects fetched on demand
+						};
+					}
+				}
+			}
+
+			// Use SDK functions to check auth status
+			const isLoggedIn = isAuthenticated();
+			const defaultOrgId = getDefaultOrgId();
+
+			const result = {
+				serverUrl: config?.serverUrl,
+				orgId: ctx?.orgId || defaultOrgId || Object.keys(orgs)[0],
+				projectId: ctx?.projectId || config?.projectId,
+				orgs,
+				auth: isLoggedIn ? {
+					isLoggedIn: true,
+					email: userAuth?.email,
+					organizations: userAuth?.organizations,
+					expiresAt: userAuth?.expires_at,
+					refreshExpiresAt: userAuth?.refresh_expires_at,
+					absoluteExpiresAt: userAuth?.absolute_expires_at
+				} : undefined
 			};
+
+			console.log('[ACE] _loadExistingConfig result:', JSON.stringify({
+				serverUrl: result.serverUrl,
+				orgId: result.orgId,
+				projectId: result.projectId,
+				orgsCount: Object.keys(result.orgs).length,
+				isLoggedIn: result.auth?.isLoggedIn
+			}));
+
+			return result;
 		} catch {
 			return null;
 		}
 	}
 
+	// NOTE: _detectTokenType and _validateConnection removed - device login is the only auth method now
+
 	/**
-	 * Validate connection using simple HTTP request
+	 * Fetch projects for a specific organization (used with user tokens)
+	 * Uses listProjects() from @ace-sdk/core (v2.7.0+)
 	 */
-	private async _validateConnection(data: { serverUrl: string; apiToken: string }) {
+	private async _fetchProjectsForOrg(_serverUrl: string, orgId: string) {
 		try {
-			// Use the config/verify endpoint (matches @ace-sdk/core API)
-			const url = `${data.serverUrl}/api/v1/config/verify`;
-			const response = await fetch(url, {
-				method: 'GET',
-				headers: {
-					'Authorization': `Bearer ${data.apiToken}`,
-					'Content-Type': 'application/json'
+			// Use SDK's listProjects() which works with user tokens (returns Project[])
+			const allProjects = await listProjects();
+			console.log('[ACE] listProjects returned:', allProjects.length, 'projects');
+			console.log('[ACE] Filtering for orgId:', orgId);
+
+			// Filter projects by orgId if specified
+			// Check both org_id and orgId fields for compatibility
+			const projects = allProjects.filter((p: { org_id?: string; orgId?: string }) => {
+				const projectOrgId = p.org_id || p.orgId;
+				const matches = !orgId || projectOrgId === orgId;
+				if (!matches) {
+					console.log('[ACE] Project filtered out:', p, 'projectOrgId:', projectOrgId);
 				}
+				return matches;
 			});
 
-			if (!response.ok) {
-				throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-			}
-
-			const verification = await response.json() as {
-				org_id?: string;
-				org_name?: string;
-				projects?: Array<string | { project_id?: string; id?: string; project_name?: string; name?: string }>;
-			};
+			console.log('[ACE] Filtered to:', projects.length, 'projects for org', orgId);
 
 			this._panel.webview.postMessage({
-				command: 'validationResult',
+				command: 'projectsResult',
 				success: true,
-				message: `Connection validated! Organization: ${verification.org_name || verification.org_id}`,
-				data: {
-					orgId: verification.org_id,
-					orgName: verification.org_name,
-					projects: verification.projects
-				}
+				orgId: orgId,
+				projects: projects
 			});
 		} catch (error) {
+			console.error('[ACE] Failed to fetch projects:', error);
 			this._panel.webview.postMessage({
-				command: 'validationResult',
+				command: 'projectsResult',
 				success: false,
-				message: `Validation failed: ${String(error)}`
+				orgId: orgId,
+				message: `Failed to fetch projects: ${String(error)}`
+			});
+		}
+	}
+
+	/**
+	 * Handle browser-based login via device code flow
+	 */
+	private async _handleLogin() {
+		try {
+			this._panel.webview.postMessage({
+				command: 'loginStarted'
+			});
+
+			// Run login command (opens browser, polls for token)
+			const user = await runLoginCommand();
+
+			if (user) {
+				// Login succeeded - send user info to webview
+				this._panel.webview.postMessage({
+					command: 'loginResult',
+					success: true,
+					user: {
+						email: user.email,
+						organizations: user.organizations
+					}
+				});
+			} else {
+				// Login cancelled or failed
+				this._panel.webview.postMessage({
+					command: 'loginResult',
+					success: false,
+					message: 'Login cancelled'
+				});
+			}
+		} catch (error) {
+			this._panel.webview.postMessage({
+				command: 'loginResult',
+				success: false,
+				message: `Login failed: ${String(error)}`
+			});
+		}
+	}
+
+	/**
+	 * Handle logout - clear auth tokens
+	 */
+	private async _handleLogout() {
+		try {
+			this._panel.webview.postMessage({
+				command: 'logoutStarted'
+			});
+
+			// Call SDK logout function
+			await logout();
+
+			// Logout succeeded - notify webview
+			this._panel.webview.postMessage({
+				command: 'logoutResult',
+				success: true
+			});
+
+			vscode.window.showInformationMessage('ACE: Logged out successfully');
+		} catch (error) {
+			this._panel.webview.postMessage({
+				command: 'logoutResult',
+				success: false,
+				message: `Logout failed: ${String(error)}`
 			});
 		}
 	}
@@ -170,7 +300,6 @@ export class ConfigurePanel {
 	 */
 	private async _saveConfiguration(data: {
 		serverUrl: string;
-		apiToken: string;
 		orgId: string;
 		projectId: string;
 	}) {
@@ -193,34 +322,28 @@ export class ConfigurePanel {
 				}
 			}
 
-			// Merge new values
+			// Check if user is logged in via device code (has auth.token)
+			const isUserLoggedIn = !!existingConfig.auth?.token;
+
+			if (!isUserLoggedIn) {
+				this._panel.webview.postMessage({
+					command: 'saveResult',
+					success: false,
+					message: 'Please login first using the "Login with Browser" button'
+				});
+				return;
+			}
+
+			// Build config - user token flow only
 			const config: Record<string, any> = {
 				...existingConfig,
 				serverUrl: data.serverUrl,
-				apiToken: data.apiToken,
 				projectId: data.projectId,
-				cacheTtlMinutes: existingConfig.cacheTtlMinutes || 120
-			};
-
-			// Update orgs section
-			if (!config.orgs) {
-				config.orgs = {};
-			}
-
-			const existingProjects = config.orgs[data.orgId]?.projects || [];
-			const projectExists = existingProjects.some((p: any) => {
-				const existingId = typeof p === 'string' ? p : (p.project_id || p.id);
-				return existingId === data.projectId;
-			});
-
-			if (!projectExists) {
-				existingProjects.push({ project_id: data.projectId });
-			}
-
-			config.orgs[data.orgId] = {
-				orgName: config.orgs[data.orgId]?.orgName || data.orgId,
-				apiToken: data.apiToken,
-				projects: existingProjects
+				cacheTtlMinutes: existingConfig.cacheTtlMinutes || 120,
+				auth: {
+					...existingConfig.auth,
+					default_org_id: data.orgId
+				}
 			};
 
 			// Write config with secure permissions (Unix only - Windows ignores mode)
@@ -280,10 +403,17 @@ export class ConfigurePanel {
 
 	private _getConfigureHtml(existingConfig: {
 		serverUrl?: string;
-		apiToken?: string;
 		orgId?: string;
 		projectId?: string;
-		orgs?: Record<string, { orgName: string; apiToken: string; projects: Array<string | { project_id: string; project_name?: string }> }>;
+		orgs?: Record<string, { orgName: string; projects: Array<string | { project_id: string; project_name?: string }> }>;
+		auth?: {
+			isLoggedIn: boolean;
+			email?: string;
+			organizations?: Array<{ org_id: string; name?: string; role?: string }>;
+			expiresAt?: string;
+			refreshExpiresAt?: string;
+			absoluteExpiresAt?: string;
+		};
 	} | null) {
 		const nonce = this._getNonce();
 		const cspSource = this._panel.webview.cspSource;
@@ -298,8 +428,27 @@ export class ConfigurePanel {
 				.replace(/'/g, '&#039;');
 		};
 
+		// Format time remaining
+		const formatTimeRemaining = (isoDate: string | undefined): string => {
+			if (!isoDate) return '';
+			const expires = new Date(isoDate).getTime();
+			const now = Date.now();
+			const diffMs = expires - now;
+			if (diffMs <= 0) return 'Expired';
+			const hours = Math.floor(diffMs / (1000 * 60 * 60));
+			const days = Math.floor(hours / 24);
+			if (days > 0) return `${days}d ${hours % 24}h`;
+			return `${hours}h`;
+		};
+
+		// Check if user is already logged in via device code
+		const isLoggedIn = existingConfig?.auth?.isLoggedIn || false;
+		const userEmail = existingConfig?.auth?.email || '';
+		const accessExpiry = formatTimeRemaining(existingConfig?.auth?.expiresAt);
+		const hardCapExpiry = formatTimeRemaining(existingConfig?.auth?.absoluteExpiresAt);
+		const isExpired = accessExpiry === 'Expired' || hardCapExpiry === 'Expired';
+
 		const serverUrl = escapeHtml(existingConfig?.serverUrl) || 'https://ace-api.code-engine.app';
-		let apiToken = escapeHtml(existingConfig?.apiToken);
 		const orgId = escapeHtml(existingConfig?.orgId);
 		const projectId = escapeHtml(existingConfig?.projectId);
 
@@ -308,13 +457,8 @@ export class ConfigurePanel {
 		const orgsArray = Object.entries(orgs).map(([id, data]) => ({
 			id,
 			name: data.orgName || id,
-			apiToken: data.apiToken || '',
 			projects: data.projects || []
 		}));
-
-		if (orgId && orgs[orgId] && !apiToken && orgs[orgId].apiToken) {
-			apiToken = escapeHtml(orgs[orgId].apiToken);
-		}
 
 		return `<!DOCTYPE html>
 <html lang="en">
@@ -478,52 +622,62 @@ export class ConfigurePanel {
 			</div>
 		</div>
 
-		<div class="form-group">
+		<div class="form-group" id="orgGroup">
 			<label for="orgId">Organization</label>
-			<select id="orgId" name="orgId" required>
+			<select id="orgId" name="orgId" required style="display: ${isLoggedIn && !isExpired && orgsArray.length > 0 ? 'block' : 'none'};">
 				<option value="">-- Select Organization --</option>
 				${orgsArray.map(org => `
 					<option value="${escapeHtml(org.id)}"
 						${org.id === orgId ? 'selected' : ''}
-						data-token="${escapeHtml(orgs[org.id]?.apiToken || '')}"
 						data-projects='${JSON.stringify(org.projects)}'>
 						${escapeHtml(org.name)} (${org.id})
 					</option>
 				`).join('')}
 			</select>
 			<input type="text" id="orgIdManual" name="orgIdManual"
-				value="${orgsArray.length === 0 ? orgId : ''}"
+				value="${orgId || ''}"
 				placeholder="org_xxxxx (or select from dropdown above)"
-				style="margin-top: 10px; display: ${orgsArray.length > 0 ? 'none' : 'block'};">
+				style="margin-top: 10px; display: ${isLoggedIn && !isExpired && orgsArray.length > 0 ? 'none' : 'block'};"
+				${!isLoggedIn || isExpired ? 'readonly' : ''}>
+			<p class="help-text" style="display: ${(!isLoggedIn || isExpired) && orgId ? 'block' : 'none'};">
+				Current configured organization. Login to change.
+			</p>
 		</div>
 
 		<div class="form-group">
-			<label for="apiToken">API Token</label>
-			<input type="password" id="apiToken" name="apiToken"
-				value="${apiToken}"
-				placeholder="ace_xxxxx" required>
-			<div class="help-text">
-				Get your token from <a href="https://ace.code-engine.app/settings/tokens" target="_blank">ACE Settings</a>
-				<br>Then click <strong>Connect</strong> to load your organizations.
+			<label>Authentication</label>
+			<div class="input-group" style="margin-bottom: 10px;">
+				<button type="button" class="btn-primary" id="loginBtn" style="flex: 2;">
+					Login with Browser
+				</button>
+				<button type="button" class="btn-secondary" id="logoutBtn" style="flex: 1; display: none;">
+					Logout
+				</button>
+				<button type="button" class="btn-secondary" id="devicesBtn" style="flex: 1;">
+					Devices
+				</button>
 			</div>
+			<div id="authStatus" style="padding: 8px; background: var(--vscode-notifications-background); border-radius: 4px; display: none;"></div>
 		</div>
 
-		<div class="form-group">
+		<div class="form-group" id="projectGroup">
 			<label for="projectId">Project</label>
-			<select id="projectId" name="projectId" required>
+			<select id="projectId" name="projectId" required style="display: ${isLoggedIn && !isExpired ? 'block' : 'none'};">
 				<option value="">-- Select Project --</option>
+				${projectId ? `<option value="${projectId}" selected>${projectId}</option>` : ''}
 			</select>
 			<input type="text" id="projectIdManual" name="projectIdManual"
 				value="${projectId}"
 				placeholder="prj_xxxxx (or select from dropdown above)"
-				style="margin-top: 10px; display: none;">
+				style="margin-top: 10px; display: ${isLoggedIn && !isExpired ? 'none' : 'block'};"
+				${!isLoggedIn || isExpired ? 'readonly' : ''}>
+			<p class="help-text" style="display: ${(!isLoggedIn || isExpired) && projectId ? 'block' : 'none'};">
+				Current configured project. Login to change.
+			</p>
 		</div>
 
 		<div class="button-group">
-			<button type="button" class="btn-secondary ${orgsArray.length > 0 ? 'btn-connected' : ''}" id="connectBtn">
-				${orgsArray.length > 0 ? '✓ Connected' : 'Connect'}
-			</button>
-			<button type="submit" class="btn-primary" id="saveBtn" ${orgsArray.length > 0 ? '' : 'disabled title="Connect first to load organizations"'}>
+			<button type="submit" class="btn-primary" id="saveBtn" disabled title="Login first to save configuration">
 				Save Configuration
 			</button>
 		</div>
@@ -548,6 +702,16 @@ export class ConfigurePanel {
 	<script nonce="${nonce}">
 		const vscode = acquireVsCodeApi();
 		const orgsData = ${orgsJson};
+		// Initialize auth state from existing config
+		let isUserToken = ${isLoggedIn ? 'true' : 'false'};
+		const existingEmail = '${escapeHtml(userEmail)}';
+		const accessExpiry = '${accessExpiry}';
+		const hardCapExpiry = '${hardCapExpiry}';
+		const isExpired = ${isExpired ? 'true' : 'false'};
+
+		// Get existing workspace config values - GLOBAL scope so populateProjects can access
+		const existingOrgId = '${escapeHtml(orgId)}';
+		const existingProjectId = '${escapeHtml(projectId)}';
 
 		(function init() {
 			document.getElementById('setProductionUrl').addEventListener('click', () => {
@@ -556,21 +720,105 @@ export class ConfigurePanel {
 
 			const orgSelect = document.getElementById('orgId');
 			orgSelect.addEventListener('change', onOrgChange);
-			if (orgSelect.value) {
-				onOrgChange();
-			}
 
-			document.getElementById('connectBtn').addEventListener('click', validateConnection);
 			document.getElementById('configForm').addEventListener('submit', handleSubmit);
 			document.getElementById('initWorkspaceBtn').addEventListener('click', () => {
 				vscode.postMessage({ command: 'initializeWorkspace' });
 				showStatus('Initializing workspace... Creating hooks and rules.', 'info');
 			});
+
+			// Login with browser button
+			document.getElementById('loginBtn').addEventListener('click', () => {
+				document.getElementById('loginBtn').disabled = true;
+				document.getElementById('loginBtn').textContent = 'Opening browser...';
+				vscode.postMessage({ command: 'login' });
+			});
+
+			// Logout button
+			document.getElementById('logoutBtn').addEventListener('click', () => {
+				document.getElementById('logoutBtn').disabled = true;
+				document.getElementById('logoutBtn').textContent = 'Logging out...';
+				vscode.postMessage({ command: 'logout' });
+			});
+
+			// Manage devices button
+			document.getElementById('devicesBtn').addEventListener('click', () => {
+				vscode.postMessage({ command: 'executeCommand', commandId: 'ace.devices' });
+			});
+
+			// Handle auth state: logged in, expired, or not logged in
+			const loginBtn = document.getElementById('loginBtn');
+			const logoutBtn = document.getElementById('logoutBtn');
+			const authStatus = document.getElementById('authStatus');
+			const saveBtn = document.getElementById('saveBtn');
+			const orgGroup = document.getElementById('orgGroup');
+			const projectGroup = document.getElementById('projectGroup');
+
+			if (isExpired && existingEmail) {
+				// Token expired - show warning and prompt re-login
+				// But still show existing config as read-only info
+				loginBtn.textContent = 'Re-login Required';
+				loginBtn.classList.remove('btn-connected');
+				loginBtn.style.background = 'var(--vscode-testing-iconFailed)';
+				loginBtn.style.color = 'white';
+				logoutBtn.style.display = 'block'; // Show logout button
+
+				let expiredStatusHtml = '⚠️ Session expired for ' + existingEmail;
+				if (existingOrgId || existingProjectId) {
+					expiredStatusHtml += '<br><small style="opacity: 0.8;">Current config: ' + (existingOrgId || 'no org') + ' / ' + (existingProjectId || 'no project') + '</small>';
+				}
+				expiredStatusHtml += '<br><small style="opacity: 0.8;">Please re-login to continue using ACE.</small>';
+				authStatus.innerHTML = expiredStatusHtml;
+				authStatus.style.display = 'block';
+				authStatus.style.background = 'var(--vscode-inputValidation-warningBackground)';
+				saveBtn.disabled = true;
+				saveBtn.title = 'Re-login required - session expired';
+				orgGroup.style.display = 'none';
+				projectGroup.style.display = 'none';
+
+				showStatus('Session expired. Please re-login to continue.', 'error');
+			} else if (isUserToken && existingEmail) {
+				// Logged in with valid token
+				loginBtn.textContent = '✓ Logged In';
+				loginBtn.classList.add('btn-connected');
+				logoutBtn.style.display = 'block'; // Show logout button
+
+				// Build auth status with expiration info
+				let statusHtml = '✅ Logged in as ' + existingEmail;
+				if (accessExpiry || hardCapExpiry) {
+					statusHtml += '<br><small style="opacity: 0.8;">';
+					if (accessExpiry) statusHtml += '⏱️ Session: ' + accessExpiry + ' (auto-extends on use)';
+					if (hardCapExpiry) statusHtml += ' · 🔒 Hard cap: ' + hardCapExpiry;
+					statusHtml += '</small>';
+				}
+				authStatus.innerHTML = statusHtml;
+				authStatus.style.display = 'block';
+				saveBtn.disabled = false;
+				saveBtn.title = '';
+				orgGroup.style.display = 'block';
+				projectGroup.style.display = 'block';
+
+				showStatus('Already logged in. Select organization and project, then save.', 'success');
+			} else {
+				// Not logged in at all
+				authStatus.innerHTML = '🔒 Please login to configure ACE';
+				authStatus.style.display = 'block';
+				saveBtn.disabled = true;
+				saveBtn.title = 'Login first to save configuration';
+				orgGroup.style.display = 'none';
+				projectGroup.style.display = 'none';
+
+				showStatus('Login required to configure ACE.', 'info');
+			}
+
+			// Trigger org change if one is selected
+			if (orgSelect.value) {
+				onOrgChange();
+			}
 		})();
 
 		function onOrgChange() {
 			const orgSelect = document.getElementById('orgId');
-			const apiTokenInput = document.getElementById('apiToken');
 			const projectSelect = document.getElementById('projectId');
 			const projectManual = document.getElementById('projectIdManual');
 			const orgIdManual = document.getElementById('orgIdManual');
@@ -585,10 +833,6 @@ export class ConfigurePanel {
 				orgIdManual.style.display = 'block';
 			}
 
-			if (selectedOption && selectedOption.dataset.token) {
-				apiTokenInput.value = selectedOption.dataset.token;
-			}
-
 			// Clear and populate projects
 			while (projectSelect.firstChild) {
 				projectSelect.removeChild(projectSelect.firstChild);
@@ -598,10 +842,25 @@ export class ConfigurePanel {
 			defaultOption.textContent = '-- Select Project --';
 			projectSelect.appendChild(defaultOption);
 
+			// For user tokens, fetch projects from server
+			if (isUserToken && orgId) {
+				const serverUrl = document.getElementById('serverUrl').value || 'https://ace-api.code-engine.app';
+				showStatus('Loading projects...', 'info');
+				vscode.postMessage({
+					command: 'fetchProjects',
+					serverUrl: serverUrl,
+					orgId: orgId
+				});
+				projectSelect.style.display = 'block';
+				projectManual.style.display = 'none';
+				return;
+			}
+
+			// For org tokens or cached data, use existing projects
 			if (selectedOption && selectedOption.dataset.projects) {
 				try {
 					const projects = JSON.parse(selectedOption.dataset.projects);
-					populateProjects(projects);
+					populateProjects(projects, existingProjectId);
 				} catch (e) {
 					projectSelect.style.display = 'none';
 					projectManual.style.display = 'block';
@@ -612,9 +871,18 @@ export class ConfigurePanel {
 			}
 		}
 
-		function populateProjects(projects) {
+		function populateProjects(projects, preSelectProjectId) {
 			const projectSelect = document.getElementById('projectId');
 			const projectManual = document.getElementById('projectIdManual');
+			// Use provided preSelectProjectId or fall back to initial config value
+			const targetProjectId = preSelectProjectId || existingProjectId;
+
+			console.log('[ACE UI] populateProjects called:', {
+				projectCount: projects?.length || 0,
+				preSelectProjectId,
+				targetProjectId,
+				existingProjectId
+			});
 
 			while (projectSelect.firstChild) {
 				projectSelect.removeChild(projectSelect.firstChild);
@@ -624,6 +892,9 @@ export class ConfigurePanel {
 			defaultOption.textContent = '-- Select Project --';
 			projectSelect.appendChild(defaultOption);
 
+			// Track if target project was found in the list
+			let targetFound = false;
+
 			if (projects && projects.length > 0) {
 				projects.forEach(project => {
 					const projectId = typeof project === 'string' ? project : (project.project_id || project.id);
@@ -631,34 +902,32 @@ export class ConfigurePanel {
 					const option = document.createElement('option');
 					option.value = projectId;
 					option.textContent = projectName + (projectId !== projectName ? ' (' + projectId + ')' : '');
-					if (projectId === '${escapeHtml(projectId)}') {
+					if (projectId === targetProjectId) {
 						option.selected = true;
+						targetFound = true;
 					}
 					projectSelect.appendChild(option);
 				});
+			}
+
+			// Always add existing project as option if not in list (allows keeping workspace config)
+			if (targetProjectId && !targetFound) {
+				console.log('[ACE UI] Adding existing project to dropdown:', targetProjectId);
+				const existingOption = document.createElement('option');
+				existingOption.value = targetProjectId;
+				existingOption.textContent = targetProjectId + ' (current)';
+				existingOption.selected = true;
+				projectSelect.appendChild(existingOption);
+			}
+
+			// Show dropdown if we have projects OR existing project
+			if ((projects && projects.length > 0) || targetProjectId) {
 				projectSelect.style.display = 'block';
 				projectManual.style.display = 'none';
 			} else {
 				projectSelect.style.display = 'none';
 				projectManual.style.display = 'block';
 			}
-		}
-
-		function validateConnection() {
-			const form = document.getElementById('configForm');
-			const formData = new FormData(form);
-			const data = {
-				serverUrl: formData.get('serverUrl'),
-				apiToken: formData.get('apiToken')
-			};
-
-			if (!data.serverUrl || !data.apiToken) {
-				showStatus('Please fill in server URL and API token', 'error');
-				return;
-			}
-
-			showStatus('Validating connection...', 'info');
-			vscode.postMessage({ command: 'validate', data: data });
 		}
 
 		function handleSubmit(e) {
@@ -669,13 +938,17 @@ export class ConfigurePanel {
 
 			const data = {
 				serverUrl: formData.get('serverUrl'),
-				apiToken: formData.get('apiToken'),
 				orgId: orgId,
 				projectId: projectId
 			};
 
-			if (!data.serverUrl || !data.apiToken || !data.orgId || !data.projectId) {
-				showStatus('Please fill in all required fields', 'error');
+			if (!data.serverUrl || !data.orgId || !data.projectId) {
+				showStatus('Please fill in all required fields (login first if not done)', 'error');
+				return;
+			}
+
+			if (!isUserToken) {
+				showStatus('Please login first before saving', 'error');
 				return;
 			}
 
@@ -693,51 +966,9 @@ export class ConfigurePanel {
 		window.addEventListener('message', event => {
 			const message = event.data;
 			switch (message.command) {
+				// Legacy validationResult - kept for compatibility but not used with device login
 				case 'validationResult':
 					showStatus(message.message, message.success ? 'success' : 'error');
-					if (message.success && message.data) {
-						// Enable Save button and show connected state
-						const saveBtn = document.getElementById('saveBtn');
-						const connectBtn = document.getElementById('connectBtn');
-						saveBtn.disabled = false;
-						saveBtn.title = '';
-						connectBtn.textContent = '✓ Connected';
-						connectBtn.classList.add('btn-connected');
-
-						const orgSelect = document.getElementById('orgId');
-						const orgIdManual = document.getElementById('orgIdManual');
-
-						if (message.data.orgId) {
-							let found = false;
-							for (let i = 0; i < orgSelect.options.length; i++) {
-								if (orgSelect.options[i].value === message.data.orgId) {
-									orgSelect.selectedIndex = i;
-									found = true;
-									break;
-								}
-							}
-							// If org not in dropdown, add it dynamically
-							if (!found) {
-								const newOption = document.createElement('option');
-								newOption.value = message.data.orgId;
-								newOption.textContent = (message.data.orgName || message.data.orgId) + ' (' + message.data.orgId + ')';
-								newOption.dataset.token = document.getElementById('apiToken').value;
-								newOption.dataset.projects = JSON.stringify(message.data.projects || []);
-								orgSelect.appendChild(newOption);
-								orgSelect.value = message.data.orgId;
-							}
-							// Trigger change to populate projects
-							orgSelect.dispatchEvent(new Event('change'));
-							// Hide manual input since we have it in dropdown now
-							if (orgIdManual) {
-								orgIdManual.style.display = 'none';
-							}
-						}
-
-						if (message.data.projects && message.data.projects.length > 0) {
-							populateProjects(message.data.projects);
-						}
-					}
 					break;
 				case 'saveResult':
 					showStatus(message.message, message.success ? 'success' : 'error');
@@ -745,6 +976,125 @@ export class ConfigurePanel {
 						setTimeout(() => {
 							vscode.postMessage({ command: 'close' });
 						}, 2000);
+					}
+					break;
+				case 'loginStarted':
+					document.getElementById('authStatus').style.display = 'block';
+					document.getElementById('authStatus').innerHTML = '⏳ Opening browser for login...';
+					break;
+				case 'loginResult':
+					const loginBtnResult = document.getElementById('loginBtn');
+					const authStatusResult = document.getElementById('authStatus');
+					const orgGroupResult = document.getElementById('orgGroup');
+					const projectGroupResult = document.getElementById('projectGroup');
+					loginBtnResult.disabled = false;
+					loginBtnResult.style.background = ''; // Reset any custom background
+					loginBtnResult.style.color = ''; // Reset any custom color
+
+					if (message.success && message.user) {
+						isUserToken = true; // Mark that we're using user token (needs project fetch)
+						loginBtnResult.textContent = '✓ Logged In';
+						loginBtnResult.classList.add('btn-connected');
+						document.getElementById('logoutBtn').style.display = 'block'; // Show logout button
+						authStatusResult.innerHTML = '✅ Logged in as ' + message.user.email;
+						authStatusResult.style.display = 'block';
+						authStatusResult.style.background = ''; // Reset background
+
+						// Enable Save button
+						document.getElementById('saveBtn').disabled = false;
+						document.getElementById('saveBtn').title = '';
+
+						// Show org and project groups
+						orgGroupResult.style.display = 'block';
+						projectGroupResult.style.display = 'block';
+
+						// Populate organizations from login
+						if (message.user.organizations && message.user.organizations.length > 0) {
+							const orgSelect = document.getElementById('orgId');
+							// Clear existing options except default
+							while (orgSelect.options.length > 1) {
+								orgSelect.remove(1);
+							}
+							// Add organizations from login
+							message.user.organizations.forEach(org => {
+								const option = document.createElement('option');
+								option.value = org.org_id;
+								option.textContent = (org.name || org.org_name || 'Unknown') + ' (' + org.org_id + ')';
+								option.dataset.projects = '[]'; // Projects loaded on selection
+								orgSelect.appendChild(option);
+							});
+
+							// Pre-select existing org if it matches, otherwise use first org
+							const previousOrgId = existingOrgId;
+							const matchingOrg = message.user.organizations.find(org => org.org_id === previousOrgId);
+							if (matchingOrg) {
+								orgSelect.value = previousOrgId;
+							} else if (message.user.organizations.length > 0) {
+								orgSelect.value = message.user.organizations[0].org_id;
+							}
+							// Trigger org change to fetch projects
+							orgSelect.dispatchEvent(new Event('change'));
+							orgSelect.style.display = 'block';
+							document.getElementById('orgIdManual').style.display = 'none';
+						}
+
+						showStatus('Login successful! ' + (existingOrgId ? 'Previous config restored.' : 'Select organization and project.'), 'success');
+					} else {
+						loginBtnResult.textContent = 'Login with Browser';
+						authStatusResult.innerHTML = '❌ ' + (message.message || 'Login failed');
+						authStatusResult.style.display = 'block';
+						showStatus(message.message || 'Login failed', 'error');
+					}
+					break;
+				case 'projectsResult':
+					if (message.success && message.projects) {
+						populateProjects(message.projects, existingProjectId);
+						showStatus('Projects loaded.' + (existingProjectId ? ' Previous project restored.' : ' Select project and save.'), 'success');
+					} else {
+						showStatus(message.message || 'Failed to load projects', 'error');
+						document.getElementById('projectId').style.display = 'none';
+						document.getElementById('projectIdManual').style.display = 'block';
+					}
+					break;
+				case 'logoutStarted':
+					document.getElementById('authStatus').style.display = 'block';
+					document.getElementById('authStatus').innerHTML = '⏳ Logging out...';
+					break;
+				case 'logoutResult':
+					const logoutBtnResult = document.getElementById('logoutBtn');
+					const loginBtnLogout = document.getElementById('loginBtn');
+					const authStatusLogout = document.getElementById('authStatus');
+					const orgGroupLogout = document.getElementById('orgGroup');
+					const projectGroupLogout = document.getElementById('projectGroup');
+					logoutBtnResult.disabled = false;
+					logoutBtnResult.textContent = 'Logout';
+
+					if (message.success) {
+						// Reset to logged-out state
+						isUserToken = false;
+						loginBtnLogout.textContent = 'Login with Browser';
+						loginBtnLogout.classList.remove('btn-connected');
+						loginBtnLogout.style.background = '';
+						loginBtnLogout.style.color = '';
+						logoutBtnResult.style.display = 'none'; // Hide logout button
+
+						authStatusLogout.innerHTML = '🔒 Please login to configure ACE';
+						authStatusLogout.style.display = 'block';
+						authStatusLogout.style.background = '';
+
+						// Disable Save button
+						document.getElementById('saveBtn').disabled = true;
+						document.getElementById('saveBtn').title = 'Login first to save configuration';
+
+						// Hide org and project groups
+						orgGroupLogout.style.display = 'none';
+						projectGroupLogout.style.display = 'none';
+
+						showStatus('Logged out successfully. Login again to configure ACE.', 'info');
+					} else {
+						authStatusLogout.innerHTML = '❌ ' + (message.message || 'Logout failed');
+						authStatusLogout.style.display = 'block';
+						showStatus(message.message || 'Logout failed', 'error');
 					}
 					break;
 			}

@@ -17,6 +17,9 @@ import { StatusPanel } from './webviews/statusPanel';
 import { ConfigurePanel } from './webviews/configurePanel';
 import { readContext, readWorkspaceVersion, writeWorkspaceVersion, pickWorkspaceFolder, getTargetFolder, isMultiRootWorkspace, type AceContext } from './ace/context';
 import { initWorkspaceMonitor, getCurrentFolder, refreshStatusBar } from './automation/workspaceMonitor';
+import { runLoginCommand, logout, isAuthenticated, getTokenExpiration, handleAuthError, checkDeprecatedOrgAuth, getValidToken, getHardCapInfo } from './commands/login';
+import { AceClient, loadConfig, loadUserAuth, getDefaultOrgId } from '@ace-sdk/core';
+import { showDevicesQuickPick } from './commands/devices';
 
 let statusBarItem: vscode.StatusBarItem;
 let extensionContext: vscode.ExtensionContext;
@@ -48,72 +51,70 @@ const getCursorApi = (): CursorApi | undefined => {
 };
 
 /**
- * Preload patterns on extension activation using ace_search (semantic search)
- * Uses HTTP API directly for fastest startup (no subprocess overhead)
- * Returns 5-10 relevant patterns, NOT all 1000+ like ace_get_playbook
+ * Preload pattern count on extension activation using /analytics API
+ * Uses the same endpoint as the status page for consistent results
  */
 async function preloadPatterns(): Promise<void> {
 	try {
-		const config = getAceConfig();
-		if (!config?.serverUrl || !config?.projectId) {
+		// Load config using SDK
+		const sdkConfig = loadConfig();
+		const userAuth = loadUserAuth();
+		const ctx = readContext();
+
+		// Check required config
+		if (!sdkConfig?.serverUrl || !ctx?.projectId) {
 			console.log('[ACE] Preload skipped: no config');
 			return;
 		}
 
-		const headers: Record<string, string> = {
-			'Content-Type': 'application/json',
-			'X-ACE-Project': config.projectId
-		};
-		if (config.orgId) {
-			headers['X-ACE-Org'] = config.orgId;
-		}
-		if (config.apiToken) {
-			headers['Authorization'] = `Bearer ${config.apiToken}`;
-		}
-
-		// Use ace_search (semantic) NOT ace_get_playbook (all patterns)
-		const response = await fetch(`${config.serverUrl}/patterns/search`, {
-			method: 'POST',
-			headers,
-			body: JSON.stringify({
-				pattern: {
-					id: `temp_search_${Date.now()}`,
-					content: 'general development patterns strategies',
-					confidence: 0.8,
-					created_at: new Date().toISOString(),
-					section: 'general'
-				},
-				threshold: 0.5,
-				top_k: 20
-			})
-		});
-
-		if (!response.ok) {
-			console.log(`[ACE] Preload failed: ${response.status} ${response.statusText}`);
+		// Check for valid token
+		const token = userAuth?.token || sdkConfig?.apiToken;
+		if (!token) {
+			console.log('[ACE] Preload skipped: no valid token');
 			return;
 		}
 
-		const result = await response.json() as {
-			similar_patterns?: Array<{ domain?: string }>;
-			count?: number;
-		};
-
-		// Extract pattern count and domains for status bar
-		preloadedPatternCount = result.count || result.similar_patterns?.length || 0;
-		const domainSet = new Set<string>();
-		for (const pattern of result.similar_patterns || []) {
-			if (pattern.domain) {
-				domainSet.add(pattern.domain);
-			}
+		// Get org ID
+		const orgId = ctx.orgId || getDefaultOrgId();
+		if (!orgId) {
+			console.log('[ACE] Preload skipped: no org ID');
+			return;
 		}
-		preloadedDomains = Array.from(domainSet);
+
+		// Use direct HTTP fetch to /analytics (same as status page)
+		const analyticsUrl = `${sdkConfig.serverUrl}/analytics`;
+		console.log(`[ACE] Preload: fetching analytics from ${analyticsUrl}`);
+
+		const response = await fetch(analyticsUrl, {
+			headers: {
+				'Authorization': `Bearer ${token}`,
+				'Content-Type': 'application/json',
+				'X-ACE-Org': orgId,
+				'X-ACE-Project': ctx.projectId
+			}
+		});
+
+		if (!response.ok) {
+			console.log(`[ACE] Preload: analytics fetch failed with status ${response.status}`);
+			return;
+		}
+
+		const analytics = await response.json() as Record<string, any>;
+		console.log(`[ACE] Preload: analytics response - total_patterns=${analytics.total_patterns}, total_bullets=${analytics.total_bullets}`);
+
+		// Use total_patterns first (same transformation as status page)
+		preloadedPatternCount = analytics.total_patterns || analytics.total_bullets || 0;
+
+		// Extract domains from by_domain
+		const byDomain = analytics.by_domain || {};
+		preloadedDomains = Object.keys(byDomain);
 
 		console.log(`[ACE] Preloaded ${preloadedPatternCount} patterns from ${preloadedDomains.length} domains`);
 
 		// Update status bar with pattern count
 		if (statusBarItem && preloadedPatternCount > 0) {
 			statusBarItem.text = `$(book) ACE: ${preloadedPatternCount} patterns`;
-			statusBarItem.tooltip = `ACE Pattern Learning\n${preloadedPatternCount} patterns preloaded\nDomains: ${preloadedDomains.slice(0, 3).join(', ')}${preloadedDomains.length > 3 ? ` (+${preloadedDomains.length - 3} more)` : ''}\n\nClick for status`;
+			statusBarItem.tooltip = `ACE Pattern Learning\n${preloadedPatternCount} patterns in playbook\nDomains: ${preloadedDomains.slice(0, 3).join(', ')}${preloadedDomains.length > 3 ? ` (+${preloadedDomains.length - 3} more)` : ''}\n\nClick for status`;
 		}
 	} catch (error) {
 		console.log('[ACE] Preload error:', error instanceof Error ? error.message : String(error));
@@ -124,6 +125,100 @@ async function preloadPatterns(): Promise<void> {
 // Export for external access (e.g., status panel)
 export function getPreloadedPatternInfo(): { count: number; domains: string[] } {
 	return { count: preloadedPatternCount, domains: preloadedDomains };
+}
+
+/**
+ * Check auth status on activation and prompt for login if needed
+ *
+ * WARNING UX FIX (per GitHub issue):
+ * - DON'T warn about access token expiration for active users (sliding window extends it!)
+ * - ONLY warn about:
+ *   1. 7-day hard cap approaching (absolute_expires_at)
+ *   2. Refresh token expired (can't auto-recover)
+ *   3. Not logged in at all
+ */
+async function checkAuthOnActivation(): Promise<void> {
+	if (!isAuthenticated()) {
+		// Not logged in - show gentle prompt (non-blocking)
+		vscode.window.showInformationMessage(
+			'ACE not configured. Login to enable pattern learning.',
+			'Login'
+		).then(action => {
+			if (action === 'Login') {
+				vscode.commands.executeCommand('ace.login');
+			}
+		});
+		return;
+	}
+
+	// Check for deprecated org tokens (ace_org_*) - these will be removed soon
+	const deprecationCheck = checkDeprecatedOrgAuth();
+	if (deprecationCheck.isDeprecated) {
+		vscode.window.showWarningMessage(
+			`⚠️ ${deprecationCheck.message}`,
+			'Migrate Now',
+			'Remind Later'
+		).then(action => {
+			if (action === 'Migrate Now') {
+				vscode.commands.executeCommand('ace.login');
+			}
+		});
+		// Don't return - let user continue using deprecated token for now
+	}
+
+	// Check token expiration
+	const expiration = getTokenExpiration();
+	if (!expiration) return;
+
+	// Check if refresh token expired (can't auto-recover)
+	if (expiration.refreshExpires) {
+		const refreshExpired = new Date(expiration.refreshExpires).getTime() < Date.now();
+		if (refreshExpired) {
+			vscode.window.showErrorMessage(
+				'ACE session expired. Please login again.',
+				'Login'
+			).then(action => {
+				if (action === 'Login') {
+					vscode.commands.executeCommand('ace.login');
+				}
+			});
+			return;
+		}
+	}
+
+	// Check 7-day hard cap approaching (absolute_expires_at)
+	// This is the absolute maximum session duration regardless of activity
+	if (expiration.absoluteExpires) {
+		const absoluteExpiresAt = new Date(expiration.absoluteExpires).getTime();
+		const hoursUntilHardCap = (absoluteExpiresAt - Date.now()) / (1000 * 60 * 60);
+
+		if (hoursUntilHardCap < 0) {
+			// Already expired
+			vscode.window.showErrorMessage(
+				'ACE session hard limit reached. Please login again.',
+				'Login'
+			).then(action => {
+				if (action === 'Login') {
+					vscode.commands.executeCommand('ace.login');
+				}
+			});
+			return;
+		} else if (hoursUntilHardCap < 24) {
+			// Approaching hard cap (within 24 hours)
+			vscode.window.showWarningMessage(
+				`ACE session hard limit in ${Math.round(hoursUntilHardCap)} hours. Must re-login after 7 days of continuous use.`,
+				'Login Now'
+			).then(action => {
+				if (action === 'Login Now') {
+					vscode.commands.executeCommand('ace.login');
+				}
+			});
+		}
+	}
+
+	// DO NOT warn about access token expiration for active users!
+	// Sliding window extends it on every use (48h extension per API call).
+	// The SDK's ensureValidToken() handles auto-refresh transparently.
 }
 
 export async function activate(context: vscode.ExtensionContext) {
@@ -140,28 +235,33 @@ export async function activate(context: vscode.ExtensionContext) {
 		return originalEmitWarning.call(process, warning, ...args);
 	};
 
+	// 1. Create status bar item FIRST so it always shows
+	statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+	statusBarItem.text = '$(sync~spin) ACE';  // Initial text while loading
+	statusBarItem.command = 'ace.status';
+	statusBarItem.tooltip = 'Click to view ACE playbook status';
+	context.subscriptions.push(statusBarItem);
+	statusBarItem.show();
+	console.log('[ACE] Status bar created and shown');
+
 	try {
-		// 1. Register MCP server with Cursor
+		// 2. Register MCP server with Cursor
 		await registerMcpServer(context);
 
-		// 2. Create Cursor hooks for learning backup
+		// 3. Create Cursor hooks for learning backup
 		await createCursorHooks();
 
-		// 3. Create Cursor Rules file for AI instructions
+		// 4. Create Cursor Rules file for AI instructions
 		await createCursorRules();
-
-		// 4. Create status bar item
-		statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-		statusBarItem.command = 'ace.status';
-		statusBarItem.tooltip = 'Click to view ACE playbook status';
-		context.subscriptions.push(statusBarItem);
-		statusBarItem.show();
 
 		// 5. Initialize workspace monitor for real-time folder tracking
 		console.log('[ACE] Initializing workspace monitor with getAceConfig');
 		initWorkspaceMonitor(context, statusBarItem, getAceConfig);
 
-		// 6. Preload patterns in background (non-blocking)
+		// 6. Check auth status and prompt for login if needed
+		await checkAuthOnActivation();
+
+		// 7. Preload patterns in background (non-blocking)
 		// Uses ace_search with generic query to get pattern count + domains for status bar
 		preloadPatterns().catch(err => {
 			console.log('[ACE] Background preload failed (non-fatal):', err);
@@ -174,10 +274,18 @@ export async function activate(context: vscode.ExtensionContext) {
 	} catch (error) {
 		console.error('[ACE] Activation error:', error);
 		vscode.window.showErrorMessage(`ACE extension activation failed: ${error instanceof Error ? error.message : String(error)}`);
+		// Show error state in status bar
+		if (statusBarItem) {
+			statusBarItem.text = '$(error) ACE: Error';
+			statusBarItem.tooltip = `ACE activation failed: ${error instanceof Error ? error.message : String(error)}`;
+			statusBarItem.show();
+		}
 	}
 
 	// Register UI commands (manual fallbacks)
 	context.subscriptions.push(
+		vscode.commands.registerCommand('ace.login', runLoginCommand),
+		vscode.commands.registerCommand('ace.logout', logout),
 		vscode.commands.registerCommand('ace.initializeWorkspace', initializeWorkspace),
 		vscode.commands.registerCommand('ace.configure', () => ConfigurePanel.createOrShow(context.extensionUri)),
 		vscode.commands.registerCommand('ace.status', () => StatusPanel.createOrShow(context.extensionUri)),
@@ -193,7 +301,8 @@ export async function activate(context: vscode.ExtensionContext) {
 		}),
 		vscode.commands.registerCommand('ace.autoSearch', () => {
 			vscode.window.showInformationMessage('ACE search is now automatic via MCP. The AI calls ace_get_playbook before every task.');
-		})
+		}),
+		vscode.commands.registerCommand('ace.devices', showDevicesQuickPick)
 	);
 }
 
@@ -1205,12 +1314,17 @@ function getAceConfig(folder?: vscode.WorkspaceFolder): { serverUrl?: string; ap
 	}
 
 	// Merge configs with priority: VS Code settings > workspace context > global config
-	const finalOrgId = orgId || ctx?.orgId || Object.keys(globalConfig?.orgs || {})[0];
+	// v0.2.38: Support user auth (device code flow) with auth.default_org_id and auth.organizations
+	const finalOrgId = orgId || ctx?.orgId || Object.keys(globalConfig?.orgs || {})[0]
+		|| globalConfig?.default_org_id
+		|| globalConfig?.auth?.default_org_id
+		|| globalConfig?.auth?.organizations?.[0]?.org_id;
 	const finalProjectId = projectId || ctx?.projectId || globalConfig?.projectId;
 	const finalServerUrl = serverUrl || globalConfig?.serverUrl || 'https://ace-api.code-engine.app';
 
 	// Get API token for the org
-	let apiToken = globalConfig?.apiToken;
+	// v0.2.38: Check user auth token first (device code flow)
+	let apiToken = globalConfig?.auth?.token || globalConfig?.apiToken;
 	if (finalOrgId && globalConfig?.orgs?.[finalOrgId]?.apiToken) {
 		apiToken = globalConfig.orgs[finalOrgId].apiToken;
 	}

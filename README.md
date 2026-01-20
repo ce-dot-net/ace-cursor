@@ -2,7 +2,7 @@
 
 > 🔐 **CLOSED BETA** - This extension requires an ACE account to work.
 >
-> **[→ Join the Waitlist](https://ace.code-engine.app/waitlist)** to get your API token and start using ACE.
+> **[→ Join the Waitlist](https://ace.code-engine.app/waitlist)** to get access and start using ACE.
 >
 > Without an account, the extension cannot connect to the ACE server.
 
@@ -15,49 +15,56 @@ By [Code Engine GmbH](https://ace.code-engine.app)
 - 🔄 **Automatic pattern retrieval** before tasks via MCP
 - 📚 **Learning capture** after substantial work
 - 🔌 **Native MCP integration** with Cursor
-- 📊 **Status bar** shows pattern count (e.g., "ACE (257)") and configuration state
+- 📊 **Status bar** shows pattern count (e.g., "ACE: 257 patterns") and configuration state
 - 📁 **Multi-root workspace support** - each folder gets its own ACE configuration
 - 🔄 **Real-time folder monitoring** - status bar updates when switching folders
-- ⚙️ **Configure panel** for easy setup
+- 🔐 **Browser-based login** - secure device code authentication (no API tokens)
+- 📱 **Device management** - manage your logged-in devices
+- ⚙️ **Configure panel** for easy setup with logout support
 
 ## Quick Start
 
 > **Step 1 is required** - The extension won't work without an ACE account!
 
-1. **[Sign up for ACE](https://ace.code-engine.app/waitlist)** - Get your API token (required!)
+1. **[Sign up for ACE](https://ace.code-engine.app/waitlist)** - Create your account (required!)
 2. **Install** from Cursor Extensions marketplace
 3. **Open Command Palette** (`Cmd+Shift+P` on Mac, `Ctrl+Shift+P` on Windows/Linux)
 4. **Run** `ACE: Initialize Workspace` - sets up MCP server and rules
 5. **Run** `ACE: Configure Connection` - opens setup panel
-6. **Enter your API token** and select your project
-7. **Start coding!** - AI automatically retrieves patterns before tasks
+6. **Click "Login with Browser"** - authenticates via your browser
+7. **Select your organization and project**
+8. **Start coding!** - AI automatically retrieves patterns before tasks
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
+| **ACE: Login** | Login via browser-based device code authentication |
+| **ACE: Logout** | Logout and clear authentication tokens |
 | **ACE: Initialize Workspace** | Set up ACE in current workspace (creates `.cursor/` config files, registers MCP server) |
-| **ACE: Configure Connection** | Opens webview panel to configure server URL, API token, and select project |
-| **ACE: Show Status** | Opens webview panel showing playbook statistics (pattern count, confidence scores) |
+| **ACE: Configure Connection** | Opens webview panel to login, select organization/project, and manage settings |
+| **ACE: Show Status** | Opens webview panel showing playbook statistics (pattern count, session expiry) |
 | **ACE: Search Patterns** | Search learned patterns by keyword |
 | **ACE: Bootstrap Playbook** | Initialize patterns from existing codebase (git history, docs) |
 | **ACE: Capture Learning** | Manually trigger learning capture after work |
+| **ACE: Manage Devices** | View and manage your logged-in devices |
 
 ## Webview Panels
 
 ### Configure Panel
 Interactive setup wizard for:
-- Setting ACE server URL
-- Entering API token
-- Selecting organization and project
-- Testing connection
-- Link to create new projects at [ace.code-engine.app](https://ace.code-engine.app)
+- **Browser-based login** - Click "Login with Browser" to authenticate
+- **Logout** - Click "Logout" to clear your session
+- **Device management** - Click "Devices" to manage logged-in devices
+- Selecting organization and project from your account
+- Setting ACE server URL (advanced)
 
 ### Status Panel
 Real-time dashboard showing:
 - Total patterns in playbook
 - Average confidence score
 - Patterns by section (strategies, snippets, troubleshooting, APIs)
+- Session expiry info (access token + 7-day hard cap)
 - Connection status
 
 ## How It Works
@@ -87,7 +94,6 @@ This creates a self-improving learning cycle where each session benefits from pr
 
 - Cursor IDE (v0.44+)
 - ACE account at [ace.code-engine.app](https://ace.code-engine.app)
-- API token from the ACE dashboard
 
 ## Configuration
 

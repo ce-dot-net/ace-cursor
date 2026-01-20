@@ -2,7 +2,7 @@
   "name": "cursor-ace-extension",
   "displayName": "ACE for Cursor",
   "description": "Native Cursor extension for ACE pattern learning. Automatically retrieves patterns before tasks and captures learning after via MCP.",
-  "version": "0.2.35",
+  "version": "0.2.40",
   "publisher": "ce-dot-net",
   "author": "Code Engine GmbH",
   "license": "MIT",
@@ -39,6 +39,14 @@
   "contributes": {
     "commands": [
       {
+        "command": "ace.login",
+        "title": "ACE: Login"
+      },
+      {
+        "command": "ace.logout",
+        "title": "ACE: Logout"
+      },
+      {
         "command": "ace.initializeWorkspace",
         "title": "ACE: Initialize Workspace"
       },
@@ -73,6 +81,10 @@
       {
         "command": "ace.autoSearch",
         "title": "ACE: Auto Search (Legacy)"
+      },
+      {
+        "command": "ace.devices",
+        "title": "ACE: Manage Devices"
       }
     ],
     "configuration": {
@@ -97,28 +109,37 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run build",
-    "build": "tsc -p ./",
+    "vscode:prepublish": "npm run build:prod",
+    "build": "node esbuild.js",
+    "build:prod": "node esbuild.js --production",
+    "build:tsc": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "lint": "eslint src --ext .ts",
     "test": "node ./dist/test/runTest.js",
+    "test:unit": "vitest run",
+    "test:unit:watch": "vitest watch",
+    "test:all": "npm run test:unit && npm run test",
     "test:compile": "tsc -p ./",
     "package": "vsce package",
     "package:test": "npm run build && vsce package --out test-extension.vsix"
   },
   "devDependencies": {
+    "@types/glob": "^8.1.0",
+    "@types/mocha": "^10.0.6",
     "@types/node": "^22.7.5",
     "@types/vscode": "^1.92.0",
-    "@types/mocha": "^10.0.6",
-    "@types/glob": "^8.1.0",
-    "@vscode/test-electron": "^2.4.0",
+    "@vscode/test-electron": "^2.5.2",
     "@vscode/vsce": "^2.22.0",
+    "esbuild": "^0.27.2",
     "eslint": "^9.11.0",
     "glob": "^10.3.10",
     "mocha": "^10.4.0",
-    "typescript": "^5.6.3"
+    "typescript": "^5.6.3",
+    "vitest": "^4.0.17"
   },
   "dependencies": {
+    "@ace-sdk/core": "^2.7.0",
+    "better-sqlite3": "^12.6.2",
     "fs-extra": "^11.2.0"
   }
 }
