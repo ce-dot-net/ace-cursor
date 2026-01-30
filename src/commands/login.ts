@@ -298,7 +298,7 @@ export async function handleAuthError(response: Response): Promise<boolean> {
 				);
 				if (action) {
 					vscode.env.openExternal(
-						vscode.Uri.parse('https://ace.code-engine.app/dashboard/devices')
+						vscode.Uri.parse('https://ace-ai.app/dashboard/devices')
 					);
 				}
 			}

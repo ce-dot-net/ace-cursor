@@ -892,157 +892,168 @@ async function createCursorCommands(folder?: vscode.WorkspaceFolder, forceUpdate
 
 Configure your ACE server connection and project settings.
 
-## What This Does
+## Action Required
 
-Opens a rich webview panel where you can:
+Tell the user to open the ACE configuration panel:
+
+1. Press \`Cmd/Ctrl+Shift+P\` to open Command Palette
+2. Type "ACE: Configure Connection"
+3. Press Enter
+
+This opens a panel where users can:
 - Set server URL (Production or Localhost)
-- Enter API token securely
-- Configure organization and project IDs
-- Validate connection before saving
+- Login with browser-based authentication
+- View organization and project settings
 
-## How to Execute
-
-**IMPORTANT**: You must execute the VS Code extension command \`ace.configure\` to open the configuration panel.
-
-Use one of these methods:
-1. **Command Palette**: Press \`Cmd/Ctrl+Shift+P\`, type "ACE: Configure", press Enter
-2. **Extension API**: Call \`vscode.commands.executeCommand('ace.configure')\`
-
-**First Time Setup**: Run this command after installing the extension to connect to your ACE server.
-
-**Do not just display this text - you must actually execute the command to open the panel.**`,
+**Note**: This requires a UI panel that you cannot open directly. Guide the user to use the Command Palette.`,
 
 		'ace-status.md': `# ACE Status
-
-**EXECUTE COMMAND NOW**: \`vscode.commands.executeCommand('ace.status')\`
 
 Show ACE playbook statistics and pattern counts.
 
 ## Action Required
 
-**YOU MUST EXECUTE THIS COMMAND IMMEDIATELY** - Do not just display this text!
+You have two options:
 
-Execute: \`await vscode.commands.executeCommand('ace.status')\`
+### Option 1: Use MCP Tool (Recommended)
+Call the \`ace_status\` MCP tool to get status information:
+\`\`\`
+ace_status()
+\`\`\`
 
-This opens the ACE Status webview panel showing:
-- Total patterns in your playbook
+### Option 2: Guide User to UI
+Tell the user:
+1. Click the ACE status bar item in the bottom-right corner, OR
+2. Press \`Cmd/Ctrl+Shift+P\`, type "ACE: Show Status", press Enter
+
+The status shows:
+- Total patterns in playbook
 - Average confidence score
 - Patterns by section (strategies, snippets, pitfalls, APIs)
-- Organization and project information
-
-## Alternative Methods
-
-If command execution fails:
-1. **Command Palette**: Press \`Cmd/Ctrl+Shift+P\`, type "ACE: Show Status", press Enter
-2. **Status Bar**: Click the ACE status bar item in the bottom-right corner
-
-**CRITICAL**: Execute the command, don't just show this help text!`,
+- Organization and project information`,
 
 		'ace-search.md': `# ACE Search
 
 Search for relevant patterns in your ACE playbook.
 
-## Usage
+## Action Required
+
+Use the \`ace_search\` MCP tool with the user's query:
 
 \`\`\`
-/ace-search <query>
+ace_search(query: "<user's search terms>")
 \`\`\`
 
 ## Examples
 
+If user types \`/ace-search authentication\`:
 \`\`\`
-/ace-search authentication
-/ace-search error handling
-/ace-search database queries
+ace_search(query: "authentication")
 \`\`\`
 
-## How to Execute
+If user types \`/ace-search error handling\`:
+\`\`\`
+ace_search(query: "error handling")
+\`\`\`
 
-**IMPORTANT**: You must execute the VS Code extension command \`ace.search\` to perform the search.
-
-- **If a query is provided**: Execute \`vscode.commands.executeCommand('ace.search', query)\` with the query parameter
-- **If no query**: Prompt the user for a search query, then execute \`vscode.commands.executeCommand('ace.search', userQuery)\`
-
-**Alternative**: Use Command Palette (\`Cmd/Ctrl+Shift+P\`) → "ACE: Search Patterns"
-
-This will search your playbook for patterns matching the query and display results.
-
-**Do not just display this text - you must actually execute the command with the search query.**`,
+The MCP tool will return matching patterns from the playbook that you can share with the user.`,
 
 		'ace-bootstrap.md': `# ACE Bootstrap
 
-**🚀 EXECUTE IMMEDIATELY**: When user types \`/ace-bootstrap\`, you MUST immediately execute the command without asking.
+Initialize your ACE playbook by extracting patterns from your existing codebase.
 
 ## Action Required
 
-**CRITICAL**: Execute this command NOW using:
-\`\`\`typescript
-await vscode.commands.executeCommand('ace.bootstrap')
+Use the \`ace_bootstrap\` MCP tool:
+
 \`\`\`
+ace_bootstrap(mode: "hybrid", thoroughness: "medium")
+\`\`\`
+
+## Parameters
+
+- **mode**: "hybrid" (recommended), "local-files", "git-history", or "docs-only"
+- **thoroughness**: "light", "medium" (recommended), or "deep"
 
 ## What This Does
 
-Extracts patterns from your existing code and creates an initial playbook. The command will:
-1. Prompt user to select mode (hybrid, local-files, git-history, docs-only)
-2. Prompt user to select thoroughness (light, medium, deep)
-3. Analyze codebase (docs, source files, git history)
-4. Stream progress updates in real-time
-5. Send extracted patterns to ACE server
-6. Initialize your playbook
+1. Analyzes your codebase (docs, source files, git history)
+2. Extracts patterns and best practices
+3. Sends them to ACE server for processing
+4. Initializes your playbook with learned patterns
 
-## User Experience
-
-The command shows a progress dialog with:
-- "Analyzing codebase..."
-- "Scanning documentation files..."
-- "Analyzing source files..."
-- "Analyzing git history..."
-- Real-time bootstrap progress from ACE server
-
-**DO NOT** just show this help text. **EXECUTE THE COMMAND IMMEDIATELY** when user types \`/ace-bootstrap\`.`,
+The tool will stream progress updates as it analyzes your code.`,
 
 		'ace-learn.md': `# ACE Learn
 
-Manually capture learning from a completed task.
+Capture learning from a completed task to improve future AI assistance.
 
-## What This Does
+## Action Required
 
-Starts the manual learning capture process. Use this when you want to explicitly record what you learned from a task, including:
-- Task description
-- Success/failure outcome
-- Key lessons and insights
+Use the \`ace_learn\` MCP tool to capture what was learned:
 
-## How to Execute
+\`\`\`
+ace_learn(
+  task: "Brief description of what was done",
+  trajectory: "Key steps taken during the task",
+  output: "Important lessons, patterns, or insights discovered",
+  success: true
+)
+\`\`\`
 
-**IMPORTANT**: You must execute the VS Code extension command \`ace.learn\` to start the learning capture.
+## Example
 
-Use one of these methods:
-1. **Command Palette**: Press \`Cmd/Ctrl+Shift+P\`, type "ACE: Capture Learning", press Enter
-2. **Extension API**: Call \`vscode.commands.executeCommand('ace.learn')\`
+After implementing a feature:
+\`\`\`
+ace_learn(
+  task: "Implemented JWT authentication",
+  trajectory: "1. Added auth middleware 2. Created login endpoint 3. Added token refresh",
+  output: "Always use httpOnly cookies for refresh tokens. Access tokens should be short-lived (15min).",
+  success: true
+)
+\`\`\`
 
-**Note**: ACE also automatically captures learning when tasks complete (if automation is enabled).
+## When to Use
 
-**Do not just display this text - you must actually execute the command.**`,
+- After completing a significant task
+- When you discovered something important
+- After fixing a tricky bug
+- When a pattern worked well (or didn't)`,
 
 		'ace-help.md': `# ACE Help
 
-Show all available ACE commands and usage.
+Available ACE commands and MCP tools.
 
-**Action Required**: Display the following help information to the user.
+## Slash Commands
 
-**Available Commands**:
-- \`/ace-status\` - Show playbook statistics (executes \`ace.status\`)
-- \`/ace-search <query>\` - Search for patterns (executes \`ace.search\`)
-- \`/ace-configure\` - Configure ACE connection (executes \`ace.configure\`)
-- \`/ace-bootstrap\` - Initialize playbook from codebase (executes \`ace.bootstrap\`)
-- \`/ace-learn\` - Manually capture learning (executes \`ace.learn\`)
+- \`/ace-status\` - Show playbook statistics
+- \`/ace-search <query>\` - Search for patterns
+- \`/ace-configure\` - Configure ACE connection (opens UI)
+- \`/ace-bootstrap\` - Initialize playbook from codebase
+- \`/ace-learn\` - Capture learning from completed task
 - \`/ace-help\` - Show this help
 
-**Automatic Features**:
-- ✅ Auto-search: ACE automatically searches for patterns on every prompt
-- ✅ Auto-learn: ACE automatically captures learning when tasks complete
+## MCP Tools (Use These Directly)
 
-**Note**: All commands execute corresponding VS Code extension commands. Use the Command Palette (\`Cmd/Ctrl+Shift+P\`) and type "ACE" to see all available commands.`
+- \`ace_get_playbook()\` - Get all patterns (call BEFORE tasks)
+- \`ace_search(query)\` - Search for specific patterns
+- \`ace_learn(task, trajectory, output, success)\` - Capture learning (call AFTER tasks)
+- \`ace_bootstrap(mode, thoroughness)\` - Initialize playbook
+- \`ace_status()\` - Get playbook statistics
+
+## Automatic Features
+
+The MCP tools are designed for automatic invocation:
+- **ace_get_playbook**: Called automatically before every task
+- **ace_learn**: Called automatically after substantial work
+
+## UI Commands (Command Palette)
+
+Press \`Cmd/Ctrl+Shift+P\` and type "ACE" to see:
+- ACE: Login / Logout
+- ACE: Configure Connection
+- ACE: Show Status
+- ACE: Manage Devices`
 	};
 
 	// Write each command file (create if doesn't exist OR if force update)

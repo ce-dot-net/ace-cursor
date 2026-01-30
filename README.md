@@ -1,14 +1,14 @@
 # ACE for Cursor
 
-> 🔐 **CLOSED BETA** - This extension requires an ACE account to work.
+> 🔐 **Account Required** - This extension requires an ACE account to work.
 >
-> **[→ Join the Waitlist](https://ace.code-engine.app/waitlist)** to get access and start using ACE.
+> **[→ Sign up for ACE](https://ace-ai.app)** to create your account and start using ACE.
 >
 > Without an account, the extension cannot connect to the ACE server.
 
 **Automatic Code Evolution** - Pattern learning for Cursor IDE via MCP.
 
-By [Code Engine GmbH](https://ace.code-engine.app)
+By [Code Engine GmbH](https://ace-ai.app)
 
 ## Features
 
@@ -26,7 +26,7 @@ By [Code Engine GmbH](https://ace.code-engine.app)
 
 > **Step 1 is required** - The extension won't work without an ACE account!
 
-1. **[Sign up for ACE](https://ace.code-engine.app/waitlist)** - Create your account (required!)
+1. **[Sign up for ACE](https://ace-ai.app)** - Create your account (required!)
 2. **Install** from Cursor Extensions marketplace
 3. **Open Command Palette** (`Cmd+Shift+P` on Mac, `Ctrl+Shift+P` on Windows/Linux)
 4. **Run** `ACE: Initialize Workspace` - sets up MCP server and rules
@@ -93,7 +93,7 @@ This creates a self-improving learning cycle where each session benefits from pr
 ## Requirements
 
 - Cursor IDE (v0.44+)
-- ACE account at [ace.code-engine.app](https://ace.code-engine.app)
+- ACE account at [ace-ai.app](https://ace-ai.app)
 
 ## Configuration
 
@@ -128,8 +128,8 @@ Click the status bar item to open the Status panel.
 
 ## Links
 
-- [ACE Website](https://ace.code-engine.app)
-- [Documentation](https://ace.code-engine.app/docs)
+- [ACE Website](https://ace-ai.app)
+- [Documentation](https://ace-ai.app/docs)
 - [GitHub](https://github.com/ce-dot-net/ace-cursor)
 - [Report Issues](https://github.com/ce-dot-net/ace-cursor/issues)
 

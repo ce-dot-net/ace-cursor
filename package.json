@@ -2,7 +2,7 @@
   "name": "cursor-ace-extension",
   "displayName": "ACE for Cursor",
   "description": "Native Cursor extension for ACE pattern learning. Automatically retrieves patterns before tasks and captures learning after via MCP.",
-  "version": "0.2.40",
+  "version": "0.2.41",
   "publisher": "ce-dot-net",
   "author": "Code Engine GmbH",
   "license": "MIT",
@@ -14,7 +14,7 @@
   "bugs": {
     "url": "https://github.com/ce-dot-net/ace-cursor/issues"
   },
-  "homepage": "https://ace.code-engine.app",
+  "homepage": "https://ace-ai.app",
   "keywords": [
     "cursor",
     "ace",

@@ -5,6 +5,22 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.41] - 2026-01-30
+
+### Fixed
+- **Slash commands now work with Cursor AI** - Commands like `/ace-learn`, `/ace-search` now properly instruct the AI to use MCP tools
+  - Previous: Commands told AI to call `vscode.commands.executeCommand()` which Cursor AI cannot do
+  - Now: Commands instruct AI to use MCP tools like `ace_learn()`, `ace_search()`, `ace_bootstrap()`
+  - Users need to run "ACE: Initialize Workspace" to update their `.cursor/commands/*.md` files
+- **Updated website domain** - Changed from `ace.code-engine.app` to `ace-ai.app`
+  - Affects: sign-up, documentation, and dashboard links
+- **Removed beta/waitlist messaging** - ACE is now generally available
+  - API domain unchanged (`ace-api.code-engine.app`)
+
+### Changed
+- Slash command content now provides MCP tool examples instead of VS Code extension API calls
+- `/ace-configure` and `/ace-status` now guide users to Command Palette for UI-based commands
+
 ## [0.2.40] - 2026-01-20
 
 ### Added
