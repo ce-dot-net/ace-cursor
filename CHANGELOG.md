@@ -5,7 +5,7 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.41] - 2026-01-30
+## [0.2.42] - 2026-01-30
 
 ### Fixed
 - **Slash commands now work with Cursor AI** - Commands like `/ace-learn`, `/ace-search` now properly instruct the AI to use MCP tools
