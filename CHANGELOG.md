@@ -5,6 +5,14 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.44] - 2026-02-03
+
+### Fixed
+- **Organizations not showing after login** - Now calls `refreshOrganizations()` from @ace-sdk/core after device login
+  - Syncs organizations from Clerk via `/api/v1/auth/me` endpoint
+  - Fixes issue where new users saw empty org/project dropdowns in ACE Configure panel
+  - Falls back to login response orgs if refresh fails
+
 ## [0.2.43] - 2026-02-03
 
 ### Removed

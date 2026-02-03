@@ -15,7 +15,8 @@ import {
 	loadUserAuth,
 	getDefaultOrgId,
 	loadConfig,
-	logout
+	logout,
+	refreshOrganizations
 } from '@ace-sdk/core';
 
 export class ConfigurePanel {
@@ -241,13 +242,27 @@ export class ConfigurePanel {
 			const user = await runLoginCommand();
 
 			if (user) {
+				// v0.2.44: After login, refresh organizations from server
+				// This syncs orgs from Clerk via /api/v1/auth/me endpoint
+				let organizations = user.organizations || [];
+				try {
+					console.log('[ACE] Refreshing organizations from server...');
+					const refreshedOrgs = await refreshOrganizations();
+					if (refreshedOrgs && refreshedOrgs.length > 0) {
+						organizations = refreshedOrgs;
+						console.log('[ACE] Refreshed orgs:', organizations.length);
+					}
+				} catch (refreshError) {
+					console.warn('[ACE] Failed to refresh orgs, using login response:', refreshError);
+				}
+
 				// Login succeeded - send user info to webview
 				this._panel.webview.postMessage({
 					command: 'loginResult',
 					success: true,
 					user: {
 						email: user.email,
-						organizations: user.organizations
+						organizations: organizations
 					}
 				});
 			} else {
