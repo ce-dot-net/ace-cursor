@@ -1013,46 +1013,6 @@ suite('ACE Login & Authentication Tests', () => {
 	});
 
 	// ============================================
-	// TOKEN TYPE DETECTION TESTS
-	// ============================================
-
-	test('User tokens should start with ace_user_', () => {
-		const userTokenPrefix = 'ace_user_';
-		const orgTokenPrefix = 'ace_org_';
-
-		// User token example
-		const userToken = 'ace_user_abc123def456';
-		assert.ok(userToken.startsWith(userTokenPrefix), 'User tokens start with ace_user_');
-		assert.ok(!userToken.startsWith(orgTokenPrefix), 'User tokens do not start with ace_org_');
-
-		// Org token example
-		const orgToken = 'ace_org_xyz789ghi012';
-		assert.ok(orgToken.startsWith(orgTokenPrefix), 'Org tokens start with ace_org_');
-		assert.ok(!orgToken.startsWith(userTokenPrefix), 'Org tokens do not start with ace_user_');
-	});
-
-	test('Token type should determine endpoint for validation', () => {
-		// User tokens should use /api/v1/auth/me
-		// Org tokens should use /api/v1/config/verify
-		const userEndpoint = '/api/v1/auth/me';
-		const orgEndpoint = '/api/v1/config/verify';
-
-		const isUserToken = (token: string) => token.startsWith('ace_user_');
-
-		const testUserToken = 'ace_user_abc123';
-		const testOrgToken = 'ace_org_xyz789';
-
-		assert.ok(
-			isUserToken(testUserToken) ? userEndpoint : orgEndpoint,
-			'User token should use auth/me endpoint'
-		);
-		assert.ok(
-			!isUserToken(testOrgToken) ? orgEndpoint : userEndpoint,
-			'Org token should use config/verify endpoint'
-		);
-	});
-
-	// ============================================
 	// TOKEN LIFECYCLE CONSTANTS TESTS
 	// ============================================
 

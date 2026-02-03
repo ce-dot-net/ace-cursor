@@ -17,7 +17,7 @@ import { StatusPanel } from './webviews/statusPanel';
 import { ConfigurePanel } from './webviews/configurePanel';
 import { readContext, readWorkspaceVersion, writeWorkspaceVersion, pickWorkspaceFolder, getTargetFolder, isMultiRootWorkspace, type AceContext } from './ace/context';
 import { initWorkspaceMonitor, getCurrentFolder, refreshStatusBar } from './automation/workspaceMonitor';
-import { runLoginCommand, logout, isAuthenticated, getTokenExpiration, handleAuthError, checkDeprecatedOrgAuth, getValidToken, getHardCapInfo } from './commands/login';
+import { runLoginCommand, logout, isAuthenticated, getTokenExpiration, handleAuthError, getValidToken, getHardCapInfo } from './commands/login';
 import { AceClient, loadConfig, loadUserAuth, getDefaultOrgId } from '@ace-sdk/core';
 import { showDevicesQuickPick } from './commands/devices';
 
@@ -67,8 +67,8 @@ async function preloadPatterns(): Promise<void> {
 			return;
 		}
 
-		// Check for valid token
-		const token = userAuth?.token || sdkConfig?.apiToken;
+		// Check for valid user token
+		const token = userAuth?.token;
 		if (!token) {
 			console.log('[ACE] Preload skipped: no valid token');
 			return;
@@ -149,21 +149,6 @@ async function checkAuthOnActivation(): Promise<void> {
 			}
 		});
 		return;
-	}
-
-	// Check for deprecated org tokens (ace_org_*) - these will be removed soon
-	const deprecationCheck = checkDeprecatedOrgAuth();
-	if (deprecationCheck.isDeprecated) {
-		vscode.window.showWarningMessage(
-			`⚠️ ${deprecationCheck.message}`,
-			'Migrate Now',
-			'Remind Later'
-		).then(action => {
-			if (action === 'Migrate Now') {
-				vscode.commands.executeCommand('ace.login');
-			}
-		});
-		// Don't return - let user continue using deprecated token for now
 	}
 
 	// Check token expiration
@@ -403,7 +388,6 @@ async function registerMcpServer(context: vscode.ExtensionContext): Promise<void
 	// Build environment variables for MCP server
 	const env: Record<string, string> = {};
 	if (aceConfig?.serverUrl) env.ACE_SERVER_URL = aceConfig.serverUrl;
-	if (aceConfig?.apiToken) env.ACE_API_TOKEN = aceConfig.apiToken;
 	if (aceConfig?.projectId) env.ACE_PROJECT_ID = aceConfig.projectId;
 	if (aceConfig?.orgId) env.ACE_ORG_ID = aceConfig.orgId;
 
@@ -1297,8 +1281,9 @@ not simple paths. Always use \`ace_list_domains\` to discover actual domain name
 /**
  * Get ACE configuration from settings and config files
  * For multi-root workspaces, uses getCurrentFolder() if no folder specified
+ * Note: Authentication is handled via @ace-sdk/core device login, not API tokens
  */
-function getAceConfig(folder?: vscode.WorkspaceFolder): { serverUrl?: string; apiToken?: string; projectId?: string; orgId?: string } | null {
+function getAceConfig(folder?: vscode.WorkspaceFolder): { serverUrl?: string; projectId?: string; orgId?: string } | null {
 	console.log('[ACE] getAceConfig called', { folder: folder?.name });
 	// Use provided folder, or get from workspace monitor (tracks active editor)
 	const targetFolder = folder || getCurrentFolder();
@@ -1325,20 +1310,13 @@ function getAceConfig(folder?: vscode.WorkspaceFolder): { serverUrl?: string; ap
 	}
 
 	// Merge configs with priority: VS Code settings > workspace context > global config
-	// v0.2.38: Support user auth (device code flow) with auth.default_org_id and auth.organizations
+	// User auth (device code flow) with auth.default_org_id and auth.organizations
 	const finalOrgId = orgId || ctx?.orgId || Object.keys(globalConfig?.orgs || {})[0]
 		|| globalConfig?.default_org_id
 		|| globalConfig?.auth?.default_org_id
 		|| globalConfig?.auth?.organizations?.[0]?.org_id;
 	const finalProjectId = projectId || ctx?.projectId || globalConfig?.projectId;
 	const finalServerUrl = serverUrl || globalConfig?.serverUrl || 'https://ace-api.code-engine.app';
-
-	// Get API token for the org
-	// v0.2.38: Check user auth token first (device code flow)
-	let apiToken = globalConfig?.auth?.token || globalConfig?.apiToken;
-	if (finalOrgId && globalConfig?.orgs?.[finalOrgId]?.apiToken) {
-		apiToken = globalConfig.orgs[finalOrgId].apiToken;
-	}
 
 	if (!finalProjectId) {
 		console.log('[ACE] getAceConfig: no projectId, returning null');
@@ -1347,13 +1325,11 @@ function getAceConfig(folder?: vscode.WorkspaceFolder): { serverUrl?: string; ap
 
 	const result = {
 		serverUrl: finalServerUrl,
-		apiToken,
 		projectId: finalProjectId,
 		orgId: finalOrgId
 	};
 	console.log('[ACE] getAceConfig result:', {
 		hasServerUrl: !!result.serverUrl,
-		hasApiToken: !!result.apiToken,
 		hasProjectId: !!result.projectId,
 		serverUrl: result.serverUrl
 	});
@@ -1518,13 +1494,6 @@ async function runDiagnosticCommand(): Promise<void> {
 			diagnostics.push('  → Server URL: Missing');
 		} else {
 			diagnostics.push(`  → Server URL: ${aceConfig.serverUrl}`);
-		}
-		if (!aceConfig.apiToken) {
-			issues.push('⚠️ API token missing');
-			diagnostics.push('  → API Token: Missing');
-			fixes.push('Add your API token in ACE configuration');
-		} else {
-			diagnostics.push(`  → API Token: ${aceConfig.apiToken.substring(0, 10)}...`);
 		}
 		if (!aceConfig.projectId) {
 			issues.push('⚠️ Project ID missing');

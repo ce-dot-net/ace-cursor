@@ -138,47 +138,6 @@ export async function getValidToken(serverUrl: string = 'https://ace-api.code-en
 	}
 }
 
-/**
- * Check if using deprecated org-based auth (ace_org_* tokens)
- * These tokens are deprecated and will be removed soon.
- * Users should migrate to user-based auth (ace_user_* tokens via device code flow).
- *
- * @returns Object with isDeprecated flag and token info for warning messages
- */
-export function checkDeprecatedOrgAuth(): { isDeprecated: boolean; tokenPrefix?: string; message?: string } {
-	const auth = sdkLoadUserAuth();
-	if (!auth?.token) {
-		return { isDeprecated: false };
-	}
-
-	const token = auth.token;
-
-	// Org tokens start with ace_org_ - these are deprecated
-	if (token.startsWith('ace_org_')) {
-		return {
-			isDeprecated: true,
-			tokenPrefix: 'ace_org_',
-			message: 'Organization API tokens are deprecated and will be removed soon. Please migrate to user login for continued access.'
-		};
-	}
-
-	// User tokens start with ace_user_ - these are the new standard
-	if (token.startsWith('ace_user_')) {
-		return { isDeprecated: false };
-	}
-
-	// Legacy tokens without prefix - also deprecated
-	if (!token.startsWith('ace_')) {
-		return {
-			isDeprecated: true,
-			tokenPrefix: 'legacy',
-			message: 'Your ACE token format is outdated. Please login with the new device code flow for continued access.'
-		};
-	}
-
-	return { isDeprecated: false };
-}
-
 // ==================== Main Login Command ====================
 
 /**

@@ -198,42 +198,6 @@ describe('Login Module', () => {
 		});
 	});
 
-	describe('Deprecated Auth Detection', () => {
-		it('should export checkDeprecatedOrgAuth function', async () => {
-			const loginModule = await import('../../commands/login');
-			expect(typeof loginModule.checkDeprecatedOrgAuth).toBe('function');
-		});
-
-		it('checkDeprecatedOrgAuth should return object with isDeprecated', async () => {
-			const { checkDeprecatedOrgAuth } = await import('../../commands/login');
-			const result = checkDeprecatedOrgAuth();
-
-			expect(result).toHaveProperty('isDeprecated');
-			expect(typeof result.isDeprecated).toBe('boolean');
-
-			if (result.isDeprecated) {
-				expect(result).toHaveProperty('message');
-				expect(typeof result.message).toBe('string');
-			}
-		});
-
-		it('ace_org_ tokens should be detected as deprecated', () => {
-			// Test token prefix detection logic
-			const orgToken = 'ace_org_abc123';
-			const userToken = 'ace_user_xyz789';
-			const legacyToken = 'some_old_token';
-
-			expect(orgToken.startsWith('ace_org_')).toBe(true);
-			expect(userToken.startsWith('ace_user_')).toBe(true);
-			expect(legacyToken.startsWith('ace_')).toBe(false);
-		});
-
-		it('should have correct deprecation message for org tokens', () => {
-			const expectedMessage = 'Organization API tokens are deprecated';
-			expect(expectedMessage).toContain('deprecated');
-		});
-	});
-
 	describe('Global Config Path', () => {
 		it('ACE config should be at ~/.config/ace/config.json', () => {
 			const configPath = path.join(os.homedir(), '.config', 'ace', 'config.json');

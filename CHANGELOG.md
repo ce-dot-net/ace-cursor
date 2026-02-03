@@ -5,6 +5,21 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.43] - 2026-02-03
+
+### Removed
+- **Legacy org token authentication** - Removed all `apiToken` and `ace_org_*` token support
+  - Only device-based user login (`ace_user_*` tokens) is now supported
+  - Removed `checkDeprecatedOrgAuth()` function and deprecation warnings
+  - Removed `apiToken` from all type definitions and config objects
+  - Removed `ACE_API_TOKEN` environment variable for MCP server
+  - Removed legacy token tests (4 unit tests, 2 integration tests)
+
+### Technical
+- Simplified `getAceConfig()` return type (removed `apiToken` field)
+- Cleaned up `statusPanel.ts` and `workspaceMonitor.ts` type definitions
+- Authentication now exclusively via `@ace-sdk/core` device login
+
 ## [0.2.42] - 2026-01-30
 
 ### Fixed

@@ -112,9 +112,9 @@ export class StatusPanel {
 			throw new Error('ACE not fully configured');
 		}
 
-		// Get valid token with auto-refresh (sliding window TTL)
+		// Get valid user token with auto-refresh (sliding window TTL)
 		const tokenResult = await getValidToken(config.serverUrl);
-		const token = tokenResult?.token || config.apiToken;
+		const token = tokenResult?.token;
 
 		if (!token) {
 			throw new Error('No valid authentication token');
@@ -206,25 +206,16 @@ export class StatusPanel {
 
 	/**
 	 * Get ACE configuration from global config file
+	 * Authentication is handled via @ace-sdk/core device login
 	 */
-	private _getAceConfig(): { serverUrl?: string; apiToken?: string; auth?: { token?: string; default_org_id?: string } } | null {
+	private _getAceConfig(): { serverUrl?: string; auth?: { token?: string; default_org_id?: string } } | null {
 		try {
 			// Use SDK to load config - loadConfig returns AceConfig directly
 			const config = loadConfig();
 			const userAuth = loadUserAuth();
-			const ctx = readContext();
-
-			// Get token - prefer user auth token (device login)
-			let apiToken = userAuth?.token || (config as any)?.apiToken;
-
-			// Get org-specific token if available (legacy)
-			if (ctx?.orgId && (config as any)?.orgs?.[ctx.orgId]?.apiToken) {
-				apiToken = (config as any).orgs[ctx.orgId].apiToken;
-			}
 
 			return {
 				serverUrl: config?.serverUrl || 'https://ace-api.code-engine.app',
-				apiToken,
 				auth: userAuth ? {
 					token: userAuth.token,
 					default_org_id: getDefaultOrgId() || undefined

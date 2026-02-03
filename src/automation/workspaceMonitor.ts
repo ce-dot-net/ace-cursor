@@ -16,7 +16,7 @@ import * as crypto from 'crypto';
 import { readContext, isMultiRootWorkspace } from '../ace/context';
 
 // Import getAceConfig from extension - will be set via init
-let getAceConfigFn: ((folder?: vscode.WorkspaceFolder) => { serverUrl?: string; apiToken?: string; projectId?: string; orgId?: string } | null) | undefined;
+let getAceConfigFn: ((folder?: vscode.WorkspaceFolder) => { serverUrl?: string; projectId?: string; orgId?: string } | null) | undefined;
 
 let currentFolder: vscode.WorkspaceFolder | undefined;
 let currentDomain: string = 'general';
@@ -136,7 +136,7 @@ function isSameFolder(a: vscode.WorkspaceFolder | undefined, b: vscode.Workspace
 export function initWorkspaceMonitor(
 	context: vscode.ExtensionContext,
 	statusBar: vscode.StatusBarItem,
-	getAceConfig?: (folder?: vscode.WorkspaceFolder) => { serverUrl?: string; apiToken?: string; projectId?: string; orgId?: string } | null
+	getAceConfig?: (folder?: vscode.WorkspaceFolder) => { serverUrl?: string; projectId?: string; orgId?: string } | null
 ): void {
 	statusBarItem = statusBar;
 	getAceConfigFn = getAceConfig;
