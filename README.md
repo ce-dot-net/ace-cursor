@@ -4,6 +4,8 @@
 >
 > **[→ Sign up for ACE](https://ace-ai.app)** to create your account and start using ACE.
 >
+> 💬 **[→ Join our Slack Community](https://www.ace-ai.app/community)** for support, tips, and pattern sharing!
+>
 > Without an account, the extension cannot connect to the ACE server.
 
 **Automatic Code Evolution** - Pattern learning for Cursor IDE via MCP.
@@ -130,6 +132,7 @@ Click the status bar item to open the Status panel.
 
 - [ACE Website](https://ace-ai.app)
 - [Documentation](https://ace-ai.app/docs)
+- [Community & Support](https://www.ace-ai.app/community) - Join our Slack!
 - [GitHub](https://github.com/ce-dot-net/ace-cursor)
 - [Report Issues](https://github.com/ce-dot-net/ace-cursor/issues)
 

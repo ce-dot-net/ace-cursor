@@ -5,6 +5,12 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.46] - 2026-02-06
+
+### Added
+- **Community support link** - Added Slack community link prominently in README next to signup
+  - Join at [ace-ai.app/community](https://www.ace-ai.app/community) for support and pattern sharing
+
 ## [0.2.45] - 2026-02-05
 
 ### Changed
