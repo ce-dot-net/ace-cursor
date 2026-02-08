@@ -34,7 +34,7 @@ export class ConfigurePanel {
 			message => {
 				switch (message.command) {
 					case 'save':
-						this._saveConfiguration(message.data);
+						this._saveConfiguration(message.data, message.autoSave);
 						return;
 					case 'executeCommand':
 						if (message.commandId) {
@@ -239,21 +239,52 @@ export class ConfigurePanel {
 			});
 
 			// Run login command (opens browser, polls for token)
+			console.log('[ACE] Starting device code login...');
 			const user = await runLoginCommand();
+			console.log('[ACE] Login completed:', user ? `user=${user.email}` : 'cancelled/failed');
 
 			if (user) {
+				// v0.2.47: Verify SDK created config file (helps diagnose Windows issues)
+				const configPath = path.join(os.homedir(), '.config', 'ace', 'config.json');
+				const configExists = fs.existsSync(configPath);
+				console.log('[ACE] Config file check:', configExists ? 'EXISTS' : 'MISSING', 'at', configPath);
+				if (!configExists) {
+					console.error('[ACE] WARNING: SDK did not create config file during login!');
+					console.error('[ACE] This is unexpected - the SDK should create ~/.config/ace/config.json');
+				}
+
 				// v0.2.44: After login, refresh organizations from server
 				// This syncs orgs from Clerk via /api/v1/auth/me endpoint
 				let organizations = user.organizations || [];
+				console.log('[ACE] Login succeeded for:', user.email);
+				console.log('[ACE] Initial orgs from login response:', organizations.length);
+				if (organizations.length > 0) {
+					console.log('[ACE] Login orgs:', JSON.stringify(organizations.map(o => ({ id: o.org_id, name: o.name }))));
+				} else {
+					console.warn('[ACE] Login response returned 0 organizations - user may not be assigned to any org on server');
+				}
+
 				try {
 					console.log('[ACE] Refreshing organizations from server...');
 					const refreshedOrgs = await refreshOrganizations();
+					console.log('[ACE] refreshOrganizations returned:', refreshedOrgs?.length || 0, 'orgs');
 					if (refreshedOrgs && refreshedOrgs.length > 0) {
 						organizations = refreshedOrgs;
-						console.log('[ACE] Refreshed orgs:', organizations.length);
+						console.log('[ACE] Using refreshed orgs:', organizations.map(o => o.org_id || o.name).join(', '));
+					} else {
+						console.warn('[ACE] refreshOrganizations returned empty, using login orgs');
 					}
 				} catch (refreshError) {
-					console.warn('[ACE] Failed to refresh orgs, using login response:', refreshError);
+					console.error('[ACE] Failed to refresh orgs:', refreshError);
+					console.warn('[ACE] Falling back to login response orgs:', organizations.length);
+				}
+
+				// v0.2.47: Log warning if no orgs found (helps diagnose issues)
+				if (organizations.length === 0) {
+					console.error('[ACE] WARNING: No organizations found for user after login!');
+					console.error('[ACE] Possible causes: (1) User has no orgs - needs to create one at ace-ai.app');
+					console.error('[ACE]                  (2) Server sync issue - try logging out and back in');
+					console.error('[ACE]                  (3) Free plan without org - contact support');
 				}
 
 				// Login succeeded - send user info to webview
@@ -291,8 +322,8 @@ export class ConfigurePanel {
 				command: 'logoutStarted'
 			});
 
-			// Call SDK logout function
-			await logout();
+			// Call SDK logout function (synchronous)
+			logout();
 
 			// Logout succeeded - notify webview
 			this._panel.webview.postMessage({
@@ -312,12 +343,14 @@ export class ConfigurePanel {
 
 	/**
 	 * Save configuration to global config file and workspace settings
+	 * @param data - Configuration data to save
+	 * @param autoSave - If true, this is an auto-save from dropdown change (subtle feedback)
 	 */
 	private async _saveConfiguration(data: {
 		serverUrl: string;
 		orgId: string;
 		projectId: string;
-	}) {
+	}, autoSave: boolean = false) {
 		try {
 			const configDir = path.join(os.homedir(), '.config', 'ace');
 			const configPath = path.join(configDir, 'config.json');
@@ -391,13 +424,21 @@ export class ConfigurePanel {
 			}
 
 			const folderInfo = isMultiRootWorkspace() && targetFolder ? ` for "${targetFolder.name}"` : '';
-			this._panel.webview.postMessage({
-				command: 'saveResult',
-				success: true,
-				message: `Configuration saved${folderInfo}`
-			});
 
-			vscode.window.showInformationMessage(`ACE configuration saved${folderInfo}. MCP server will use these settings.`);
+			if (autoSave) {
+				// v0.2.48: Auto-save - subtle feedback, no info message
+				this._panel.webview.postMessage({
+					command: 'saved'
+				});
+			} else {
+				// Manual save - full feedback
+				this._panel.webview.postMessage({
+					command: 'saveResult',
+					success: true,
+					message: `Configuration saved${folderInfo}`
+				});
+				vscode.window.showInformationMessage(`ACE configuration saved${folderInfo}. MCP server will use these settings.`);
+			}
 		} catch (error) {
 			this._panel.webview.postMessage({
 				command: 'saveResult',
@@ -736,6 +777,10 @@ export class ConfigurePanel {
 			const orgSelect = document.getElementById('orgId');
 			orgSelect.addEventListener('change', onOrgChange);
 
+			// v0.2.48: Auto-save on project selection change
+			const projectSelect = document.getElementById('projectId');
+			projectSelect.addEventListener('change', autoSave);
+
 			document.getElementById('configForm').addEventListener('submit', handleSubmit);
 			document.getElementById('initWorkspaceBtn').addEventListener('click', () => {
 				vscode.postMessage({ command: 'initializeWorkspace' });
@@ -978,6 +1023,29 @@ export class ConfigurePanel {
 			statusEl.style.display = 'block';
 		}
 
+		// v0.2.48: Debounced auto-save for org/project dropdown changes
+		let saveTimeout = null;
+		function autoSave() {
+			if (!isUserToken) return; // Don't auto-save if not logged in
+
+			clearTimeout(saveTimeout);
+			saveTimeout = setTimeout(() => {
+				const orgId = document.getElementById('orgId').value || document.getElementById('orgIdManual').value;
+				const projectId = document.getElementById('projectId').value || document.getElementById('projectIdManual').value;
+				const serverUrl = document.getElementById('serverUrl').value || 'https://ace-api.code-engine.app';
+
+				// Only save if we have valid selections
+				if (orgId && projectId) {
+					showStatus('Saving...', 'info');
+					vscode.postMessage({
+						command: 'save',
+						data: { serverUrl, orgId, projectId },
+						autoSave: true // Flag for subtle feedback
+					});
+				}
+			}, 500); // 500ms debounce
+		}
+
 		window.addEventListener('message', event => {
 			const message = event.data;
 			switch (message.command) {
@@ -987,11 +1055,23 @@ export class ConfigurePanel {
 					break;
 				case 'saveResult':
 					showStatus(message.message, message.success ? 'success' : 'error');
-					if (message.success) {
+					if (message.success && !message.autoSave) {
+						// Only auto-close on manual save, not auto-save
 						setTimeout(() => {
 							vscode.postMessage({ command: 'close' });
 						}, 2000);
 					}
+					break;
+				case 'saved':
+					// v0.2.48: Subtle feedback for auto-save
+					showStatus('Saved', 'success');
+					// Clear the status after a short delay
+					setTimeout(() => {
+						const statusEl = document.getElementById('statusMessage');
+						if (statusEl.textContent === 'Saved') {
+							statusEl.style.display = 'none';
+						}
+					}, 1500);
 					break;
 				case 'loginStarted':
 					document.getElementById('authStatus').style.display = 'block';
@@ -1051,9 +1131,15 @@ export class ConfigurePanel {
 							orgSelect.dispatchEvent(new Event('change'));
 							orgSelect.style.display = 'block';
 							document.getElementById('orgIdManual').style.display = 'none';
-						}
 
-						showStatus('Login successful! ' + (existingOrgId ? 'Previous config restored.' : 'Select organization and project.'), 'success');
+							showStatus('Login successful! ' + (existingOrgId ? 'Previous config restored.' : 'Select organization and project.'), 'success');
+						} else {
+							// v0.2.47: No organizations found - show helpful error with guidance
+							console.error('[ACE UI] No organizations received from server');
+							console.error('[ACE UI] User may need to create or join an organization at ace-ai.app');
+							authStatusResult.innerHTML = '⚠️ Logged in as ' + message.user.email + '<br><small style="color: var(--vscode-errorForeground);">No organizations found. Visit ace-ai.app to create one.</small>';
+							showStatus('Login successful but no organizations found. Please visit ace-ai.app to create or join an organization, then try again.', 'error');
+						}
 					} else {
 						loginBtnResult.textContent = 'Login with Browser';
 						authStatusResult.innerHTML = '❌ ' + (message.message || 'Login failed');

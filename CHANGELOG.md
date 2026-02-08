@@ -5,6 +5,46 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.48] - 2026-02-08
+
+### Added
+- **Trajectory reading for ace_learn** - New `src/ace/trajectory.ts` module
+  - Reads AI-Trail from `.cursor/ace/*.jsonl` files (MCP, shell, edit, response)
+  - Builds trajectory summary compatible with ace_learn format
+  - Filters by conversation_id for session isolation
+- **Git context capture** - Track git state during sessions
+  - `getGitContext()` - Returns branch, hash, isRepo status
+  - `detectCommitsInSession()` - Finds git commits made during AI session
+- **Playbook IDs (pattern attribution)** - Link patterns to learning outcomes
+  - `savePlaybookUsed()` / `loadPlaybookUsed()` - Persist pattern IDs from ace_search
+  - `appendPlaybookUsed()` - Append patterns during session
+  - Enables server-side pattern attribution tracking
+- **Comprehensive unit tests** - 127 tests covering all functionality
+  - 58 trajectory tests (reading, parsing, summarization, git, playbook)
+  - 29 session tracking tests
+  - 22 login tests
+  - 18 UX improvement tests
+
+### Improved
+- **UX: Auto-initialize workspaces** - No more manual "Initialize Workspace" required
+  - First install: Auto-creates `.cursor/` files silently
+  - Updates: Auto-updates hooks/rules with non-blocking notification
+  - Removes friction for new users
+- **Better debugging for empty organizations** - Enhanced logging (from v0.2.47)
+
+## [0.2.47] - 2026-02-06
+
+### Improved
+- **Better debugging for empty organizations issue** - Enhanced logging and user messaging
+  - Detailed console logging when login response returns no organizations
+  - Clearer error message: guides users to visit ace-ai.app to create/join an organization
+  - Helps diagnose Windows/free plan users who don't see orgs after login
+  - **Config file verification**: Logs whether SDK created `~/.config/ace/config.json` after login
+  - Added start/end logging for login flow to trace issues
+
+### Fixed
+- Removed unnecessary `await` on synchronous `logout()` call
+
 ## [0.2.46] - 2026-02-06
 
 ### Added

@@ -310,8 +310,38 @@ function getExtensionVersion(context: vscode.ExtensionContext): string {
 }
 
 /**
- * Check if workspace files need updating and prompt user
- * For multi-root workspaces, checks each folder that has ACE initialized
+ * Initialize workspace files for a specific folder
+ * Used by both auto-init and manual initialization
+ * @param folder - Target workspace folder
+ * @param version - Extension version to write
+ * @param forceUpdate - If true, overwrite existing files
+ */
+async function initializeWorkspaceForFolder(
+	folder: vscode.WorkspaceFolder,
+	version: string,
+	forceUpdate: boolean = false
+): Promise<void> {
+	const aceDir = vscode.Uri.joinPath(folder.uri, '.cursor', 'ace');
+	try {
+		await vscode.workspace.fs.createDirectory(aceDir);
+	} catch {
+		// Directory may already exist
+	}
+	await createCursorHooks(folder, forceUpdate);
+	await createCursorRules(folder, forceUpdate);
+	await createCursorCommands(folder, forceUpdate);
+	writeWorkspaceVersion(version, folder);
+}
+
+/**
+ * Check workspace version and auto-initialize or auto-update as needed
+ *
+ * UX Improvements (v0.2.48):
+ * - FIRST INSTALL (no workspace version): Auto-initialize silently
+ * - UPDATE (version mismatch): Auto-update and show non-blocking notification
+ * - MATCH (versions equal): Do nothing
+ *
+ * For multi-root workspaces, handles each folder independently
  */
 async function checkWorkspaceVersionAndPrompt(context: vscode.ExtensionContext): Promise<void> {
 	const workspaceFolders = vscode.workspace.workspaceFolders;
@@ -324,43 +354,23 @@ async function checkWorkspaceVersionAndPrompt(context: vscode.ExtensionContext):
 	// Check each folder for ACE initialization
 	for (const folder of workspaceFolders) {
 		const workspaceVersion = readWorkspaceVersion(folder);
+		const folderName = workspaceFolders.length > 1 ? ` for ${folder.name}` : '';
 
-		// No workspace version means this folder was never initialized with ACE
 		if (!workspaceVersion) {
-			continue; // Let them use Initialize Workspace manually
+			// FIRST INSTALL: Auto-initialize silently
+			console.log(`[ACE] First install detected${folderName}, auto-initializing...`);
+			await initializeWorkspaceForFolder(folder, extensionVersion, false);
+			vscode.window.showInformationMessage(`ACE initialized${folderName}`);
+			continue;
 		}
 
-		// Compare versions (simple string comparison, works for semver)
 		if (workspaceVersion !== extensionVersion) {
-			const folderName = workspaceFolders.length > 1 ? ` (${folder.name})` : '';
-			console.log(`[ACE] Workspace version${folderName} (${workspaceVersion}) differs from extension version (${extensionVersion})`);
-
-			const selection = await vscode.window.showInformationMessage(
-				`ACE extension updated to v${extensionVersion}. Your workspace files${folderName} (hooks, rules, commands) are from v${workspaceVersion}. Update now?`,
-				'Update Workspace',
-				'Remind Me Later',
-				'Skip'
-			);
-
-			if (selection === 'Update Workspace') {
-				// Update this specific folder with forceUpdate=true to overwrite existing files
-				const aceDir = vscode.Uri.joinPath(folder.uri, '.cursor', 'ace');
-				try {
-					await vscode.workspace.fs.createDirectory(aceDir);
-				} catch {
-					// Directory may already exist
-				}
-				await createCursorHooks(folder, true);    // forceUpdate=true
-				await createCursorRules(folder, true);    // forceUpdate=true
-				await createCursorCommands(folder, true); // forceUpdate=true
-				writeWorkspaceVersion(extensionVersion, folder);
-				vscode.window.showInformationMessage(`ACE workspace${folderName} updated to v${extensionVersion}!`);
-			} else if (selection === 'Skip') {
-				// Write current version to skip future prompts for this version
-				writeWorkspaceVersion(extensionVersion, folder);
-			}
-			// 'Remind Me Later' does nothing - will prompt again next session
+			// UPDATE: Auto-update and show non-blocking notification
+			console.log(`[ACE] Updating workspace${folderName} from v${workspaceVersion} to v${extensionVersion}`);
+			await initializeWorkspaceForFolder(folder, extensionVersion, true); // forceUpdate=true
+			vscode.window.showInformationMessage(`ACE updated to v${extensionVersion}${folderName}`);
 		}
+		// MATCH: Do nothing - workspace is up to date
 	}
 }
 
