@@ -5,6 +5,21 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.49] - 2026-02-09
+
+### Added
+- **Quota warning notifications** - Alert users when usage exceeds thresholds
+  - `onQuotaWarning` - Shows warning at 80%+ usage with "View Status" button
+  - `onReadOnlyMode` - Shows warning when quota exceeded with "Upgrade" button
+  - `onAccountBlocked` - Shows error with "Manage Account" button
+  - Deduplication: Each resource only warned once per session
+  - Configurable via `ace.features.showQuotaWarnings` setting
+- **New client factory** (`src/ace/client.ts`) - Centralized AceClient creation with callbacks
+- **27 quota warning tests** - Comprehensive coverage for all callbacks and edge cases
+
+### Changed
+- Upgrade/billing links now point to `https://www.ace-ai.app/dashboard/settings?tab=billing`
+
 ## [0.2.48] - 2026-02-08
 
 ### Added

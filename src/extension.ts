@@ -20,6 +20,7 @@ import { initWorkspaceMonitor, getCurrentFolder, refreshStatusBar } from './auto
 import { runLoginCommand, logout, isAuthenticated, getTokenExpiration, handleAuthError, getValidToken, getHardCapInfo } from './commands/login';
 import { AceClient, loadConfig, loadUserAuth, getDefaultOrgId } from '@ace-sdk/core';
 import { showDevicesQuickPick } from './commands/devices';
+import { getAceClient, clearQuotaWarningTracking, getLastUsageInfo, invalidateClient } from './ace/client';
 
 let statusBarItem: vscode.StatusBarItem;
 let extensionContext: vscode.ExtensionContext;
@@ -56,50 +57,17 @@ const getCursorApi = (): CursorApi | undefined => {
  */
 async function preloadPatterns(): Promise<void> {
 	try {
-		// Load config using SDK
-		const sdkConfig = loadConfig();
-		const userAuth = loadUserAuth();
-		const ctx = readContext();
-
-		// Check required config
-		if (!sdkConfig?.serverUrl || !ctx?.projectId) {
-			console.log('[ACE] Preload skipped: no config');
+		// Use AceClient with quota callbacks for proper usage monitoring
+		const client = getAceClient();
+		if (!client) {
+			console.log('[ACE] Preload skipped: no valid client (not configured or not authenticated)');
 			return;
 		}
 
-		// Check for valid user token
-		const token = userAuth?.token;
-		if (!token) {
-			console.log('[ACE] Preload skipped: no valid token');
-			return;
-		}
+		console.log('[ACE] Preload: fetching analytics via AceClient');
 
-		// Get org ID
-		const orgId = ctx.orgId || getDefaultOrgId();
-		if (!orgId) {
-			console.log('[ACE] Preload skipped: no org ID');
-			return;
-		}
-
-		// Use direct HTTP fetch to /analytics (same as status page)
-		const analyticsUrl = `${sdkConfig.serverUrl}/analytics`;
-		console.log(`[ACE] Preload: fetching analytics from ${analyticsUrl}`);
-
-		const response = await fetch(analyticsUrl, {
-			headers: {
-				'Authorization': `Bearer ${token}`,
-				'Content-Type': 'application/json',
-				'X-ACE-Org': orgId,
-				'X-ACE-Project': ctx.projectId
-			}
-		});
-
-		if (!response.ok) {
-			console.log(`[ACE] Preload: analytics fetch failed with status ${response.status}`);
-			return;
-		}
-
-		const analytics = await response.json() as Record<string, any>;
+		// Use getStatus() which calls /analytics endpoint and triggers quota callbacks
+		const analytics = await client.getStatus();
 		console.log(`[ACE] Preload: analytics response - total_patterns=${analytics.total_patterns}, total_bullets=${analytics.total_bullets}`);
 
 		// Use total_patterns first (same transformation as status page)
@@ -115,6 +83,12 @@ async function preloadPatterns(): Promise<void> {
 		if (statusBarItem && preloadedPatternCount > 0) {
 			statusBarItem.text = `$(book) ACE: ${preloadedPatternCount} patterns`;
 			statusBarItem.tooltip = `ACE Pattern Learning\n${preloadedPatternCount} patterns in playbook\nDomains: ${preloadedDomains.slice(0, 3).join(', ')}${preloadedDomains.length > 3 ? ` (+${preloadedDomains.length - 3} more)` : ''}\n\nClick for status`;
+		}
+
+		// Check for quota usage info from the client
+		const usageInfo = getLastUsageInfo();
+		if (usageInfo) {
+			console.log(`[ACE] Usage info: ${usageInfo.plan} plan, status=${usageInfo.status}`);
 		}
 	} catch (error) {
 		console.log('[ACE] Preload error:', error instanceof Error ? error.message : String(error));
@@ -1590,5 +1564,9 @@ async function runDiagnosticCommand(): Promise<void> {
 }
 
 export function deactivate() {
+	// Clear quota warning tracking on deactivation
+	clearQuotaWarningTracking();
+	// Invalidate all cached clients
+	invalidateClient();
 	// Cleanup is handled by disposables
 }
