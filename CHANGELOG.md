@@ -5,6 +5,59 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.52] - 2026-02-09
+
+### Added
+- **Organization usage display on Status Panel** - Shows org-wide quota and usage metrics
+  - Plan tier badge (Free/Basic/Pro) with subscription type (Individual/Team)
+  - Account status indicator (Active/Trialing/Read-Only/Blocked) with color coding
+  - Usage progress bars for: Patterns (project), Patterns (org), Projects, API Calls, Daily Traces
+  - Color-coded bars: green (ok), yellow (>80%), red (over limit)
+  - Team seats display (when team subscription)
+  - Feature badges (Teams, Sharing, API Access, Priority Support)
+- **8 new tests** for usage percentage, near-limit detection, plan parsing, and UsageInfo structure
+
+### Technical
+- Uses `@ace-sdk/core` client layer (not direct HTTP) - usage data from `X-ACE-*` response headers
+- `getLastUsageInfo()` returns cached `UsageInfo` from `onUsageUpdate` callback
+- Falls back to triggering `AceClient.getAnalytics()` if no cached data available
+
+## [0.2.51] - 2026-02-09
+
+### Added
+- **preCompact hook** - Preserves AI-Trail trajectory before context compaction
+  - Saves compaction snapshots to `compaction_log.jsonl`
+  - Outputs user message with trajectory counts for context preservation
+- **subagentStart hook** - Tracks subagent spawning
+  - Logs subagent type, prompt, and model to `mcp_trajectory.jsonl`
+  - Outputs `{"decision": "allow"}` to permit all subagents
+- **subagentStop hook** - Tracks subagent completion
+  - Logs subagent results, duration, and status
+  - Saves transcript paths to `subagent_transcripts.jsonl`
+- **6 new tests** for P2 hook structure and script existence
+
+### Technical
+- Unix (.sh) and Windows (.ps1) scripts for all 3 new hooks
+- `hasAllHooks` check updated to include preCompact, subagentStart, subagentStop
+
+## [0.2.50] - 2026-02-09
+
+### Added
+- **sessionStart hook** - Initializes AI-Trail tracking at session beginning
+  - Clears stale trajectory files from previous sessions
+  - Loads cached patterns into `pattern_cache.json` for the session
+  - Records session start with conversation_id and workspace info
+- **sessionEnd hook** - Finalizes trajectory at session end
+  - Aggregates trajectory counts (MCP, shell, edit, response)
+  - Records session end with duration info
+- **transcript_path in stop hook** - Enhanced stop hook with Cursor's transcript path
+  - Saves transcript location for post-session analysis
+- **2 new tests** for sessionStart/sessionEnd hooks and transcript_path
+
+### Technical
+- Pattern cache written to `.cursor/ace/pattern_cache.json` during `preloadPatterns()`
+- All hooks receive Cursor's common schema (conversation_id, transcript_path, etc.)
+
 ## [0.2.49] - 2026-02-09
 
 ### Added

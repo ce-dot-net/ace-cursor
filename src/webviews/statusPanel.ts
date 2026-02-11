@@ -6,7 +6,9 @@
 import * as vscode from 'vscode';
 import { readContext } from '../ace/context';
 import { getValidToken, getHardCapInfo } from '../commands/login';
-import { loadConfig, loadUserAuth, getDefaultOrgId } from '@ace-sdk/core';
+import { loadConfig, loadUserAuth, getDefaultOrgId, getUsagePercentage, isNearLimit, isOverLimit } from '@ace-sdk/core';
+import type { UsageInfo, UsageMetric } from '@ace-sdk/core';
+import { getLastUsageInfo, getAceClient } from '../ace/client';
 
 export class StatusPanel {
 	public static currentPanel: StatusPanel | undefined;
@@ -189,6 +191,24 @@ export class StatusPanel {
 			// Ignore top patterns errors - optional display
 		}
 
+		// Get org usage data from cached AceClient usage info
+		// Usage headers are parsed on every API call via @ace-sdk/core
+		let usage: UsageInfo | undefined = getLastUsageInfo();
+
+		// If no cached usage yet, trigger it via AceClient (which parses X-ACE-* headers)
+		if (!usage) {
+			try {
+				const client = getAceClient();
+				if (client) {
+					// Any SDK call triggers usage header parsing
+					await client.getAnalytics();
+					usage = client.getLastUsage();
+				}
+			} catch {
+				// Usage data is optional - continue without it
+			}
+		}
+
 		return {
 			...analytics,
 			// Support both old and new field names
@@ -200,7 +220,8 @@ export class StatusPanel {
 			top_patterns: topPatterns,
 			helpful_total: analytics.helpful_total || 0,
 			harmful_total: analytics.harmful_total || 0,
-			by_domain: analytics.by_domain || {}
+			by_domain: analytics.by_domain || {},
+			usage
 		};
 	}
 
@@ -272,6 +293,77 @@ export class StatusPanel {
 			</div>`;
 	}
 
+	/**
+	 * Generate HTML for a single usage progress bar
+	 */
+	private _getUsageBarHtml(label: string, metric: UsageMetric): string {
+		const pct = getUsagePercentage(metric);
+		const near = isNearLimit(metric);
+		const over = isOverLimit(metric);
+		const colorClass = over ? 'usage-over' : near ? 'usage-warning' : 'usage-ok';
+
+		return `
+			<div class="usage-row">
+				<div class="usage-label">${label}</div>
+				<div class="usage-bar-container">
+					<div class="usage-bar ${colorClass}" style="width: ${pct}%"></div>
+				</div>
+				<div class="usage-numbers">${metric.used} / ${metric.limit === -1 ? '∞' : metric.limit}</div>
+			</div>`;
+	}
+
+	/**
+	 * Generate HTML for org usage section
+	 * Shows plan tier, status, usage progress bars, team info, and features
+	 */
+	private _getUsageHtml(usage: UsageInfo): string {
+		const planLabel = `${usage.subscriptionType}/${usage.planTier}`;
+		const statusColor = usage.status === 'active' ? 'var(--vscode-testing-iconPassed)' :
+			usage.status === 'trialing' ? 'var(--vscode-textLink-foreground)' :
+			usage.status === 'read_only' ? 'var(--vscode-inputValidation-warningBorder)' :
+			'var(--vscode-testing-iconFailed)';
+
+		const bars = [
+			this._getUsageBarHtml('Patterns (Project)', usage.patterns),
+			this._getUsageBarHtml('Patterns (Org)', usage.patternsTotal),
+			this._getUsageBarHtml('Projects', usage.projects),
+			this._getUsageBarHtml('API Calls', usage.apiCalls),
+			this._getUsageBarHtml('Daily Traces', usage.tracesToday),
+		].join('');
+
+		const teamHtml = usage.team ? `
+			<div class="usage-team">
+				<span class="usage-team-label">Team Seats:</span>
+				<span class="usage-team-value">${usage.team.seatsUsed} / ${usage.team.seatsLimit}</span>
+			</div>` : '';
+
+		const featuresList = [
+			usage.features.teams ? 'Teams' : null,
+			usage.features.sharing ? 'Sharing' : null,
+			usage.features.apiAccess ? 'API Access' : null,
+			usage.features.prioritySupport ? 'Priority Support' : null,
+		].filter(Boolean);
+
+		const featuresHtml = featuresList.length > 0 ? `
+			<div class="usage-features">
+				${featuresList.map(f => `<span class="usage-feature-badge">${f}</span>`).join('')}
+			</div>` : '';
+
+		return `
+		<div class="usage-section">
+			<h2>Organization Usage</h2>
+			<div class="usage-plan-row">
+				<span class="usage-plan-badge ${usage.planTier}">${planLabel}</span>
+				<span class="usage-status" style="color: ${statusColor}">${usage.status}</span>
+			</div>
+			<div class="usage-bars">
+				${bars}
+			</div>
+			${teamHtml}
+			${featuresHtml}
+		</div>`;
+	}
+
 	private _getStatusHtml(stats: any) {
 		const bySection = stats.by_section || {};
 		const total = stats.total_bullets || 0;
@@ -291,6 +383,9 @@ export class StatusPanel {
 		// Get hard cap info for session expiration display
 		const hardCap = getHardCapInfo();
 		const hardCapHtml = hardCap ? this._getHardCapHtml(hardCap) : '';
+
+		// Get org usage display
+		const usageHtml = stats.usage ? this._getUsageHtml(stats.usage) : '';
 
 		return `<!DOCTYPE html>
 <html lang="en">
@@ -491,6 +586,119 @@ export class StatusPanel {
 		.hard-cap-btn:hover {
 			background: var(--vscode-button-hoverBackground);
 		}
+		/* Org usage section */
+		.usage-section {
+			margin-top: 25px;
+			padding: 20px;
+			background: var(--vscode-editor-background);
+			border: 1px solid var(--vscode-panel-border);
+			border-radius: 8px;
+		}
+		.usage-section h2 {
+			margin: 0 0 15px 0;
+			font-size: 16px;
+		}
+		.usage-plan-row {
+			display: flex;
+			align-items: center;
+			gap: 12px;
+			margin-bottom: 18px;
+		}
+		.usage-plan-badge {
+			padding: 4px 12px;
+			border-radius: 12px;
+			font-size: 12px;
+			font-weight: 600;
+			text-transform: uppercase;
+			letter-spacing: 0.5px;
+		}
+		.usage-plan-badge.free {
+			background: var(--vscode-badge-background);
+			color: var(--vscode-badge-foreground);
+		}
+		.usage-plan-badge.basic {
+			background: var(--vscode-textLink-foreground);
+			color: var(--vscode-editor-background);
+		}
+		.usage-plan-badge.pro {
+			background: linear-gradient(135deg, #7c3aed, #a855f7);
+			color: #fff;
+		}
+		.usage-status {
+			font-size: 13px;
+			font-weight: 500;
+		}
+		.usage-bars {
+			display: flex;
+			flex-direction: column;
+			gap: 10px;
+		}
+		.usage-row {
+			display: grid;
+			grid-template-columns: 140px 1fr 80px;
+			align-items: center;
+			gap: 10px;
+		}
+		.usage-label {
+			font-size: 12px;
+			color: var(--vscode-descriptionForeground);
+		}
+		.usage-bar-container {
+			height: 8px;
+			background: var(--vscode-input-background);
+			border-radius: 4px;
+			overflow: hidden;
+		}
+		.usage-bar {
+			height: 100%;
+			border-radius: 4px;
+			transition: width 0.3s ease;
+		}
+		.usage-bar.usage-ok {
+			background: var(--vscode-testing-iconPassed);
+		}
+		.usage-bar.usage-warning {
+			background: var(--vscode-inputValidation-warningBorder);
+		}
+		.usage-bar.usage-over {
+			background: var(--vscode-testing-iconFailed);
+		}
+		.usage-numbers {
+			font-size: 12px;
+			color: var(--vscode-descriptionForeground);
+			text-align: right;
+			font-variant-numeric: tabular-nums;
+		}
+		.usage-team {
+			margin-top: 15px;
+			padding-top: 12px;
+			border-top: 1px solid var(--vscode-panel-border);
+			display: flex;
+			justify-content: space-between;
+			align-items: center;
+		}
+		.usage-team-label {
+			font-size: 13px;
+			color: var(--vscode-descriptionForeground);
+		}
+		.usage-team-value {
+			font-size: 14px;
+			font-weight: 600;
+			color: var(--vscode-textLink-foreground);
+		}
+		.usage-features {
+			margin-top: 12px;
+			display: flex;
+			flex-wrap: wrap;
+			gap: 6px;
+		}
+		.usage-feature-badge {
+			padding: 3px 8px;
+			border-radius: 10px;
+			font-size: 11px;
+			background: var(--vscode-badge-background);
+			color: var(--vscode-badge-foreground);
+		}
 		/* Quality metrics */
 		.quality-metrics {
 			display: flex;
@@ -651,6 +859,8 @@ export class StatusPanel {
 	</div>
 
 	${hardCapHtml}
+
+	${usageHtml}
 
 	<div class="section-breakdown">
 		<h2>Patterns by Section</h2>

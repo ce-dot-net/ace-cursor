@@ -2,7 +2,7 @@
   "name": "cursor-ace-extension",
   "displayName": "ACE for Cursor",
   "description": "Native Cursor extension for ACE pattern learning. Automatically retrieves patterns before tasks and captures learning after via MCP.",
-  "version": "0.2.49",
+  "version": "0.2.52",
   "publisher": "ce-dot-net",
   "author": "Code Engine GmbH",
   "license": "MIT",

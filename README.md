@@ -45,7 +45,7 @@ By [Code Engine GmbH](https://ace-ai.app)
 | **ACE: Logout** | Logout and clear authentication tokens |
 | **ACE: Initialize Workspace** | Set up ACE in current workspace (creates `.cursor/` config files, registers MCP server) |
 | **ACE: Configure Connection** | Opens webview panel to login, select organization/project, and manage settings |
-| **ACE: Show Status** | Opens webview panel showing playbook statistics (pattern count, session expiry) |
+| **ACE: Show Status** | Opens webview panel showing playbook statistics, org usage, and session info |
 | **ACE: Search Patterns** | Search learned patterns by keyword |
 | **ACE: Bootstrap Playbook** | Initialize patterns from existing codebase (git history, docs) |
 | **ACE: Capture Learning** | Manually trigger learning capture after work |
@@ -66,8 +66,11 @@ Real-time dashboard showing:
 - Total patterns in playbook
 - Average confidence score
 - Patterns by section (strategies, snippets, troubleshooting, APIs)
-- Session expiry info (access token + 7-day hard cap)
-- Connection status
+- **Organization usage** - plan tier, quota progress bars, team seats, features
+- Quality metrics (helpful/harmful ratio, trust score)
+- Top performing patterns
+- Domain breakdown
+- Session expiry info (7-day hard cap)
 
 ## How It Works
 

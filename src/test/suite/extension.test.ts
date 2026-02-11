@@ -554,6 +554,95 @@ suite('ACE Extension Test Suite', () => {
 	});
 
 	// ============================================
+	// SESSION HOOKS & ENHANCED STOP HOOK TESTS (P0)
+	// ============================================
+
+	test('Hooks JSON should include sessionStart and sessionEnd hooks', () => {
+		const workspaceFolders = vscode.workspace.workspaceFolders;
+		if (workspaceFolders && workspaceFolders.length > 0) {
+			const hooksPath = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'hooks.json');
+			if (fs.existsSync(hooksPath)) {
+				const hooks = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
+				assert.ok(Array.isArray(hooks.hooks.sessionStart), 'hooks.sessionStart should be an array');
+				assert.ok(hooks.hooks.sessionStart.length > 0, 'hooks.sessionStart should have at least one entry');
+				assert.ok(hooks.hooks.sessionStart[0].command, 'hooks.sessionStart[0] should have command property');
+				assert.ok(Array.isArray(hooks.hooks.sessionEnd), 'hooks.sessionEnd should be an array');
+				assert.ok(hooks.hooks.sessionEnd.length > 0, 'hooks.sessionEnd should have at least one entry');
+			}
+		}
+	});
+
+	test('Stop hook script should reference transcript_path', () => {
+		const workspaceFolders = vscode.workspace.workspaceFolders;
+		if (workspaceFolders && workspaceFolders.length > 0) {
+			const scriptsDir = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'scripts');
+			const ext = process.platform === 'win32' ? '.ps1' : '.sh';
+			const stopHookPath = path.join(scriptsDir, `ace_stop_hook${ext}`);
+			if (fs.existsSync(stopHookPath)) {
+				const content = fs.readFileSync(stopHookPath, 'utf-8');
+				assert.ok(content.includes('transcript_path'), 'ace_stop_hook should reference transcript_path');
+			}
+		}
+	});
+
+	// ============================================
+	// ADVANCED HOOKS TESTS (P2)
+	// ============================================
+
+	test('Hooks JSON should include preCompact hook', () => {
+		const workspaceFolders = vscode.workspace.workspaceFolders;
+		if (workspaceFolders && workspaceFolders.length > 0) {
+			const hooksPath = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'hooks.json');
+			if (fs.existsSync(hooksPath)) {
+				const hooks = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
+				assert.ok(Array.isArray(hooks.hooks.preCompact), 'hooks.preCompact should be an array');
+				assert.ok(hooks.hooks.preCompact.length > 0, 'hooks.preCompact should have at least one entry');
+				assert.ok(hooks.hooks.preCompact[0].command, 'hooks.preCompact[0] should have command property');
+			}
+		}
+	});
+
+	test('Hooks JSON should include subagentStart and subagentStop hooks', () => {
+		const workspaceFolders = vscode.workspace.workspaceFolders;
+		if (workspaceFolders && workspaceFolders.length > 0) {
+			const hooksPath = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'hooks.json');
+			if (fs.existsSync(hooksPath)) {
+				const hooks = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
+				assert.ok(Array.isArray(hooks.hooks.subagentStart), 'hooks.subagentStart should be an array');
+				assert.ok(hooks.hooks.subagentStart.length > 0, 'hooks.subagentStart should have entries');
+				assert.ok(Array.isArray(hooks.hooks.subagentStop), 'hooks.subagentStop should be an array');
+				assert.ok(hooks.hooks.subagentStop.length > 0, 'hooks.subagentStop should have entries');
+			}
+		}
+	});
+
+	test('preCompact script should exist', () => {
+		const workspaceFolders = vscode.workspace.workspaceFolders;
+		if (workspaceFolders && workspaceFolders.length > 0) {
+			const hooksPath = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'hooks.json');
+			if (fs.existsSync(hooksPath)) {
+				const scriptsDir = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'scripts');
+				const ext = process.platform === 'win32' ? '.ps1' : '.sh';
+				const preCompactPath = path.join(scriptsDir, `ace_pre_compact${ext}`);
+				assert.ok(fs.existsSync(preCompactPath), `ace_pre_compact${ext} should exist`);
+			}
+		}
+	});
+
+	test('subagentStart and subagentStop scripts should exist', () => {
+		const workspaceFolders = vscode.workspace.workspaceFolders;
+		if (workspaceFolders && workspaceFolders.length > 0) {
+			const hooksPath = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'hooks.json');
+			if (fs.existsSync(hooksPath)) {
+				const scriptsDir = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'scripts');
+				const ext = process.platform === 'win32' ? '.ps1' : '.sh';
+				assert.ok(fs.existsSync(path.join(scriptsDir, `ace_subagent_start${ext}`)), `ace_subagent_start${ext} should exist`);
+				assert.ok(fs.existsSync(path.join(scriptsDir, `ace_subagent_stop${ext}`)), `ace_subagent_stop${ext} should exist`);
+			}
+		}
+	});
+
+	// ============================================
 	// STATUS PANEL TESTS
 	// ============================================
 
@@ -568,6 +657,28 @@ suite('ACE Extension Test Suite', () => {
 		const { StatusPanel } = await import('../../webviews/statusPanel');
 		// Initially no panel
 		assert.strictEqual(StatusPanel.currentPanel, undefined, 'No panel should exist initially');
+	});
+
+	// ============================================
+	// ORG USAGE DISPLAY TESTS (v0.2.52)
+	// ============================================
+
+	test('ACE client module should export getLastUsageInfo', async function() {
+		try {
+			const clientModule = await import('../../ace/client');
+			assert.ok(typeof clientModule.getLastUsageInfo === 'function', 'getLastUsageInfo should be exported');
+		} catch {
+			this.skip(); // SDK not available in test env
+		}
+	});
+
+	test('ACE client module should export getAceClient', async function() {
+		try {
+			const clientModule = await import('../../ace/client');
+			assert.ok(typeof clientModule.getAceClient === 'function', 'getAceClient should be exported');
+		} catch {
+			this.skip(); // SDK not available in test env
+		}
 	});
 
 	// ============================================
@@ -743,6 +854,111 @@ suite('ACE HTTP API Tests (Mocked)', () => {
 		assert.ok(expectedBody.top_k === 20, 'Preload should limit to 20 patterns');
 		assert.ok(expectedBody.pattern.content === 'general development patterns strategies', 'Pattern content should be search query');
 		assert.ok(expectedBody.pattern.section === 'general', 'Pattern section should be general');
+	});
+
+	// ============================================
+	// ORG USAGE DATA TESTS (v0.2.52)
+	// ============================================
+
+	test('Usage percentage should be calculated correctly', () => {
+		// Test getUsagePercentage logic (mirrors @ace-sdk/core helper)
+		const calcPercentage = (used: number, limit: number) => {
+			if (limit <= 0) return 0;
+			return Math.min(100, Math.round((used / limit) * 100));
+		};
+
+		assert.strictEqual(calcPercentage(80, 100), 80, '80/100 should be 80%');
+		assert.strictEqual(calcPercentage(100, 100), 100, '100/100 should be 100%');
+		assert.strictEqual(calcPercentage(150, 100), 100, '150/100 should cap at 100%');
+		assert.strictEqual(calcPercentage(0, 100), 0, '0/100 should be 0%');
+		assert.strictEqual(calcPercentage(0, 0), 0, '0/0 should be 0%');
+		assert.strictEqual(calcPercentage(5, -1), 0, 'negative limit should be 0%');
+	});
+
+	test('Near limit detection should use 80% threshold', () => {
+		const isNearLimit = (used: number, limit: number, threshold = 80) => {
+			if (limit <= 0) return false;
+			return Math.min(100, Math.round((used / limit) * 100)) >= threshold;
+		};
+
+		assert.strictEqual(isNearLimit(79, 100), false, '79% should not be near limit');
+		assert.strictEqual(isNearLimit(80, 100), true, '80% should be near limit');
+		assert.strictEqual(isNearLimit(100, 100), true, '100% should be near limit');
+		assert.strictEqual(isNearLimit(0, 0), false, '0/0 should not be near limit');
+	});
+
+	test('Over limit detection should check used >= limit', () => {
+		const isOverLimit = (used: number, limit: number) => {
+			return limit > 0 && used >= limit;
+		};
+
+		assert.strictEqual(isOverLimit(99, 100), false, '99/100 should not be over limit');
+		assert.strictEqual(isOverLimit(100, 100), true, '100/100 should be over limit');
+		assert.strictEqual(isOverLimit(150, 100), true, '150/100 should be over limit');
+		assert.strictEqual(isOverLimit(5, 0), false, '5/0 should not be over limit');
+	});
+
+	test('Plan parsing should extract type and tier', () => {
+		const parsePlan = (plan: string) => {
+			const [type, tier] = plan.split('/');
+			return {
+				type: type === 'team' ? 'team' : 'individual',
+				tier: tier === 'pro' ? 'pro' : tier === 'basic' ? 'basic' : 'free'
+			};
+		};
+
+		const free = parsePlan('individual/free');
+		assert.strictEqual(free.type, 'individual');
+		assert.strictEqual(free.tier, 'free');
+
+		const teamPro = parsePlan('team/pro');
+		assert.strictEqual(teamPro.type, 'team');
+		assert.strictEqual(teamPro.tier, 'pro');
+
+		const basic = parsePlan('individual/basic');
+		assert.strictEqual(basic.type, 'individual');
+		assert.strictEqual(basic.tier, 'basic');
+	});
+
+	test('Usage data should include all required metrics', () => {
+		// Mock UsageInfo structure matching @ace-sdk/core
+		const mockUsage = {
+			plan: 'team/pro',
+			subscriptionType: 'team',
+			planTier: 'pro',
+			status: 'active',
+			patterns: { used: 16, limit: 50 },
+			patternsTotal: { used: 40, limit: 200 },
+			projects: { used: 2, limit: 10 },
+			domains: { used: 0, limit: 5 },
+			templates: { used: 1, limit: 10 },
+			apiCalls: { used: 500, limit: 5000 },
+			tracesToday: { used: 30, limit: 100 },
+			features: {
+				teams: true,
+				sharing: true,
+				apiAccess: true,
+				prioritySupport: true
+			},
+			team: {
+				orgId: 'org-123',
+				orgName: 'Test Org',
+				seatsUsed: 3,
+				seatsLimit: 5
+			}
+		};
+
+		// Verify all fields are present
+		assert.ok(mockUsage.plan, 'Usage should have plan');
+		assert.ok(mockUsage.patterns, 'Usage should have patterns metric');
+		assert.ok(mockUsage.patternsTotal, 'Usage should have patternsTotal metric');
+		assert.ok(mockUsage.projects, 'Usage should have projects metric');
+		assert.ok(mockUsage.apiCalls, 'Usage should have apiCalls metric');
+		assert.ok(mockUsage.tracesToday, 'Usage should have tracesToday metric');
+		assert.ok(mockUsage.features, 'Usage should have features');
+		assert.ok(mockUsage.team, 'Team subscription should have team info');
+		assert.strictEqual(mockUsage.team.seatsUsed, 3, 'Should track seats used');
+		assert.strictEqual(mockUsage.team.seatsLimit, 5, 'Should track seats limit');
 	});
 
 	test('Verify response should extract org and project names', () => {

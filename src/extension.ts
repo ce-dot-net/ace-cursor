@@ -79,6 +79,29 @@ async function preloadPatterns(): Promise<void> {
 
 		console.log(`[ACE] Preloaded ${preloadedPatternCount} patterns from ${preloadedDomains.length} domains`);
 
+		// Write pattern cache for sessionStart hook to read
+		try {
+			const activeFolder = vscode.workspace.workspaceFolders?.[0];
+			if (activeFolder) {
+				const cacheDir = path.join(activeFolder.uri.fsPath, '.cursor', 'ace');
+				if (!fs.existsSync(cacheDir)) {
+					fs.mkdirSync(cacheDir, { recursive: true });
+				}
+				const cacheData = {
+					patternCount: preloadedPatternCount,
+					domains: preloadedDomains,
+					timestamp: new Date().toISOString(),
+				};
+				fs.writeFileSync(
+					path.join(cacheDir, 'pattern_cache.json'),
+					JSON.stringify(cacheData, null, 2)
+				);
+				console.log('[ACE] Pattern cache written for sessionStart hook');
+			}
+		} catch (cacheErr) {
+			console.log('[ACE] Pattern cache write failed (non-fatal):', cacheErr instanceof Error ? cacheErr.message : String(cacheErr));
+		}
+
 		// Update status bar with pattern count
 		if (statusBarItem && preloadedPatternCount > 0) {
 			statusBarItem.text = `$(book) ACE: ${preloadedPatternCount} patterns`;
@@ -437,6 +460,13 @@ async function createCursorHooks(folder?: vscode.WorkspaceFolder, forceUpdate: b
 	const hooksConfig = {
 		version: 1,
 		hooks: {
+			// Session lifecycle - inject patterns at start, log at end
+			sessionStart: [{
+				command: `${scriptPrefix}.cursor/scripts/ace_session_start${scriptExt}`
+			}],
+			sessionEnd: [{
+				command: `${scriptPrefix}.cursor/scripts/ace_session_end${scriptExt}`
+			}],
 			// MCP tool execution tracking (PostToolUse equivalent)
 			afterMCPExecution: [{
 				command: `${scriptPrefix}.cursor/scripts/ace_track_mcp${scriptExt}`
@@ -453,9 +483,20 @@ async function createCursorHooks(folder?: vscode.WorkspaceFolder, forceUpdate: b
 			afterFileEdit: [{
 				command: `${scriptPrefix}.cursor/scripts/ace_track_edit${scriptExt}`
 			}],
-			// Stop hook with git context aggregation
+			// Stop hook with git context aggregation + transcript_path
 			stop: [{
 				command: `${scriptPrefix}.cursor/scripts/ace_stop_hook${scriptExt}`
+			}],
+			// Pre-compaction trajectory preservation
+			preCompact: [{
+				command: `${scriptPrefix}.cursor/scripts/ace_pre_compact${scriptExt}`
+			}],
+			// Subagent lifecycle tracking
+			subagentStart: [{
+				command: `${scriptPrefix}.cursor/scripts/ace_subagent_start${scriptExt}`
+			}],
+			subagentStop: [{
+				command: `${scriptPrefix}.cursor/scripts/ace_subagent_stop${scriptExt}`
 			}]
 		}
 	};
@@ -473,7 +514,12 @@ async function createCursorHooks(folder?: vscode.WorkspaceFolder, forceUpdate: b
 			// Check if AI-Trail hooks are missing
 			const hasAllHooks = existingHooks?.hooks?.afterMCPExecution &&
 			                    existingHooks?.hooks?.afterShellExecution &&
-			                    existingHooks?.hooks?.afterAgentResponse;
+			                    existingHooks?.hooks?.afterAgentResponse &&
+			                    existingHooks?.hooks?.sessionStart &&
+			                    existingHooks?.hooks?.sessionEnd &&
+			                    existingHooks?.hooks?.preCompact &&
+			                    existingHooks?.hooks?.subagentStart &&
+			                    existingHooks?.hooks?.subagentStop;
 			if (!hasAllHooks) {
 				shouldWriteHooks = true;
 				console.log('[ACE] Updating hooks.json with AI-Trail hooks');
@@ -564,6 +610,196 @@ $input | Out-File -Append -FilePath "$aceDir\\response_trajectory.jsonl" -Encodi
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_track_response.ps1`);
 	}
 
+	// Session Start Hook - Injects pattern context into new conversations
+	const sessionStartPath = path.join(scriptsDir, 'ace_session_start.ps1');
+	const sessionStartScript = `# ACE Session Start Hook - Injects pattern context into new conversations
+# Input: session_id, is_background_agent, composer_mode
+# Output: additional_context, env
+
+$aceDir = ".cursor\\ace"
+if (-not (Test-Path $aceDir)) {
+    New-Item -ItemType Directory -Path $aceDir -Force | Out-Null
+}
+
+$inputJson = [Console]::In.ReadToEnd()
+$data = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
+$sessionId = if ($data.session_id) { $data.session_id } else { "" }
+$isBg = if ($data.is_background_agent) { "true" } else { "false" }
+
+# Clear trajectory files from previous session
+@("mcp_trajectory.jsonl", "shell_trajectory.jsonl", "edit_trajectory.jsonl", "response_trajectory.jsonl") | ForEach-Object {
+    $trajFile = "$aceDir\\$_"
+    if (Test-Path $trajFile) { Clear-Content $trajFile }
+}
+
+# Save session info
+@{session_id=$sessionId; started_at=(Get-Date -Format "o"); is_background=$isBg} | ConvertTo-Json -Compress | Out-File -FilePath "$aceDir\\current_session.json" -Encoding utf8
+
+# Read cached pattern info
+$patternCount = 0
+$domains = ""
+$cacheFile = "$aceDir\\pattern_cache.json"
+if (Test-Path $cacheFile) {
+    try {
+        $cache = Get-Content $cacheFile | ConvertFrom-Json
+        $patternCount = $cache.patternCount
+        $domains = ($cache.domains -join ", ")
+    } catch {}
+}
+
+# Build context
+if ($patternCount -gt 0) {
+    $context = "[ACE Pattern Learning] This project has $patternCount patterns across domains: $domains. Use ace_search MCP tool to retrieve relevant patterns before starting work."
+} else {
+    $context = "[ACE Pattern Learning] ACE is configured. Use ace_search MCP tool to find patterns relevant to your task."
+}
+
+# Return env + additional_context
+Write-Output "{\`"env\`": {\`"ACE_SESSION_ID\`": \`"$sessionId\`"}, \`"additional_context\`": \`"$context\`"}"
+`;
+	if (forceUpdate || !fs.existsSync(sessionStartPath)) {
+		fs.writeFileSync(sessionStartPath, sessionStartScript);
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_session_start.ps1`);
+	}
+
+	// Session End Hook - Logs session analytics
+	const sessionEndPath = path.join(scriptsDir, 'ace_session_end.ps1');
+	const sessionEndScript = `# ACE Session End Hook - Logs session analytics
+# Input: session_id, reason, duration_ms, is_background_agent
+# Output: none (fire-and-forget)
+
+$aceDir = ".cursor\\ace"
+if (-not (Test-Path $aceDir)) {
+    New-Item -ItemType Directory -Path $aceDir -Force | Out-Null
+}
+
+$inputJson = [Console]::In.ReadToEnd()
+$data = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
+
+$mcpCount = 0; $shellCount = 0; $editCount = 0; $responseCount = 0
+if (Test-Path "$aceDir\\mcp_trajectory.jsonl") { $mcpCount = (Get-Content "$aceDir\\mcp_trajectory.jsonl" | Measure-Object -Line).Lines }
+if (Test-Path "$aceDir\\shell_trajectory.jsonl") { $shellCount = (Get-Content "$aceDir\\shell_trajectory.jsonl" | Measure-Object -Line).Lines }
+if (Test-Path "$aceDir\\edit_trajectory.jsonl") { $editCount = (Get-Content "$aceDir\\edit_trajectory.jsonl" | Measure-Object -Line).Lines }
+if (Test-Path "$aceDir\\response_trajectory.jsonl") { $responseCount = (Get-Content "$aceDir\\response_trajectory.jsonl" | Measure-Object -Line).Lines }
+
+$sessionId = $data.session_id
+$reason = if ($data.reason) { $data.reason } else { "unknown" }
+$durationMs = if ($data.duration_ms) { $data.duration_ms } else { 0 }
+
+$logEntry = @{
+    session_id=$sessionId; reason=$reason; duration_ms=$durationMs
+    trajectory=@{mcp=$mcpCount; shell=$shellCount; edits=$editCount; responses=$responseCount}
+    ended_at=(Get-Date -Format "o")
+} | ConvertTo-Json -Compress
+
+$logEntry | Out-File -Append -FilePath "$aceDir\\session_log.jsonl" -Encoding utf8
+`;
+	if (forceUpdate || !fs.existsSync(sessionEndPath)) {
+		fs.writeFileSync(sessionEndPath, sessionEndScript);
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_session_end.ps1`);
+	}
+
+	// Pre-Compaction Trajectory Preservation
+	const preCompactPath = path.join(scriptsDir, 'ace_pre_compact.ps1');
+	const preCompactScript = `# ACE Pre-Compact Hook - Preserves trajectory before context compaction
+# Input: trigger, context_usage_percent, context_tokens, message_count, messages_to_compact
+
+$aceDir = ".cursor\\ace"
+if (-not (Test-Path $aceDir)) {
+    New-Item -ItemType Directory -Path $aceDir -Force | Out-Null
+}
+
+$inputJson = [Console]::In.ReadToEnd()
+$data = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
+
+$trigger = if ($data.trigger) { $data.trigger } else { "auto" }
+$usagePct = if ($data.context_usage_percent) { $data.context_usage_percent } else { 0 }
+$tokens = if ($data.context_tokens) { $data.context_tokens } else { 0 }
+$msgCount = if ($data.message_count) { $data.message_count } else { 0 }
+$toCompact = if ($data.messages_to_compact) { $data.messages_to_compact } else { 0 }
+
+$mcpCount = if (Test-Path "$aceDir\\mcp_trajectory.jsonl") { (Get-Content "$aceDir\\mcp_trajectory.jsonl" | Measure-Object -Line).Lines } else { 0 }
+$shellCount = if (Test-Path "$aceDir\\shell_trajectory.jsonl") { (Get-Content "$aceDir\\shell_trajectory.jsonl" | Measure-Object -Line).Lines } else { 0 }
+$editCount = if (Test-Path "$aceDir\\edit_trajectory.jsonl") { (Get-Content "$aceDir\\edit_trajectory.jsonl" | Measure-Object -Line).Lines } else { 0 }
+$responseCount = if (Test-Path "$aceDir\\response_trajectory.jsonl") { (Get-Content "$aceDir\\response_trajectory.jsonl" | Measure-Object -Line).Lines } else { 0 }
+
+$snapshot = @{
+    trigger=$trigger; context_usage_percent=$usagePct; context_tokens=$tokens
+    message_count=$msgCount; messages_to_compact=$toCompact
+    trajectory=@{mcp=$mcpCount; shell=$shellCount; edits=$editCount; responses=$responseCount}
+    timestamp=(Get-Date -Format "o")
+} | ConvertTo-Json -Compress
+$snapshot | Out-File -Append -FilePath "$aceDir\\compaction_log.jsonl" -Encoding utf8
+
+$msg = "Context compacting (\${usagePct}% used). AI-Trail preserved: MCP:\${mcpCount} Shell:\${shellCount} Edits:\${editCount} Responses:\${responseCount}"
+Write-Output "{\`"user_message\`": \`"$msg\`"}"
+`;
+	if (forceUpdate || !fs.existsSync(preCompactPath)) {
+		fs.writeFileSync(preCompactPath, preCompactScript);
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_pre_compact.ps1`);
+	}
+
+	// Subagent Start Tracking
+	const subagentStartPath = path.join(scriptsDir, 'ace_subagent_start.ps1');
+	const subagentStartScript = `# ACE Subagent Start Hook - Tracks subagent spawning for AI-Trail
+# Input: subagent_type, prompt, model
+
+$aceDir = ".cursor\\ace"
+if (-not (Test-Path $aceDir)) {
+    New-Item -ItemType Directory -Path $aceDir -Force | Out-Null
+}
+
+$inputJson = [Console]::In.ReadToEnd()
+$data = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
+
+$subagentType = if ($data.subagent_type) { $data.subagent_type } else { "unknown" }
+$model = if ($data.model) { $data.model } else { "unknown" }
+$promptPreview = if ($data.prompt) { $data.prompt.Substring(0, [Math]::Min(200, $data.prompt.Length)) } else { "" }
+
+$entry = @{event="subagent_start"; type=$subagentType; model=$model; prompt_preview=$promptPreview; timestamp=(Get-Date -Format "o")} | ConvertTo-Json -Compress
+$entry | Out-File -Append -FilePath "$aceDir\\mcp_trajectory.jsonl" -Encoding utf8
+
+Write-Output "{\`"decision\`": \`"allow\`"}"
+`;
+	if (forceUpdate || !fs.existsSync(subagentStartPath)) {
+		fs.writeFileSync(subagentStartPath, subagentStartScript);
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_subagent_start.ps1`);
+	}
+
+	// Subagent Stop Tracking
+	const subagentStopPath = path.join(scriptsDir, 'ace_subagent_stop.ps1');
+	const subagentStopScript = `# ACE Subagent Stop Hook - Tracks subagent completion for AI-Trail
+# Input: subagent_type, status, result, duration, agent_transcript_path
+
+$aceDir = ".cursor\\ace"
+if (-not (Test-Path $aceDir)) {
+    New-Item -ItemType Directory -Path $aceDir -Force | Out-Null
+}
+
+$inputJson = [Console]::In.ReadToEnd()
+$data = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
+
+$subagentType = if ($data.subagent_type) { $data.subagent_type } else { "unknown" }
+$status = if ($data.status) { $data.status } else { "unknown" }
+$duration = if ($data.duration) { $data.duration } else { 0 }
+$transcript = $data.agent_transcript_path
+$hasTranscript = if ($transcript) { "true" } else { "false" }
+
+$entry = @{event="subagent_stop"; type=$subagentType; status=$status; duration_ms=$duration; has_transcript=$hasTranscript; timestamp=(Get-Date -Format "o")} | ConvertTo-Json -Compress
+$entry | Out-File -Append -FilePath "$aceDir\\mcp_trajectory.jsonl" -Encoding utf8
+
+if ($transcript) {
+    $transcriptEntry = @{subagent_type=$subagentType; transcript_path=$transcript; status=$status; duration_ms=$duration; saved_at=(Get-Date -Format "o")} | ConvertTo-Json -Compress
+    $transcriptEntry | Out-File -Append -FilePath "$aceDir\\subagent_transcripts.jsonl" -Encoding utf8
+}
+
+exit 0
+`;
+	if (forceUpdate || !fs.existsSync(subagentStopPath)) {
+		fs.writeFileSync(subagentStopPath, subagentStopScript);
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_subagent_stop.ps1`);
+	}
+
 	// File Edit Tracking with Domain Detection
 	const editTrackPath = path.join(scriptsDir, 'ace_track_edit.ps1');
 	const editTrackScript = `# ACE Edit Tracking Hook - Captures file edits with domain detection
@@ -645,22 +881,21 @@ try {
 
 	// Stop Hook with Git Context Aggregation
 	const stopHookPath = path.join(scriptsDir, 'ace_stop_hook.ps1');
-	const stopHookScript = `# ACE Stop Hook - Aggregates AI-Trail trajectory with git context
-# Input: status, loop_count
+	const stopHookScript = `# ACE Stop Hook - Aggregates AI-Trail trajectory with git context + transcript
+# Input: status, loop_count, transcript_path (from common schema)
 
 $inputJson = [Console]::In.ReadToEnd()
 $data = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
 $status = $data.status
 $loopCount = $data.loop_count
+$transcriptPath = $data.transcript_path
 
 if ($status -eq "completed" -and $loopCount -eq 0) {
-    # Capture git context
     $gitBranch = git rev-parse --abbrev-ref HEAD 2>$null
     if (-not $gitBranch) { $gitBranch = "unknown" }
     $gitHash = git rev-parse --short HEAD 2>$null
     if (-not $gitHash) { $gitHash = "unknown" }
 
-    # Count trajectory entries
     $aceDir = ".cursor\\ace"
     $mcpCount = 0; $shellCount = 0; $editCount = 0; $responseCount = 0
     if (Test-Path "$aceDir\\mcp_trajectory.jsonl") {
@@ -676,8 +911,15 @@ if ($status -eq "completed" -and $loopCount -eq 0) {
         $responseCount = (Get-Content "$aceDir\\response_trajectory.jsonl" | Measure-Object -Line).Lines
     }
 
+    # Save transcript path for ace_learn
+    if ($transcriptPath) {
+        @{transcript_path=$transcriptPath; saved_at=(Get-Date -Format "o")} | ConvertTo-Json -Compress | Out-File -FilePath "$aceDir\\last_transcript.json" -Encoding utf8
+    }
+
     $summary = "MCP:$mcpCount Shell:$shellCount Edits:$editCount Responses:$responseCount"
-    $msg = "Session complete. AI-Trail: $summary. Git: $gitBranch ($gitHash). Call ace_learn to capture patterns."
+    $transcriptNote = ""
+    if ($transcriptPath) { $transcriptNote = " Transcript saved for learning." }
+    $msg = "Session complete. AI-Trail: $summary. Git: $gitBranch ($gitHash).$transcriptNote Call ace_learn to capture patterns."
     Write-Output "{\`"followup_message\`": \`"$msg\`"}"
 } else {
     Write-Output '{}'
@@ -742,6 +984,170 @@ exit 0
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_track_response.sh`);
 	}
 
+	// Session Start Hook - Injects pattern context into new conversations
+	const sessionStartPath = path.join(scriptsDir, 'ace_session_start.sh');
+	const sessionStartScript = `#!/bin/bash
+# ACE Session Start Hook - Injects pattern context into new conversations
+# Input: session_id, is_background_agent, composer_mode
+# Output: additional_context, env
+
+input=$(cat)
+session_id=$(echo "$input" | jq -r '.session_id // empty')
+is_bg=$(echo "$input" | jq -r '.is_background_agent // false')
+ace_dir=".cursor/ace"
+mkdir -p "$ace_dir"
+
+# Clear trajectory files from previous session
+> "$ace_dir/mcp_trajectory.jsonl" 2>/dev/null
+> "$ace_dir/shell_trajectory.jsonl" 2>/dev/null
+> "$ace_dir/edit_trajectory.jsonl" 2>/dev/null
+> "$ace_dir/response_trajectory.jsonl" 2>/dev/null
+
+# Save session info
+echo "{\\"session_id\\": \\"$session_id\\", \\"started_at\\": \\"$(date -Iseconds)\\", \\"is_background\\": $is_bg}" > "$ace_dir/current_session.json"
+
+# Read cached pattern info (written by extension preloadPatterns)
+pattern_count=0
+domains=""
+if [ -f "$ace_dir/pattern_cache.json" ]; then
+  pattern_count=$(jq -r '.patternCount // 0' "$ace_dir/pattern_cache.json" 2>/dev/null || echo "0")
+  domains=$(jq -r '.domains // [] | join(", ")' "$ace_dir/pattern_cache.json" 2>/dev/null || echo "")
+fi
+
+# Build additional context for the conversation
+context=""
+if [ "$pattern_count" -gt 0 ] 2>/dev/null; then
+  context="[ACE Pattern Learning] This project has $pattern_count patterns across domains: $domains. Use ace_search MCP tool to retrieve relevant patterns before starting work."
+else
+  context="[ACE Pattern Learning] ACE is configured. Use ace_search MCP tool to find patterns relevant to your task."
+fi
+
+# Return env vars + additional_context
+echo "{\\"env\\": {\\"ACE_SESSION_ID\\": \\"$session_id\\"}, \\"additional_context\\": \\"$context\\"}"
+`;
+	if (forceUpdate || !fs.existsSync(sessionStartPath)) {
+		fs.writeFileSync(sessionStartPath, sessionStartScript, { mode: 0o755 });
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_session_start.sh`);
+	}
+
+	// Session End Hook - Logs session analytics
+	const sessionEndPath = path.join(scriptsDir, 'ace_session_end.sh');
+	const sessionEndScript = `#!/bin/bash
+# ACE Session End Hook - Logs session analytics
+# Input: session_id, reason, duration_ms, is_background_agent, final_status
+# Output: none (fire-and-forget)
+
+input=$(cat)
+ace_dir=".cursor/ace"
+mkdir -p "$ace_dir"
+
+# Count trajectory entries for this session
+mcp_count=$(wc -l < "$ace_dir/mcp_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
+shell_count=$(wc -l < "$ace_dir/shell_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
+edit_count=$(wc -l < "$ace_dir/edit_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
+response_count=$(wc -l < "$ace_dir/response_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
+
+# Append session info + trajectory counts to session log
+session_id=$(echo "$input" | jq -r '.session_id // empty')
+reason=$(echo "$input" | jq -r '.reason // "unknown"')
+duration_ms=$(echo "$input" | jq -r '.duration_ms // 0')
+
+echo "{\\"session_id\\": \\"$session_id\\", \\"reason\\": \\"$reason\\", \\"duration_ms\\": $duration_ms, \\"trajectory\\": {\\"mcp\\": $mcp_count, \\"shell\\": $shell_count, \\"edits\\": $edit_count, \\"responses\\": $response_count}, \\"ended_at\\": \\"$(date -Iseconds)\\"}" >> "$ace_dir/session_log.jsonl"
+
+exit 0
+`;
+	if (forceUpdate || !fs.existsSync(sessionEndPath)) {
+		fs.writeFileSync(sessionEndPath, sessionEndScript, { mode: 0o755 });
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_session_end.sh`);
+	}
+
+	// Pre-Compaction Trajectory Preservation
+	const preCompactPath = path.join(scriptsDir, 'ace_pre_compact.sh');
+	const preCompactScript = `#!/bin/bash
+# ACE Pre-Compact Hook - Preserves trajectory before context compaction
+# Input: trigger, context_usage_percent, context_tokens, message_count, messages_to_compact
+
+input=$(cat)
+ace_dir=".cursor/ace"
+mkdir -p "$ace_dir"
+
+trigger=$(echo "$input" | jq -r '.trigger // "auto"')
+usage_pct=$(echo "$input" | jq -r '.context_usage_percent // 0')
+tokens=$(echo "$input" | jq -r '.context_tokens // 0')
+msg_count=$(echo "$input" | jq -r '.message_count // 0')
+to_compact=$(echo "$input" | jq -r '.messages_to_compact // 0')
+
+# Count current trajectory entries
+mcp_count=$(wc -l < "$ace_dir/mcp_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
+shell_count=$(wc -l < "$ace_dir/shell_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
+edit_count=$(wc -l < "$ace_dir/edit_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
+response_count=$(wc -l < "$ace_dir/response_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
+
+# Save compaction snapshot
+echo "{\\"trigger\\": \\"$trigger\\", \\"context_usage_percent\\": $usage_pct, \\"context_tokens\\": $tokens, \\"message_count\\": $msg_count, \\"messages_to_compact\\": $to_compact, \\"trajectory\\": {\\"mcp\\": $mcp_count, \\"shell\\": $shell_count, \\"edits\\": $edit_count, \\"responses\\": $response_count}, \\"timestamp\\": \\"$(date -Iseconds)\\"}" >> "$ace_dir/compaction_log.jsonl"
+
+# Notify user about compaction with trajectory counts
+msg="Context compacting (\${usage_pct}% used). AI-Trail preserved: MCP:$mcp_count Shell:$shell_count Edits:$edit_count Responses:$response_count"
+echo "{\\"user_message\\": \\"$msg\\"}"
+`;
+	if (forceUpdate || !fs.existsSync(preCompactPath)) {
+		fs.writeFileSync(preCompactPath, preCompactScript, { mode: 0o755 });
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_pre_compact.sh`);
+	}
+
+	// Subagent Start Tracking
+	const subagentStartPath = path.join(scriptsDir, 'ace_subagent_start.sh');
+	const subagentStartScript = `#!/bin/bash
+# ACE Subagent Start Hook - Tracks subagent spawning for AI-Trail
+# Input: subagent_type, prompt, model
+
+input=$(cat)
+ace_dir=".cursor/ace"
+mkdir -p "$ace_dir"
+
+subagent_type=$(echo "$input" | jq -r '.subagent_type // "unknown"')
+model=$(echo "$input" | jq -r '.model // "unknown"')
+prompt_preview=$(echo "$input" | jq -r '.prompt // ""' | head -c 200)
+
+echo "{\\"event\\": \\"subagent_start\\", \\"type\\": \\"$subagent_type\\", \\"model\\": \\"$model\\", \\"prompt_preview\\": \\"$prompt_preview\\", \\"timestamp\\": \\"$(date -Iseconds)\\"}" >> "$ace_dir/mcp_trajectory.jsonl"
+
+# Allow all subagents (no blocking)
+echo "{\\"decision\\": \\"allow\\"}"
+`;
+	if (forceUpdate || !fs.existsSync(subagentStartPath)) {
+		fs.writeFileSync(subagentStartPath, subagentStartScript, { mode: 0o755 });
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_subagent_start.sh`);
+	}
+
+	// Subagent Stop Tracking
+	const subagentStopPath = path.join(scriptsDir, 'ace_subagent_stop.sh');
+	const subagentStopScript = `#!/bin/bash
+# ACE Subagent Stop Hook - Tracks subagent completion for AI-Trail
+# Input: subagent_type, status, result, duration, agent_transcript_path
+
+input=$(cat)
+ace_dir=".cursor/ace"
+mkdir -p "$ace_dir"
+
+subagent_type=$(echo "$input" | jq -r '.subagent_type // "unknown"')
+status=$(echo "$input" | jq -r '.status // "unknown"')
+duration=$(echo "$input" | jq -r '.duration // 0')
+transcript=$(echo "$input" | jq -r '.agent_transcript_path // empty')
+
+echo "{\\"event\\": \\"subagent_stop\\", \\"type\\": \\"$subagent_type\\", \\"status\\": \\"$status\\", \\"duration_ms\\": $duration, \\"has_transcript\\": $([ -n \\"$transcript\\" ] && echo true || echo false), \\"timestamp\\": \\"$(date -Iseconds)\\"}" >> "$ace_dir/mcp_trajectory.jsonl"
+
+# Save subagent transcript path if available
+if [ -n "$transcript" ]; then
+  echo "{\\"subagent_type\\": \\"$subagent_type\\", \\"transcript_path\\": \\"$transcript\\", \\"status\\": \\"$status\\", \\"duration_ms\\": $duration, \\"saved_at\\": \\"$(date -Iseconds)\\"}" >> "$ace_dir/subagent_transcripts.jsonl"
+fi
+
+exit 0
+`;
+	if (forceUpdate || !fs.existsSync(subagentStopPath)) {
+		fs.writeFileSync(subagentStopPath, subagentStopScript, { mode: 0o755 });
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_subagent_stop.sh`);
+	}
+
 	// File Edit Tracking with Domain Detection
 	const editTrackPath = path.join(scriptsDir, 'ace_track_edit.sh');
 	const editTrackScript = `#!/bin/bash
@@ -800,12 +1206,13 @@ exit 0
 	// Stop Hook with Git Context Aggregation
 	const stopHookPath = path.join(scriptsDir, 'ace_stop_hook.sh');
 	const stopHookScript = `#!/bin/bash
-# ACE Stop Hook - Aggregates AI-Trail trajectory with git context
-# Input: status, loop_count
+# ACE Stop Hook - Aggregates AI-Trail trajectory with git context + transcript
+# Input: status, loop_count, transcript_path (from common schema)
 
 input=$(cat)
 status=$(echo "$input" | jq -r '.status // empty')
 loop_count=$(echo "$input" | jq -r '.loop_count // 0')
+transcript_path=$(echo "$input" | jq -r '.transcript_path // empty')
 
 # Only process once on completed tasks
 if [ "$status" = "completed" ] && [ "$loop_count" = "0" ]; then
@@ -820,9 +1227,18 @@ if [ "$status" = "completed" ] && [ "$loop_count" = "0" ]; then
   edit_count=$(wc -l < "$ace_dir/edit_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
   response_count=$(wc -l < "$ace_dir/response_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
 
+  # Save transcript path for ace_learn to use
+  if [ -n "$transcript_path" ]; then
+    echo "{\\"transcript_path\\": \\"$transcript_path\\", \\"saved_at\\": \\"$(date -Iseconds)\\"}" > "$ace_dir/last_transcript.json"
+  fi
+
   # Build summary
   summary="MCP:$mcp_count Shell:$shell_count Edits:$edit_count Responses:$response_count"
-  msg="Session complete. AI-Trail: $summary. Git: $git_branch ($git_hash). Call ace_learn to capture patterns."
+  transcript_note=""
+  if [ -n "$transcript_path" ]; then
+    transcript_note=" Transcript saved for learning."
+  fi
+  msg="Session complete. AI-Trail: $summary. Git: $git_branch ($git_hash).$transcript_note Call ace_learn to capture patterns."
 
   echo "{\\\"followup_message\\\": \\\"$msg\\\"}"
 else
