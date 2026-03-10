@@ -643,6 +643,91 @@ suite('ACE Extension Test Suite', () => {
 	});
 
 	// ============================================
+	// ACE LEARN SLASH COMMAND TESTS (v0.2.53)
+	// ============================================
+
+	test('ace-learn.md should show trajectory as a required array parameter', () => {
+		const workspaceFolders = vscode.workspace.workspaceFolders;
+		if (workspaceFolders && workspaceFolders.length > 0) {
+			const learnPath = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'commands', 'ace-learn.md');
+			if (fs.existsSync(learnPath)) {
+				const content = fs.readFileSync(learnPath, 'utf-8');
+				// trajectory must appear as an array example, not a string
+				assert.ok(
+					content.includes('trajectory: ['),
+					'ace-learn.md should show trajectory as an array (trajectory: [...])'
+				);
+				// Should NOT show trajectory as a plain string parameter
+				assert.ok(
+					!content.match(/trajectory:\s*"[^"]*"/),
+					'ace-learn.md should NOT show trajectory as a string value'
+				);
+			}
+		}
+	});
+
+	test('ace-learn.md should mark trajectory as required/IMPORTANT', () => {
+		const workspaceFolders = vscode.workspace.workspaceFolders;
+		if (workspaceFolders && workspaceFolders.length > 0) {
+			const learnPath = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'commands', 'ace-learn.md');
+			if (fs.existsSync(learnPath)) {
+				const content = fs.readFileSync(learnPath, 'utf-8');
+				// Should mention that parameters are required and trajectory must be an array
+				assert.ok(
+					content.includes('required') || content.includes('IMPORTANT'),
+					'ace-learn.md should mention that parameters are required or IMPORTANT'
+				);
+				assert.ok(
+					content.includes('trajectory') && (content.includes('array') || content.includes('MUST be an array')),
+					'ace-learn.md should specify trajectory must be an array'
+				);
+			}
+		}
+	});
+
+	test('ace-learn.md should show trajectory as array with step strings', () => {
+		const workspaceFolders = vscode.workspace.workspaceFolders;
+		if (workspaceFolders && workspaceFolders.length > 0) {
+			const learnPath = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'commands', 'ace-learn.md');
+			if (fs.existsSync(learnPath)) {
+				const content = fs.readFileSync(learnPath, 'utf-8');
+				// Should show trajectory with array format like ["step 1", "step 2"]
+				assert.ok(
+					content.includes('["') && content.includes('"]'),
+					'ace-learn.md should show trajectory in ["step 1", "step 2"] array format'
+				);
+				// The example should show multiple steps in the array
+				const arrayMatch = content.match(/trajectory:\s*\[([^\]]+)\]/);
+				assert.ok(arrayMatch, 'ace-learn.md should have a trajectory array example');
+				if (arrayMatch) {
+					const arrayContent = arrayMatch[1];
+					const steps = arrayContent.split(',').map(s => s.trim());
+					assert.ok(steps.length >= 2, 'trajectory array example should have at least 2 steps');
+				}
+			}
+		}
+	});
+
+	test('ace-patterns.mdc rules should show trajectory as array format', () => {
+		const workspaceFolders = vscode.workspace.workspaceFolders;
+		if (workspaceFolders && workspaceFolders.length > 0) {
+			const rulesPath = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'rules', 'ace-patterns.mdc');
+			if (fs.existsSync(rulesPath)) {
+				const content = fs.readFileSync(rulesPath, 'utf-8');
+				// Rules should also show trajectory as array format
+				assert.ok(
+					content.includes('trajectory'),
+					'ace-patterns.mdc should mention trajectory parameter'
+				);
+				assert.ok(
+					content.includes('trajectory=[') || content.includes('trajectory: ['),
+					'ace-patterns.mdc should show trajectory as an array (not a string)'
+				);
+			}
+		}
+	});
+
+	// ============================================
 	// STATUS PANEL TESTS
 	// ============================================
 

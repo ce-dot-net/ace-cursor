@@ -5,6 +5,16 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.53] - 2026-03-10
+
+### Fixed
+- **ace_learn crash when trajectory omitted** - Fixed slash command template showing trajectory as string instead of array
+  - Root cause: Windows non-developer user manually triggered `ace_learn` via chat, AI omitted `trajectory` param
+  - `/ace-learn` slash command now clearly shows trajectory as required array: `["step 1", "step 2"]`
+  - Added explicit "IMPORTANT: All 4 parameters are required" notice
+  - Prevents `TypeError: Cannot read properties of undefined (reading 'map')` in `@ace-sdk/mcp`
+- **4 new TDD tests** for slash command trajectory format validation
+
 ## [0.2.52] - 2026-02-09
 
 ### Added
