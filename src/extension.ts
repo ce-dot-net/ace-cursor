@@ -25,6 +25,16 @@ import { getAceClient, clearQuotaWarningTracking, getLastUsageInfo, invalidateCl
 let statusBarItem: vscode.StatusBarItem;
 let extensionContext: vscode.ExtensionContext;
 
+// Output channel for ACE activity visibility
+let aceOutput: vscode.OutputChannel | undefined;
+
+/**
+ * Get the ACE activity output channel (for use by other modules).
+ */
+export function getAceOutputChannel(): vscode.OutputChannel | undefined {
+	return aceOutput;
+}
+
 // Preloaded pattern info for status bar display
 let preloadedPatternCount: number = 0;
 let preloadedDomains: string[] = [];
@@ -66,6 +76,11 @@ async function preloadPatterns(): Promise<void> {
 
 		console.log('[ACE] Preload: fetching analytics via AceClient');
 
+		// Show loading animation in status bar
+		if (statusBarItem) {
+			statusBarItem.text = '$(sync~spin) ACE: Loading patterns...';
+		}
+
 		// Use getStatus() which calls /analytics endpoint and triggers quota callbacks
 		const analytics = await client.getStatus();
 		console.log(`[ACE] Preload: analytics response - total_patterns=${analytics.total_patterns}, total_bullets=${analytics.total_bullets}`);
@@ -102,11 +117,20 @@ async function preloadPatterns(): Promise<void> {
 			console.log('[ACE] Pattern cache write failed (non-fatal):', cacheErr instanceof Error ? cacheErr.message : String(cacheErr));
 		}
 
-		// Update status bar with pattern count
+		// Update status bar with pattern count - show brief success state
 		if (statusBarItem && preloadedPatternCount > 0) {
-			statusBarItem.text = `$(book) ACE: ${preloadedPatternCount} patterns`;
+			statusBarItem.text = `$(check) ACE: ${preloadedPatternCount} patterns loaded`;
 			statusBarItem.tooltip = `ACE Pattern Learning\n${preloadedPatternCount} patterns in playbook\nDomains: ${preloadedDomains.slice(0, 3).join(', ')}${preloadedDomains.length > 3 ? ` (+${preloadedDomains.length - 3} more)` : ''}\n\nClick for status`;
+			aceOutput?.appendLine(`[${new Date().toLocaleTimeString()}] Loaded ${preloadedPatternCount} patterns from ${preloadedDomains.length} domains`);
+			// Revert to standard format after 3 seconds
+			setTimeout(() => {
+				if (statusBarItem) {
+					statusBarItem.text = `$(book) ACE: ${preloadedPatternCount} patterns`;
+				}
+			}, 3000);
 		}
+
+		aceOutput?.appendLine(`[${new Date().toLocaleTimeString()}] ACE activated - monitoring ${preloadedPatternCount} patterns`);
 
 		// Check for quota usage info from the client
 		const usageInfo = getLastUsageInfo();
@@ -217,7 +241,12 @@ export async function activate(context: vscode.ExtensionContext) {
 		return originalEmitWarning.call(process, warning, ...args);
 	};
 
-	// 1. Create status bar item FIRST so it always shows
+	// 1. Create output channel for ACE activity visibility
+	aceOutput = vscode.window.createOutputChannel('ACE Activity');
+	context.subscriptions.push(aceOutput);
+	aceOutput.appendLine(`[${new Date().toLocaleTimeString()}] ACE extension starting...`);
+
+	// 2. Create status bar item so it always shows
 	statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
 	statusBarItem.text = '$(sync~spin) ACE';  // Initial text while loading
 	statusBarItem.command = 'ace.status';
@@ -249,9 +278,37 @@ export async function activate(context: vscode.ExtensionContext) {
 			console.log('[ACE] Background preload failed (non-fatal):', err);
 		});
 
+		// 8. Watch trajectory files for hook activity indication
+		const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		if (workspaceRoot) {
+			const trajectoryPattern = new vscode.RelativePattern(workspaceRoot, '.cursor/ace/*.jsonl');
+			const trajectoryWatcher = vscode.workspace.createFileSystemWatcher(trajectoryPattern);
+
+			let activityTimeout: NodeJS.Timeout | undefined;
+			const showActivity = () => {
+				if (!statusBarItem) { return; }
+				const currentText = statusBarItem.text;
+				// Only flash if not already showing a transient state
+				if (!currentText.includes('spin') && !currentText.includes('check')) {
+					statusBarItem.text = currentText.replace('$(book)', '$(zap)');
+					aceOutput?.appendLine(`[${new Date().toLocaleTimeString()}] Hook activity detected`);
+					clearTimeout(activityTimeout);
+					activityTimeout = setTimeout(() => {
+						if (statusBarItem && statusBarItem.text.includes('$(zap)')) {
+							statusBarItem.text = statusBarItem.text.replace('$(zap)', '$(book)');
+						}
+					}, 1500);
+				}
+			};
+
+			trajectoryWatcher.onDidChange(showActivity);
+			trajectoryWatcher.onDidCreate(showActivity);
+			context.subscriptions.push(trajectoryWatcher);
+		}
+
 		console.log('[ACE] Extension activated successfully');
 
-		// 7. Check workspace version and prompt for update if needed
+		// 9. Check workspace version and prompt for update if needed
 		await checkWorkspaceVersionAndPrompt(context);
 	} catch (error) {
 		console.error('[ACE] Activation error:', error);
@@ -357,7 +414,15 @@ async function checkWorkspaceVersionAndPrompt(context: vscode.ExtensionContext):
 			// FIRST INSTALL: Auto-initialize silently
 			console.log(`[ACE] First install detected${folderName}, auto-initializing...`);
 			await initializeWorkspaceForFolder(folder, extensionVersion, false);
-			vscode.window.showInformationMessage(`ACE initialized${folderName}`);
+			aceOutput?.appendLine(`[${new Date().toLocaleTimeString()}] Workspace initialized${folderName}`);
+			vscode.window.showInformationMessage(
+				`ACE: Workspace initialized with ${preloadedPatternCount} patterns. Activity visible in Output > "ACE Activity"`,
+				'Show Activity Log'
+			).then(selection => {
+				if (selection === 'Show Activity Log') {
+					aceOutput?.show();
+				}
+			});
 			continue;
 		}
 
@@ -485,7 +550,8 @@ async function createCursorHooks(folder?: vscode.WorkspaceFolder, forceUpdate: b
 			}],
 			// Stop hook with git context aggregation + transcript_path
 			stop: [{
-				command: `${scriptPrefix}.cursor/scripts/ace_stop_hook${scriptExt}`
+				command: `${scriptPrefix}.cursor/scripts/ace_stop_hook${scriptExt}`,
+				loop_limit: null
 			}],
 			// Pre-compaction trajectory preservation
 			preCompact: [{
@@ -493,10 +559,49 @@ async function createCursorHooks(folder?: vscode.WorkspaceFolder, forceUpdate: b
 			}],
 			// Subagent lifecycle tracking
 			subagentStart: [{
-				command: `${scriptPrefix}.cursor/scripts/ace_subagent_start${scriptExt}`
+				command: `${scriptPrefix}.cursor/scripts/ace_subagent_start${scriptExt}`,
+				matcher: ".*"
 			}],
 			subagentStop: [{
 				command: `${scriptPrefix}.cursor/scripts/ace_subagent_stop${scriptExt}`
+			}],
+			// Pre/Post tool use tracking
+			preToolUse: [{
+				command: `${scriptPrefix}.cursor/scripts/ace_pre_tool_use${scriptExt}`,
+				matcher: ".*"
+			}],
+			postToolUse: [{
+				command: `${scriptPrefix}.cursor/scripts/ace_post_tool_use${scriptExt}`
+			}],
+			postToolUseFailure: [{
+				command: `${scriptPrefix}.cursor/scripts/ace_post_tool_use_failure${scriptExt}`
+			}],
+			// Pre-execution gates
+			beforeShellExecution: [{
+				command: `${scriptPrefix}.cursor/scripts/ace_before_shell${scriptExt}`,
+				matcher: ".*"
+			}],
+			beforeMCPExecution: [{
+				command: `${scriptPrefix}.cursor/scripts/ace_before_mcp${scriptExt}`
+			}],
+			beforeReadFile: [{
+				command: `${scriptPrefix}.cursor/scripts/ace_before_read_file${scriptExt}`
+			}],
+			// Prompt interception
+			beforeSubmitPrompt: [{
+				command: `${scriptPrefix}.cursor/scripts/ace_before_submit_prompt${scriptExt}`,
+				timeout: 5000
+			}],
+			// Agent thought capture
+			afterAgentThought: [{
+				command: `${scriptPrefix}.cursor/scripts/ace_after_agent_thought${scriptExt}`
+			}],
+			// Tab file hooks
+			beforeTabFileRead: [{
+				command: `${scriptPrefix}.cursor/scripts/ace_before_tab_file_read${scriptExt}`
+			}],
+			afterTabFileEdit: [{
+				command: `${scriptPrefix}.cursor/scripts/ace_after_tab_file_edit${scriptExt}`
 			}]
 		}
 	};
@@ -519,7 +624,17 @@ async function createCursorHooks(folder?: vscode.WorkspaceFolder, forceUpdate: b
 			                    existingHooks?.hooks?.sessionEnd &&
 			                    existingHooks?.hooks?.preCompact &&
 			                    existingHooks?.hooks?.subagentStart &&
-			                    existingHooks?.hooks?.subagentStop;
+			                    existingHooks?.hooks?.subagentStop &&
+			                    existingHooks?.hooks?.preToolUse &&
+			                    existingHooks?.hooks?.postToolUse &&
+			                    existingHooks?.hooks?.postToolUseFailure &&
+			                    existingHooks?.hooks?.beforeShellExecution &&
+			                    existingHooks?.hooks?.beforeMCPExecution &&
+			                    existingHooks?.hooks?.beforeReadFile &&
+			                    existingHooks?.hooks?.beforeSubmitPrompt &&
+			                    existingHooks?.hooks?.afterAgentThought &&
+			                    existingHooks?.hooks?.beforeTabFileRead &&
+			                    existingHooks?.hooks?.afterTabFileEdit;
 			if (!hasAllHooks) {
 				shouldWriteHooks = true;
 				console.log('[ACE] Updating hooks.json with AI-Trail hooks');
@@ -928,6 +1043,241 @@ if ($status -eq "completed" -and $loopCount -eq 0) {
 	// Always update stop hook to get git context feature
 	fs.writeFileSync(stopHookPath, stopHookScript);
 	console.log('[ACE] Updated ace_stop_hook.ps1 with git context');
+
+	// Pre-Tool Use Gate
+	const preToolUsePath = path.join(scriptsDir, 'ace_pre_tool_use.ps1');
+	const preToolUseScript = `# ACE Pre-Tool Use Hook - Gates tool execution
+# Input: tool_type, tool_name, tool_input
+
+$inputJson = [Console]::In.ReadToEnd()
+$input = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
+
+$aceDir = ".cursor\\ace"
+if (-not (Test-Path $aceDir)) {
+    New-Item -ItemType Directory -Path $aceDir -Force | Out-Null
+}
+
+$toolType = if ($input.tool_type) { $input.tool_type } else { "unknown" }
+$toolName = if ($input.tool_name) { $input.tool_name } else { "unknown" }
+$toolInput = if ($input.tool_input) { ($input.tool_input | ConvertTo-Json -Compress).Substring(0, [Math]::Min(500, ($input.tool_input | ConvertTo-Json -Compress).Length)) } else { "{}" }
+
+$entry = @{event="pre_tool_use"; tool_type=$toolType; tool_name=$toolName; tool_input=$toolInput; timestamp=(Get-Date -Format "o")} | ConvertTo-Json -Compress
+$entry | Out-File -FilePath "$aceDir\\mcp_trajectory.jsonl" -Encoding utf8 -Append
+
+Write-Output '{"decision": "allow"}'
+`;
+	if (forceUpdate || !fs.existsSync(preToolUsePath)) {
+		fs.writeFileSync(preToolUsePath, preToolUseScript);
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_pre_tool_use.ps1`);
+	}
+
+	// Post-Tool Use Tracking
+	const postToolUsePath = path.join(scriptsDir, 'ace_post_tool_use.ps1');
+	const postToolUseScript = `# ACE Post-Tool Use Hook - Generic post-tool tracking
+# Input: tool_type, tool_name, tool_input, tool_output, duration
+
+$inputJson = [Console]::In.ReadToEnd()
+$input = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
+
+$aceDir = ".cursor\\ace"
+if (-not (Test-Path $aceDir)) {
+    New-Item -ItemType Directory -Path $aceDir -Force | Out-Null
+}
+
+$toolType = if ($input.tool_type) { $input.tool_type } else { "unknown" }
+$toolName = if ($input.tool_name) { $input.tool_name } else { "unknown" }
+$toolOutput = if ($input.tool_output) { $input.tool_output.Substring(0, [Math]::Min(500, $input.tool_output.Length)) } else { "" }
+$duration = if ($input.duration) { $input.duration } else { 0 }
+
+$entry = @{event="post_tool_use"; tool_type=$toolType; tool_name=$toolName; tool_output=$toolOutput; duration=$duration; timestamp=(Get-Date -Format "o")} | ConvertTo-Json -Compress
+$entry | Out-File -FilePath "$aceDir\\mcp_trajectory.jsonl" -Encoding utf8 -Append
+
+Write-Output '{}'
+`;
+	if (forceUpdate || !fs.existsSync(postToolUsePath)) {
+		fs.writeFileSync(postToolUsePath, postToolUseScript);
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_post_tool_use.ps1`);
+	}
+
+	// Post-Tool Use Failure Tracking
+	const postToolUseFailurePath = path.join(scriptsDir, 'ace_post_tool_use_failure.ps1');
+	const postToolUseFailureScript = `# ACE Post-Tool Use Failure Hook - Tracks tool failures
+# Input: tool_type, tool_name, error_type, error_message
+
+$inputJson = [Console]::In.ReadToEnd()
+$input = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
+
+$aceDir = ".cursor\\ace"
+if (-not (Test-Path $aceDir)) {
+    New-Item -ItemType Directory -Path $aceDir -Force | Out-Null
+}
+
+$toolType = if ($input.tool_type) { $input.tool_type } else { "unknown" }
+$toolName = if ($input.tool_name) { $input.tool_name } else { "unknown" }
+$errorType = if ($input.error_type) { $input.error_type } else { "unknown" }
+$errorMessage = if ($input.error_message) { $input.error_message.Substring(0, [Math]::Min(500, $input.error_message.Length)) } else { "" }
+
+$entry = @{event="tool_failure"; tool_type=$toolType; tool_name=$toolName; error_type=$errorType; error_message=$errorMessage; timestamp=(Get-Date -Format "o")} | ConvertTo-Json -Compress
+$entry | Out-File -FilePath "$aceDir\\mcp_trajectory.jsonl" -Encoding utf8 -Append
+
+Write-Output '{}'
+`;
+	if (forceUpdate || !fs.existsSync(postToolUseFailurePath)) {
+		fs.writeFileSync(postToolUseFailurePath, postToolUseFailureScript);
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_post_tool_use_failure.ps1`);
+	}
+
+	// Before Shell Execution Gate
+	const beforeShellPath = path.join(scriptsDir, 'ace_before_shell.ps1');
+	const beforeShellScript = `# ACE Before Shell Hook - Gates shell command execution
+# Input: command
+
+$inputJson = [Console]::In.ReadToEnd()
+$input = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
+
+$aceDir = ".cursor\\ace"
+if (-not (Test-Path $aceDir)) {
+    New-Item -ItemType Directory -Path $aceDir -Force | Out-Null
+}
+
+$command = if ($input.command) { $input.command } else { "" }
+
+$entry = @{event="before_shell"; command=$command; timestamp=(Get-Date -Format "o")} | ConvertTo-Json -Compress
+$entry | Out-File -FilePath "$aceDir\\shell_trajectory.jsonl" -Encoding utf8 -Append
+
+Write-Output '{"decision": "allow"}'
+`;
+	if (forceUpdate || !fs.existsSync(beforeShellPath)) {
+		fs.writeFileSync(beforeShellPath, beforeShellScript);
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_before_shell.ps1`);
+	}
+
+	// Before MCP Execution Gate
+	const beforeMcpPath = path.join(scriptsDir, 'ace_before_mcp.ps1');
+	const beforeMcpScript = `# ACE Before MCP Hook - Gates MCP tool execution
+# Input: tool_name, tool_input
+
+$inputJson = [Console]::In.ReadToEnd()
+$input = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
+
+$aceDir = ".cursor\\ace"
+if (-not (Test-Path $aceDir)) {
+    New-Item -ItemType Directory -Path $aceDir -Force | Out-Null
+}
+
+$toolName = if ($input.tool_name) { $input.tool_name } else { "unknown" }
+$toolInput = if ($input.tool_input) { ($input.tool_input | ConvertTo-Json -Compress).Substring(0, [Math]::Min(500, ($input.tool_input | ConvertTo-Json -Compress).Length)) } else { "{}" }
+
+$entry = @{event="before_mcp"; tool_name=$toolName; tool_input=$toolInput; timestamp=(Get-Date -Format "o")} | ConvertTo-Json -Compress
+$entry | Out-File -FilePath "$aceDir\\mcp_trajectory.jsonl" -Encoding utf8 -Append
+
+Write-Output '{"decision": "allow"}'
+`;
+	if (forceUpdate || !fs.existsSync(beforeMcpPath)) {
+		fs.writeFileSync(beforeMcpPath, beforeMcpScript);
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_before_mcp.ps1`);
+	}
+
+	// Before Read File Gate (minimal - fires frequently)
+	const beforeReadFilePath = path.join(scriptsDir, 'ace_before_read_file.ps1');
+	const beforeReadFileScript = `# ACE Before Read File Hook - Minimal gate (fires frequently)
+Write-Output '{"decision": "allow"}'
+`;
+	if (forceUpdate || !fs.existsSync(beforeReadFilePath)) {
+		fs.writeFileSync(beforeReadFilePath, beforeReadFileScript);
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_before_read_file.ps1`);
+	}
+
+	// Before Submit Prompt - Pattern context injection
+	const beforeSubmitPromptPath = path.join(scriptsDir, 'ace_before_submit_prompt.ps1');
+	const beforeSubmitPromptScript = `# ACE Before Submit Prompt Hook - Injects pattern context
+# Input: prompt_text
+
+$inputJson = [Console]::In.ReadToEnd()
+$input = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
+
+$aceDir = ".cursor\\ace"
+$cacheFile = "$aceDir\\pattern_cache.json"
+
+if (Test-Path $cacheFile) {
+    try {
+        $cache = Get-Content $cacheFile | ConvertFrom-Json
+        $patternCount = $cache.patternCount
+        if ($patternCount -gt 0) {
+            Write-Output "{\`"additional_context\`": \`"[ACE] $patternCount patterns available. Use ace_search before starting.\`"}"
+        } else {
+            Write-Output '{}'
+        }
+    } catch {
+        Write-Output '{}'
+    }
+} else {
+    Write-Output '{}'
+}
+`;
+	if (forceUpdate || !fs.existsSync(beforeSubmitPromptPath)) {
+		fs.writeFileSync(beforeSubmitPromptPath, beforeSubmitPromptScript);
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_before_submit_prompt.ps1`);
+	}
+
+	// After Agent Thought - Thinking capture
+	const afterAgentThoughtPath = path.join(scriptsDir, 'ace_after_agent_thought.ps1');
+	const afterAgentThoughtScript = `# ACE After Agent Thought Hook - Captures agent thinking
+# Input: text, duration_ms
+
+$inputJson = [Console]::In.ReadToEnd()
+$input = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
+
+$aceDir = ".cursor\\ace"
+if (-not (Test-Path $aceDir)) {
+    New-Item -ItemType Directory -Path $aceDir -Force | Out-Null
+}
+
+$text = if ($input.text) { $input.text.Substring(0, [Math]::Min(300, $input.text.Length)) } else { "" }
+$durationMs = if ($input.duration_ms) { $input.duration_ms } else { 0 }
+
+$entry = @{event="agent_thought"; text=$text; duration_ms=$durationMs; timestamp=(Get-Date -Format "o")} | ConvertTo-Json -Compress
+$entry | Out-File -FilePath "$aceDir\\response_trajectory.jsonl" -Encoding utf8 -Append
+
+Write-Output '{}'
+`;
+	if (forceUpdate || !fs.existsSync(afterAgentThoughtPath)) {
+		fs.writeFileSync(afterAgentThoughtPath, afterAgentThoughtScript);
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_after_agent_thought.ps1`);
+	}
+
+	// Before Tab File Read (minimal - fires very frequently)
+	const beforeTabFileReadPath = path.join(scriptsDir, 'ace_before_tab_file_read.ps1');
+	const beforeTabFileReadScript = `# ACE Before Tab File Read Hook - Minimal gate (fires very frequently)
+Write-Output '{"decision": "allow"}'
+`;
+	if (forceUpdate || !fs.existsSync(beforeTabFileReadPath)) {
+		fs.writeFileSync(beforeTabFileReadPath, beforeTabFileReadScript);
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_before_tab_file_read.ps1`);
+	}
+
+	// After Tab File Edit - Edit tracking
+	const afterTabFileEditPath = path.join(scriptsDir, 'ace_after_tab_file_edit.ps1');
+	const afterTabFileEditScript = `# ACE After Tab File Edit Hook - Tracks tab edits
+# Input: file_path
+
+$inputJson = [Console]::In.ReadToEnd()
+$input = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
+
+$aceDir = ".cursor\\ace"
+if (-not (Test-Path $aceDir)) {
+    New-Item -ItemType Directory -Path $aceDir -Force | Out-Null
+}
+
+$filePath = if ($input.file_path) { $input.file_path } else { "" }
+
+$entry = @{event="tab_edit"; file_path=$filePath; timestamp=(Get-Date -Format "o")} | ConvertTo-Json -Compress
+$entry | Out-File -FilePath "$aceDir\\edit_trajectory.jsonl" -Encoding utf8 -Append
+`;
+	if (forceUpdate || !fs.existsSync(afterTabFileEditPath)) {
+		fs.writeFileSync(afterTabFileEditPath, afterTabFileEditScript);
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_after_tab_file_edit.ps1`);
+	}
 }
 
 /**
@@ -1248,6 +1598,209 @@ fi
 	// Always update stop hook to get git context feature
 	fs.writeFileSync(stopHookPath, stopHookScript, { mode: 0o755 });
 	console.log('[ACE] Updated ace_stop_hook.sh with git context');
+
+	// Pre-Tool Use Gate
+	const preToolUsePath = path.join(scriptsDir, 'ace_pre_tool_use.sh');
+	const preToolUseScript = `#!/bin/bash
+# ACE Pre-Tool Use Hook - Gates tool execution
+# Input: tool_type, tool_name, tool_input
+
+input=$(cat)
+ace_dir=".cursor/ace"
+mkdir -p "$ace_dir"
+
+tool_type=$(echo "$input" | jq -r '.tool_type // "unknown"')
+tool_name=$(echo "$input" | jq -r '.tool_name // "unknown"')
+tool_input=$(echo "$input" | jq -r '.tool_input // "{}"' | head -c 500)
+
+echo "{\\"event\\": \\"pre_tool_use\\", \\"tool_type\\": \\"$tool_type\\", \\"tool_name\\": \\"$tool_name\\", \\"tool_input\\": \\"$tool_input\\", \\"timestamp\\": \\"$(date -Iseconds)\\"}" >> "$ace_dir/mcp_trajectory.jsonl"
+
+echo '{"decision": "allow"}'
+`;
+	if (forceUpdate || !fs.existsSync(preToolUsePath)) {
+		fs.writeFileSync(preToolUsePath, preToolUseScript, { mode: 0o755 });
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_pre_tool_use.sh`);
+	}
+
+	// Post-Tool Use Tracking
+	const postToolUsePath = path.join(scriptsDir, 'ace_post_tool_use.sh');
+	const postToolUseScript = `#!/bin/bash
+# ACE Post-Tool Use Hook - Generic post-tool tracking
+# Input: tool_type, tool_name, tool_input, tool_output, duration
+
+input=$(cat)
+ace_dir=".cursor/ace"
+mkdir -p "$ace_dir"
+
+tool_type=$(echo "$input" | jq -r '.tool_type // "unknown"')
+tool_name=$(echo "$input" | jq -r '.tool_name // "unknown"')
+tool_input=$(echo "$input" | jq -r '.tool_input // "{}"' | head -c 500)
+tool_output=$(echo "$input" | jq -r '.tool_output // ""' | head -c 500)
+duration=$(echo "$input" | jq -r '.duration // 0')
+
+echo "{\\"event\\": \\"post_tool_use\\", \\"tool_type\\": \\"$tool_type\\", \\"tool_name\\": \\"$tool_name\\", \\"tool_input\\": \\"$tool_input\\", \\"tool_output\\": \\"$tool_output\\", \\"duration\\": $duration, \\"timestamp\\": \\"$(date -Iseconds)\\"}" >> "$ace_dir/mcp_trajectory.jsonl"
+
+echo '{}'
+`;
+	if (forceUpdate || !fs.existsSync(postToolUsePath)) {
+		fs.writeFileSync(postToolUsePath, postToolUseScript, { mode: 0o755 });
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_post_tool_use.sh`);
+	}
+
+	// Post-Tool Use Failure Tracking
+	const postToolUseFailurePath = path.join(scriptsDir, 'ace_post_tool_use_failure.sh');
+	const postToolUseFailureScript = `#!/bin/bash
+# ACE Post-Tool Use Failure Hook - Tracks tool failures
+# Input: tool_type, tool_name, error_type, error_message
+
+input=$(cat)
+ace_dir=".cursor/ace"
+mkdir -p "$ace_dir"
+
+tool_type=$(echo "$input" | jq -r '.tool_type // "unknown"')
+tool_name=$(echo "$input" | jq -r '.tool_name // "unknown"')
+error_type=$(echo "$input" | jq -r '.error_type // "unknown"')
+error_message=$(echo "$input" | jq -r '.error_message // ""' | head -c 500)
+
+echo "{\\"event\\": \\"tool_failure\\", \\"tool_type\\": \\"$tool_type\\", \\"tool_name\\": \\"$tool_name\\", \\"error_type\\": \\"$error_type\\", \\"error_message\\": \\"$error_message\\", \\"timestamp\\": \\"$(date -Iseconds)\\"}" >> "$ace_dir/mcp_trajectory.jsonl"
+
+echo '{}'
+`;
+	if (forceUpdate || !fs.existsSync(postToolUseFailurePath)) {
+		fs.writeFileSync(postToolUseFailurePath, postToolUseFailureScript, { mode: 0o755 });
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_post_tool_use_failure.sh`);
+	}
+
+	// Before Shell Execution Gate
+	const beforeShellPath = path.join(scriptsDir, 'ace_before_shell.sh');
+	const beforeShellScript = `#!/bin/bash
+# ACE Before Shell Hook - Gates shell command execution
+# Input: command
+
+input=$(cat)
+ace_dir=".cursor/ace"
+mkdir -p "$ace_dir"
+
+command=$(echo "$input" | jq -r '.command // ""')
+
+echo "{\\"event\\": \\"before_shell\\", \\"command\\": \\"$command\\", \\"timestamp\\": \\"$(date -Iseconds)\\"}" >> "$ace_dir/shell_trajectory.jsonl"
+
+echo '{"decision": "allow"}'
+`;
+	if (forceUpdate || !fs.existsSync(beforeShellPath)) {
+		fs.writeFileSync(beforeShellPath, beforeShellScript, { mode: 0o755 });
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_before_shell.sh`);
+	}
+
+	// Before MCP Execution Gate
+	const beforeMcpPath = path.join(scriptsDir, 'ace_before_mcp.sh');
+	const beforeMcpScript = `#!/bin/bash
+# ACE Before MCP Hook - Gates MCP tool execution
+# Input: tool_name, tool_input
+
+input=$(cat)
+ace_dir=".cursor/ace"
+mkdir -p "$ace_dir"
+
+tool_name=$(echo "$input" | jq -r '.tool_name // "unknown"')
+tool_input=$(echo "$input" | jq -r '.tool_input // "{}"' | head -c 500)
+
+echo "{\\"event\\": \\"before_mcp\\", \\"tool_name\\": \\"$tool_name\\", \\"tool_input\\": \\"$tool_input\\", \\"timestamp\\": \\"$(date -Iseconds)\\"}" >> "$ace_dir/mcp_trajectory.jsonl"
+
+echo '{"decision": "allow"}'
+`;
+	if (forceUpdate || !fs.existsSync(beforeMcpPath)) {
+		fs.writeFileSync(beforeMcpPath, beforeMcpScript, { mode: 0o755 });
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_before_mcp.sh`);
+	}
+
+	// Before Read File Gate (minimal - fires frequently)
+	const beforeReadFilePath = path.join(scriptsDir, 'ace_before_read_file.sh');
+	const beforeReadFileScript = `#!/bin/bash
+# ACE Before Read File Hook - Minimal gate (fires frequently)
+echo '{"decision": "allow"}'
+`;
+	if (forceUpdate || !fs.existsSync(beforeReadFilePath)) {
+		fs.writeFileSync(beforeReadFilePath, beforeReadFileScript, { mode: 0o755 });
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_before_read_file.sh`);
+	}
+
+	// Before Submit Prompt - Pattern context injection
+	const beforeSubmitPromptPath = path.join(scriptsDir, 'ace_before_submit_prompt.sh');
+	const beforeSubmitPromptScript = `#!/bin/bash
+# ACE Before Submit Prompt Hook - Injects pattern context
+# Input: prompt_text
+
+input=$(cat)
+ace_dir=".cursor/ace"
+
+if [ -f "$ace_dir/pattern_cache.json" ]; then
+  pattern_count=$(jq -r '.patternCount // 0' "$ace_dir/pattern_cache.json" 2>/dev/null || echo "0")
+  if [ "$pattern_count" -gt 0 ] 2>/dev/null; then
+    echo "{\\"additional_context\\": \\"[ACE] $pattern_count patterns available. Use ace_search before starting.\\"}"
+  else
+    echo '{}'
+  fi
+else
+  echo '{}'
+fi
+`;
+	if (forceUpdate || !fs.existsSync(beforeSubmitPromptPath)) {
+		fs.writeFileSync(beforeSubmitPromptPath, beforeSubmitPromptScript, { mode: 0o755 });
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_before_submit_prompt.sh`);
+	}
+
+	// After Agent Thought - Thinking capture
+	const afterAgentThoughtPath = path.join(scriptsDir, 'ace_after_agent_thought.sh');
+	const afterAgentThoughtScript = `#!/bin/bash
+# ACE After Agent Thought Hook - Captures agent thinking
+# Input: text, duration_ms
+
+input=$(cat)
+ace_dir=".cursor/ace"
+mkdir -p "$ace_dir"
+
+text=$(echo "$input" | jq -r '.text // ""' | head -c 300)
+duration_ms=$(echo "$input" | jq -r '.duration_ms // 0')
+
+echo "{\\"event\\": \\"agent_thought\\", \\"text\\": \\"$text\\", \\"duration_ms\\": $duration_ms, \\"timestamp\\": \\"$(date -Iseconds)\\"}" >> "$ace_dir/response_trajectory.jsonl"
+
+echo '{}'
+`;
+	if (forceUpdate || !fs.existsSync(afterAgentThoughtPath)) {
+		fs.writeFileSync(afterAgentThoughtPath, afterAgentThoughtScript, { mode: 0o755 });
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_after_agent_thought.sh`);
+	}
+
+	// Before Tab File Read (minimal - fires very frequently)
+	const beforeTabFileReadPath = path.join(scriptsDir, 'ace_before_tab_file_read.sh');
+	const beforeTabFileReadScript = `#!/bin/bash
+# ACE Before Tab File Read Hook - Minimal gate (fires very frequently)
+echo '{"decision": "allow"}'
+`;
+	if (forceUpdate || !fs.existsSync(beforeTabFileReadPath)) {
+		fs.writeFileSync(beforeTabFileReadPath, beforeTabFileReadScript, { mode: 0o755 });
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_before_tab_file_read.sh`);
+	}
+
+	// After Tab File Edit - Edit tracking
+	const afterTabFileEditPath = path.join(scriptsDir, 'ace_after_tab_file_edit.sh');
+	const afterTabFileEditScript = `#!/bin/bash
+# ACE After Tab File Edit Hook - Tracks tab edits
+# Input: file_path
+
+input=$(cat)
+ace_dir=".cursor/ace"
+mkdir -p "$ace_dir"
+
+file_path=$(echo "$input" | jq -r '.file_path // ""')
+
+echo "{\\"event\\": \\"tab_edit\\", \\"file_path\\": \\"$file_path\\", \\"timestamp\\": \\"$(date -Iseconds)\\"}" >> "$ace_dir/edit_trajectory.jsonl"
+`;
+	if (forceUpdate || !fs.existsSync(afterTabFileEditPath)) {
+		fs.writeFileSync(afterTabFileEditPath, afterTabFileEditScript, { mode: 0o755 });
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_after_tab_file_edit.sh`);
+	}
 }
 
 /**

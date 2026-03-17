@@ -5,6 +5,40 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.54] - 2026-03-17
+
+### Added
+- **11 new Cursor hooks** — Full coverage of all Cursor hook types (20 total)
+  - `preToolUse` — Generic pre-tool gate with `matcher` support (allow/deny any tool)
+  - `postToolUse` — Generic post-tool capture with duration, tool output
+  - `postToolUseFailure` — Tool failure tracking with error type/message
+  - `beforeShellExecution` — Shell command gate with `matcher` support
+  - `beforeMCPExecution` — MCP tool call gate
+  - `beforeReadFile` — File read access control (minimal, no trajectory)
+  - `beforeSubmitPrompt` — Prompt interception with pattern context injection
+  - `afterAgentThought` — Reasoning/thinking text capture with duration
+  - `beforeTabFileRead` — Tab completion file access (ultra-minimal)
+  - `afterTabFileEdit` — Tab inline edit tracking
+- **New hooks.json features**
+  - `matcher: ".*"` on `preToolUse`, `beforeShellExecution`, `subagentStart`
+  - `timeout: 5000` on `beforeSubmitPrompt`
+  - `loop_limit: null` on `stop` (unlimited follow-ups)
+- **ACE Activity visibility** — Addresses user feedback "no feedback whether ACE is working"
+  - Output channel "ACE Activity" with timestamped activity logs
+  - Status bar animation: `$(sync~spin) Loading...` → `$(check) N patterns loaded` → `$(book) N patterns`
+  - Hook activity indicator: `$(zap)` flash on trajectory file changes (debounced)
+  - First-run welcome notification with "Show Activity Log" button
+- **103 new tests** (257 total) across 2 new test files
+  - `new-hooks.test.ts` — hooks.json completeness, script existence, content validation, output format
+  - `activity-notifications.test.ts` — output channel, status bar states, debounced activity indicator
+
+### Technical
+- All new hooks have both Unix (.sh) and Windows (.ps1) scripts
+- Tab hooks kept ultra-minimal (no trajectory writes) for performance
+- `beforeSubmitPrompt` injects ACE pattern context from `pattern_cache.json`
+- File watcher on `.cursor/ace/*.jsonl` for real-time activity detection
+- `hasAllHooks` check now validates all 20 hooks
+
 ## [0.2.53] - 2026-03-10
 
 ### Fixed
