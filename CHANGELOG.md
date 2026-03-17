@@ -5,6 +5,16 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.55] - 2026-03-17
+
+### Added
+- **E2E hook script tests** — 49 tests that actually execute `.sh` and `.ps1` scripts
+  - Unix: Decision gates (5 hooks × 3 scenarios), trajectory recording (4 hooks + append), pattern cache injection, tab hook zero-side-effects, performance validation
+  - Windows/PowerShell: Full parity via `pwsh` — decision gates, trajectory recording, cache injection, tab hooks
+  - Cross-platform: hooks.json round-trip, forceUpdate detection, file permissions
+  - Full workflow simulation: pre→post lifecycle, pre→failure flow, multi-hook sessions
+- Total test count: **306 passing** (257 unit + 49 E2E)
+
 ## [0.2.54] - 2026-03-17
 
 ### Added
