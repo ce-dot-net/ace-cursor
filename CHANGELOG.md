@@ -5,6 +5,13 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.57] - 2026-03-18
+
+### Fixed
+- **`beforeSubmitPrompt` hook output schema** — Changed from unsupported `{"additional_context": "..."}` to valid `{"continue": true}`. Cursor's `beforeSubmitPrompt` only accepts `continue` and `user_message` fields; `additional_context` is only valid for `sessionStart`. This was the root cause of `[HOOKS] Failed to parse JSON response from hook 2` errors.
+- **Session cleanup** — `sessionStart` hook now clears `ace-relevance.jsonl` and `ace-review-result.json` from previous sessions, preventing stale data accumulation.
+- Pattern context injection remains via `sessionStart` hook (which correctly uses `additional_context`); `beforeSubmitPrompt` now only handles relevance logging silently.
+
 ## [0.2.56] - 2026-03-18
 
 ### Added

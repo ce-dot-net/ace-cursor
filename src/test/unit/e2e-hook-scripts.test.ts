@@ -109,13 +109,12 @@ if [ -f "$cache_file" ]; then
   pattern_count=$(jq -r '.patternCount // 0' "$cache_file" 2>/dev/null || echo "0")
   if [ "$pattern_count" -gt 0 ] 2>/dev/null; then
     domains=$(jq -r '.domains // [] | join(", ")' "$cache_file" 2>/dev/null || echo "")
-    context="[ACE] $pattern_count patterns available. Use ace_search to retrieve relevant patterns."
-    echo "{\\"additional_context\\": \\"$context\\"}"
+    echo '{"continue": true}'
     exit 0
   fi
 fi
 
-echo '{}'
+echo '{"continue": true}'
 `, { mode: 0o755 });
 
 	fs.writeFileSync(path.join(scriptsDir, 'ace_after_agent_thought.sh'),
@@ -158,14 +157,13 @@ if (Test-Path $cacheFile) {
         $cache = Get-Content $cacheFile | ConvertFrom-Json
         $patternCount = $cache.patternCount
         if ($patternCount -gt 0) {
-            $context = "[ACE] $patternCount patterns available. Use ace_search to retrieve relevant patterns."
-            Write-Output "{\`"additional_context\`": \`"$context\`"}"
+            Write-Output '{"continue": true}'
             exit 0
         }
     } catch {}
 }
 
-Write-Output '{}'
+Write-Output '{"continue": true}'
 `);
 
 	fs.writeFileSync(path.join(scriptsDir, 'ace_after_agent_thought.ps1'),
@@ -354,16 +352,16 @@ describe('E2E: Unix Hook Script Execution', () => {
 			}
 		});
 
-		it('should output {} when no pattern_cache.json exists', () => {
+		it('should output continue:true when no pattern_cache.json exists', () => {
 			const scriptPath = path.join(scriptsDir, 'ace_before_submit_prompt.sh');
 			const result = runBashScript(scriptPath, '{"prompt_text": "hello"}', workDir);
 
 			expect(result.exitCode).toBe(0);
 			const parsed = parseJsonOutput(result.stdout);
-			expect(Object.keys(parsed)).toHaveLength(0);
+			expect(parsed.continue).toBe(true);
 		});
 
-		it('should output {} when pattern_cache.json has zero patterns', () => {
+		it('should output continue:true when pattern_cache.json has zero patterns', () => {
 			// Create cache with 0 patterns
 			const aceDir = path.join(workDir, '.cursor', 'ace');
 			fs.mkdirSync(aceDir, { recursive: true });
@@ -377,10 +375,10 @@ describe('E2E: Unix Hook Script Execution', () => {
 
 			expect(result.exitCode).toBe(0);
 			const parsed = parseJsonOutput(result.stdout);
-			expect(Object.keys(parsed)).toHaveLength(0);
+			expect(parsed.continue).toBe(true);
 		});
 
-		it('should inject additional_context when patterns are cached (requires jq)', () => {
+		it('should output continue:true and log relevance when patterns are cached (requires jq)', () => {
 			if (!hasJq) {
 				return; // Skip if jq not installed
 			}
@@ -398,9 +396,7 @@ describe('E2E: Unix Hook Script Execution', () => {
 
 			expect(result.exitCode).toBe(0);
 			const parsed = parseJsonOutput(result.stdout);
-			expect(parsed).toHaveProperty('additional_context');
-			expect(parsed.additional_context).toContain('42');
-			expect(parsed.additional_context).toContain('ace_search');
+			expect(parsed.continue).toBe(true);
 		});
 	});
 
@@ -571,16 +567,16 @@ describe('E2E: Windows/PowerShell Hook Script Execution', () => {
 	});
 
 	describePwsh('beforeSubmitPrompt pattern cache (.ps1)', () => {
-		it('should output {} when no pattern_cache.json exists', () => {
+		it('should output continue:true when no pattern_cache.json exists', () => {
 			const scriptPath = path.join(scriptsDir, 'ace_before_submit_prompt.ps1');
 			const result = runPwshScript(scriptPath, '{"prompt_text": "hello"}', workDir);
 
 			expect(result.exitCode).toBe(0);
 			const parsed = parseJsonOutput(result.stdout);
-			expect(Object.keys(parsed)).toHaveLength(0);
+			expect(parsed.continue).toBe(true);
 		});
 
-		it('should inject additional_context when patterns are cached', () => {
+		it('should output continue:true when patterns are cached', () => {
 			const aceDir = path.join(workDir, '.cursor', 'ace');
 			fs.mkdirSync(aceDir, { recursive: true });
 			fs.writeFileSync(path.join(aceDir, 'pattern_cache.json'), JSON.stringify({
@@ -593,9 +589,7 @@ describe('E2E: Windows/PowerShell Hook Script Execution', () => {
 
 			expect(result.exitCode).toBe(0);
 			const parsed = parseJsonOutput(result.stdout);
-			expect(parsed).toHaveProperty('additional_context');
-			expect(parsed.additional_context).toContain('25');
-			expect(parsed.additional_context).toContain('ace_search');
+			expect(parsed.continue).toBe(true);
 		});
 	});
 
@@ -879,12 +873,12 @@ if [ -f "$ace_dir/pattern_cache.json" ]; then
     domains=$(jq -r '.domains // [] | join(", ")' "$ace_dir/pattern_cache.json" 2>/dev/null || echo "")
     avg_conf=$(jq -r '.avgConfidence // 0' "$ace_dir/pattern_cache.json" 2>/dev/null || echo "0")
     echo "{\\"event\\": \\"search\\", \\"patterns_injected\\": $pattern_count, \\"domains\\": [\\"$(echo "$domains" | sed 's/, /\\", \\"/g')\\"], \\"avg_confidence\\": $avg_conf, \\"timestamp\\": \\"$(date -Iseconds)\\"}" >> "$ace_dir/ace-relevance.jsonl"
-    echo "{\\"additional_context\\": \\"[ACE] $pattern_count patterns available across domains: $domains. Use ace_search before starting.\\"}"
+    echo '{"continue": true}'
   else
-    echo '{}'
+    echo '{"continue": true}'
   fi
 else
-  echo '{}'
+  echo '{"continue": true}'
 fi
 `, { mode: 0o755 });
 
@@ -892,8 +886,7 @@ fi
 			expect(result.exitCode).toBe(0);
 
 			const parsed = parseJsonOutput(result.stdout);
-			expect(parsed).toHaveProperty('additional_context');
-			expect(parsed.additional_context).toContain('15 patterns');
+			expect(parsed.continue).toBe(true);
 
 			// Verify relevance log was written
 			const relevanceFile = path.join(aceDir, 'ace-relevance.jsonl');
@@ -1112,17 +1105,17 @@ if (Test-Path $cacheFile) {
             $domainsJson = if ($cache.domains) { ($cache.domains | ForEach-Object { "\`"$_\`"" }) -join ", " } else { "" }
             $logEntry = "{\`"event\`": \`"search\`", \`"patterns_injected\`": $patternCount, \`"domains\`": [$domainsJson], \`"avg_confidence\`": $avgConf}"
             $logEntry | Out-File -FilePath "$aceDir\\ace-relevance.jsonl" -Encoding utf8 -Append
-            Write-Output "{\`"additional_context\`": \`"[ACE] $patternCount patterns available.\`"}"
-        } else { Write-Output '{}' }
-    } catch { Write-Output '{}' }
-} else { Write-Output '{}' }
+            Write-Output '{"continue": true}'
+        } else { Write-Output '{"continue": true}' }
+    } catch { Write-Output '{"continue": true}' }
+} else { Write-Output '{"continue": true}' }
 `);
 
 			const result = runPwshScript(scriptPath, '{"prompt_text":"test"}', workDir);
 			expect(result.exitCode).toBe(0);
 
 			const parsed = parseJsonOutput(result.stdout);
-			expect(parsed).toHaveProperty('additional_context');
+			expect(parsed.continue).toBe(true);
 
 			const relevanceFile = path.join(aceDir, 'ace-relevance.jsonl');
 			expect(fs.existsSync(relevanceFile)).toBe(true);

@@ -788,10 +788,11 @@ $sessionId = if ($data.session_id) { $data.session_id } else { "" }
 $isBg = if ($data.is_background_agent) { "true" } else { "false" }
 
 # Clear trajectory files from previous session
-@("mcp_trajectory.jsonl", "shell_trajectory.jsonl", "edit_trajectory.jsonl", "response_trajectory.jsonl") | ForEach-Object {
+@("mcp_trajectory.jsonl", "shell_trajectory.jsonl", "edit_trajectory.jsonl", "response_trajectory.jsonl", "ace-relevance.jsonl") | ForEach-Object {
     $trajFile = "$aceDir\\$_"
     if (Test-Path $trajFile) { Clear-Content $trajFile }
 }
+if (Test-Path "$aceDir\\ace-review-result.json") { Remove-Item "$aceDir\\ace-review-result.json" -Force }
 
 # Save session info
 @{session_id=$sessionId; started_at=(Get-Date -Format "o"); is_background=$isBg} | ConvertTo-Json -Compress | Out-File -FilePath "$aceDir\\current_session.json" -Encoding utf8
@@ -1283,15 +1284,15 @@ if (Test-Path $cacheFile) {
             # Log injection event for task helpfulness tracking
             $logEntry = "{\`"event\`": \`"search\`", \`"patterns_injected\`": $patternCount, \`"domains\`": [$domainsJson], \`"avg_confidence\`": $avgConf, \`"timestamp\`": \`"$(Get-Date -Format 'o')\`"}"
             $logEntry | Out-File -FilePath "$aceDir\\ace-relevance.jsonl" -Encoding utf8 -Append
-            Write-Output "{\`"additional_context\`": \`"[ACE] $patternCount patterns available across domains: $domains. Use ace_search before starting.\`"}"
+            Write-Output '{"continue": true}'
         } else {
-            Write-Output '{}'
+            Write-Output '{"continue": true}'
         }
     } catch {
-        Write-Output '{}'
+        Write-Output '{"continue": true}'
     }
 } else {
-    Write-Output '{}'
+    Write-Output '{"continue": true}'
 }
 `;
 	// Always update to get relevance logging
@@ -1453,6 +1454,8 @@ mkdir -p "$ace_dir"
 > "$ace_dir/shell_trajectory.jsonl" 2>/dev/null
 > "$ace_dir/edit_trajectory.jsonl" 2>/dev/null
 > "$ace_dir/response_trajectory.jsonl" 2>/dev/null
+> "$ace_dir/ace-relevance.jsonl" 2>/dev/null
+rm -f "$ace_dir/ace-review-result.json" 2>/dev/null
 
 # Save session info
 echo "{\\"session_id\\": \\"$session_id\\", \\"started_at\\": \\"$(date -Iseconds)\\", \\"is_background\\": $is_bg}" > "$ace_dir/current_session.json"
@@ -1864,12 +1867,12 @@ if [ -f "$ace_dir/pattern_cache.json" ]; then
     avg_conf=$(jq -r '.avgConfidence // 0' "$ace_dir/pattern_cache.json" 2>/dev/null || echo "0")
     # Log injection event for task helpfulness tracking
     echo "{\\"event\\": \\"search\\", \\"patterns_injected\\": $pattern_count, \\"domains\\": [\\"$(echo "$domains" | sed 's/, /\\", \\"/g')\\"], \\"avg_confidence\\": $avg_conf, \\"timestamp\\": \\"$(date -Iseconds)\\"}" >> "$ace_dir/ace-relevance.jsonl"
-    echo "{\\"additional_context\\": \\"[ACE] $pattern_count patterns available across domains: $domains. Use ace_search before starting.\\"}"
+    echo '{"continue": true}'
   else
-    echo '{}'
+    echo '{"continue": true}'
   fi
 else
-  echo '{}'
+  echo '{"continue": true}'
 fi
 `;
 	// Always update to get relevance logging
