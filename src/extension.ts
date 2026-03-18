@@ -13,6 +13,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
+import { getAceGlobalConfigPath } from './ace/globalConfigPath';
 import { StatusPanel } from './webviews/statusPanel';
 import { ConfigurePanel } from './webviews/configurePanel';
 import { readContext, readWorkspaceVersion, writeWorkspaceVersion, pickWorkspaceFolder, getTargetFolder, isMultiRootWorkspace, type AceContext } from './ace/context';
@@ -1099,9 +1100,9 @@ if ($loopCount -eq 0) {
     if ($patternsInjected -gt 0) {
         # Patterns were injected — ask for time-saved self-eval
         New-Item -ItemType File -Path $evalFlag -Force | Out-Null
-        $msg = "Session complete. AI-Trail: $summary. Git: $gitBranch ($gitHash).$transcriptNote Call ace_learn to capture patterns. IMPORTANT: Before finishing, briefly evaluate: considering a human developer working WITHOUT the ACE pattern knowledge that was injected at task start, how much time would they have spent researching/figuring out what the patterns provided? Reply with: ACE_REVIEW: Xm saved | one-line reason"
+        $msg = "[ACE Task Summary] $patternsInjected pattern searches used | AI-Trail: $summary | Git: $gitBranch ($gitHash)$transcriptNote --- How helpful was ACE knowledge for this task? Estimate how much time a human developer saved by having the injected patterns (vs researching docs, exploring code, trial-and-error). Reply: ACE_REVIEW: Xm saved | one-line reason"
     } else {
-        $msg = "Session complete. AI-Trail: $summary. Git: $gitBranch ($gitHash).$transcriptNote Call ace_learn to capture patterns."
+        $msg = "[ACE Task Summary] AI-Trail: $summary | Git: $gitBranch ($gitHash)$transcriptNote"
     }
 
     Write-Output "{\`"followup_message\`": \`"$msg\`"}"
@@ -1704,9 +1705,9 @@ if [ "$loop_count" = "0" ]; then
   if [ "$patterns_injected" -gt 0 ] 2>/dev/null; then
     # Patterns were injected — ask for time-saved self-eval
     touch "$eval_flag"
-    msg="Session complete. AI-Trail: $summary. Git: $git_branch ($git_hash).$transcript_note Call ace_learn to capture patterns. IMPORTANT: Before finishing, briefly evaluate: considering a human developer working WITHOUT the ACE pattern knowledge that was injected at task start, how much time would they have spent researching/figuring out what the patterns provided? Reply with: ACE_REVIEW: Xm saved | one-line reason"
+    msg="[ACE Task Summary] $patterns_injected pattern searches used | AI-Trail: $summary | Git: $git_branch ($git_hash)$transcript_note --- How helpful was ACE knowledge for this task? Estimate how much time a human developer saved by having the injected patterns (vs researching docs, exploring code, trial-and-error). Reply: ACE_REVIEW: Xm saved | one-line reason"
   else
-    msg="Session complete. AI-Trail: $summary. Git: $git_branch ($git_hash).$transcript_note Call ace_learn to capture patterns."
+    msg="[ACE Task Summary] AI-Trail: $summary | Git: $git_branch ($git_hash)$transcript_note"
   fi
 
   echo "{\\"followup_message\\": \\"$msg\\"}"
@@ -2380,7 +2381,7 @@ function getAceConfig(folder?: vscode.WorkspaceFolder): { serverUrl?: string; pr
 
 	// Try to read from global config
 	let globalConfig: any = null;
-	const globalConfigPath = path.join(os.homedir(), '.config', 'ace', 'config.json');
+	const globalConfigPath = getAceGlobalConfigPath();
 	if (fs.existsSync(globalConfigPath)) {
 		try {
 			globalConfig = JSON.parse(fs.readFileSync(globalConfigPath, 'utf-8'));
