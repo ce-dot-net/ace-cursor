@@ -4,6 +4,8 @@
  */
 
 import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as path from 'path';
 import { readContext } from '../ace/context';
 import { getValidToken, getHardCapInfo } from '../commands/login';
 import { loadConfig, loadUserAuth, getDefaultOrgId, getUsagePercentage, isNearLimit, isOverLimit } from '@ace-sdk/core';
@@ -364,6 +366,106 @@ export class StatusPanel {
 		</div>`;
 	}
 
+	/**
+	 * Read local workspace files to build task helpfulness summary
+	 */
+	private _getTaskSummaryHtml(): string {
+		const workspaceFolders = vscode.workspace.workspaceFolders;
+		if (!workspaceFolders || workspaceFolders.length === 0) {
+			return '';
+		}
+		const wsRoot = workspaceFolders[0].uri.fsPath;
+		const aceDir = path.join(wsRoot, '.cursor', 'ace');
+		const relevanceFile = path.join(aceDir, 'ace-relevance.jsonl');
+		const reviewFile = path.join(aceDir, 'ace-review-result.json');
+
+		let patternsInjected = 0;
+		let domains = new Set<string>();
+		let avgRelevance = 0;
+
+		// Parse ace-relevance.jsonl for current task metrics
+		if (fs.existsSync(relevanceFile)) {
+			try {
+				const lines = fs.readFileSync(relevanceFile, 'utf8').split('\n').filter(l => l.trim());
+				const events = lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+				// Find last execution boundary
+				let lastExec = -1;
+				events.forEach((e: any, i: number) => { if (e.event === 'execution') { lastExec = i; } });
+				const current = lastExec >= 0 ? events.slice(lastExec + 1) : events;
+				const searches = current.filter((e: any) => e.event === 'search');
+				patternsInjected = searches.reduce((sum: number, s: any) => sum + (s.patterns_injected || 0), 0);
+				searches.forEach((s: any) => { (s.domains || []).forEach((d: string) => domains.add(d)); });
+				if (searches.length > 0) {
+					avgRelevance = Math.round(
+						searches.reduce((sum: number, s: any) => sum + (s.avg_confidence || 0), 0) / searches.length * 100
+					);
+				}
+			} catch {
+				// Ignore parse errors
+			}
+		}
+
+		// Parse ace-review-result.json for self-eval
+		let helpfulPct = 0;
+		let timeSaved = '';
+		let reason = '';
+		if (fs.existsSync(reviewFile)) {
+			try {
+				const review = JSON.parse(fs.readFileSync(reviewFile, 'utf8'));
+				helpfulPct = review.helpful_pct || 0;
+				timeSaved = review.time_saved || '';
+				reason = review.reason || '';
+			} catch {
+				// Ignore parse errors
+			}
+		}
+
+		// Only show if there's data
+		if (patternsInjected === 0 && helpfulPct === 0) {
+			return '';
+		}
+
+		const relColor = avgRelevance >= 70 ? 'var(--vscode-testing-iconPassed)' :
+			avgRelevance >= 40 ? 'var(--vscode-inputValidation-warningBorder)' :
+			'var(--vscode-testing-iconFailed)';
+
+		const helpColor = helpfulPct >= 70 ? 'var(--vscode-testing-iconPassed)' :
+			helpfulPct >= 40 ? 'var(--vscode-inputValidation-warningBorder)' :
+			helpfulPct > 0 ? 'var(--vscode-testing-iconFailed)' : 'var(--vscode-descriptionForeground)';
+
+		const timeSavedHtml = timeSaved ? `<span class="task-time-saved">~${timeSaved} saved</span>` : '';
+		const reasonHtml = reason ? `<div class="task-reason">"${reason}"</div>` : '';
+
+		return `
+		<div class="task-summary">
+			<h2>◆ ACE Task Summary</h2>
+			<div class="task-metrics">
+				<div class="task-metric">
+					<div class="task-metric-value">${patternsInjected}</div>
+					<div class="task-metric-label">patterns injected</div>
+				</div>
+				<div class="task-metric">
+					<div class="task-metric-value">${domains.size}</div>
+					<div class="task-metric-label">domains</div>
+				</div>
+				<div class="task-metric">
+					<div class="task-metric-value" style="color: ${relColor}">${avgRelevance}%</div>
+					<div class="task-metric-label">relevance</div>
+				</div>
+				${helpfulPct > 0 ? `
+				<div class="task-metric">
+					<div class="task-metric-value" style="color: ${helpColor}">${helpfulPct}%</div>
+					<div class="task-metric-label">helpful</div>
+				</div>` : ''}
+			</div>
+			${timeSaved || reason ? `
+			<div class="task-eval">
+				${timeSavedHtml}
+				${reasonHtml}
+			</div>` : ''}
+		</div>`;
+	}
+
 	private _getStatusHtml(stats: any) {
 		const bySection = stats.by_section || {};
 		const total = stats.total_bullets || 0;
@@ -386,6 +488,9 @@ export class StatusPanel {
 
 		// Get org usage display
 		const usageHtml = stats.usage ? this._getUsageHtml(stats.usage) : '';
+
+		// Get task helpfulness data from local workspace files
+		const taskSummaryHtml = this._getTaskSummaryHtml();
 
 		return `<!DOCTYPE html>
 <html lang="en">
@@ -699,6 +804,55 @@ export class StatusPanel {
 			background: var(--vscode-badge-background);
 			color: var(--vscode-badge-foreground);
 		}
+		/* Task summary */
+		.task-summary {
+			background: var(--vscode-editor-inactiveSelectionBackground);
+			border: 1px solid var(--vscode-panel-border);
+			border-radius: 8px;
+			padding: 15px;
+			margin: 15px 0;
+		}
+		.task-summary h2 {
+			margin: 0 0 12px 0;
+			font-size: 14px;
+			color: var(--vscode-textLink-foreground);
+		}
+		.task-metrics {
+			display: flex;
+			gap: 15px;
+			margin-bottom: 10px;
+		}
+		.task-metric {
+			flex: 1;
+			text-align: center;
+			padding: 8px;
+			background: var(--vscode-editor-background);
+			border-radius: 6px;
+		}
+		.task-metric-value {
+			font-size: 20px;
+			font-weight: bold;
+		}
+		.task-metric-label {
+			font-size: 11px;
+			color: var(--vscode-descriptionForeground);
+			margin-top: 2px;
+		}
+		.task-eval {
+			padding-top: 8px;
+			border-top: 1px solid var(--vscode-panel-border);
+		}
+		.task-time-saved {
+			font-weight: bold;
+			color: var(--vscode-testing-iconPassed);
+			font-size: 14px;
+		}
+		.task-reason {
+			font-style: italic;
+			color: var(--vscode-descriptionForeground);
+			font-size: 12px;
+			margin-top: 4px;
+		}
 		/* Quality metrics */
 		.quality-metrics {
 			display: flex;
@@ -857,6 +1011,8 @@ export class StatusPanel {
 			</div>
 		</div>
 	</div>
+
+	${taskSummaryHtml}
 
 	${hardCapHtml}
 

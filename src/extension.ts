@@ -710,20 +710,65 @@ $input | Out-File -Append -FilePath "$aceDir\\shell_trajectory.jsonl" -Encoding 
 
 	// Agent Response Tracking
 	const responseTrackPath = path.join(scriptsDir, 'ace_track_response.ps1');
-	const responseTrackScript = `# ACE Response Tracking Hook - Captures agent responses for AI-Trail
+	const responseTrackScript = `# ACE Response Tracking Hook - Captures agent responses + parses ACE_REVIEW for task helpfulness
 # Input: text (assistant final text)
+
+$inputJson = [Console]::In.ReadToEnd()
 
 $aceDir = ".cursor\\ace"
 if (-not (Test-Path $aceDir)) {
     New-Item -ItemType Directory -Path $aceDir -Force | Out-Null
 }
 
-$input | Out-File -Append -FilePath "$aceDir\\response_trajectory.jsonl" -Encoding utf8
+# Always log response to trajectory
+$inputJson | Out-File -Append -FilePath "$aceDir\\response_trajectory.jsonl" -Encoding utf8
+
+# Parse ACE_REVIEW from agent response (written during self-eval phase)
+try {
+    $data = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
+    $responseText = if ($data.text) { $data.text } else { "" }
+} catch {
+    $responseText = ""
+}
+
+if ($responseText -match "ACE_REVIEW:") {
+    # Extract time saved (e.g., "15m saved", "2m saved")
+    if ($responseText -match "ACE_REVIEW:\s*([^|]+)") {
+        $timeSaved = $Matches[1].Trim()
+    } else {
+        $timeSaved = ""
+    }
+    # Extract reason (text after the pipe)
+    if ($responseText -match "ACE_REVIEW:[^|]*\|\s*(.+)") {
+        $reason = $Matches[1].Trim().Substring(0, [Math]::Min(200, $Matches[1].Trim().Length))
+    } else {
+        $reason = ""
+    }
+    # Extract numeric minutes for helpful_pct approximation
+    if ($timeSaved -match "(\d+)") {
+        $minutes = [int]$Matches[1]
+    } else {
+        $minutes = 0
+    }
+    # Rough helpful % based on time: 0m=0%, 5m=30%, 15m=60%, 30m+=80%
+    if ($minutes -ge 30) { $helpfulPct = 80 }
+    elseif ($minutes -ge 15) { $helpfulPct = 60 }
+    elseif ($minutes -ge 5) { $helpfulPct = 30 }
+    elseif ($minutes -gt 0) { $helpfulPct = 15 }
+    else { $helpfulPct = 0 }
+    # Write review result
+    $reviewResult = @{
+        helpful_pct = $helpfulPct
+        time_saved = $timeSaved
+        reason = $reason
+        timestamp = (Get-Date -Format "o")
+    } | ConvertTo-Json -Compress
+    $reviewResult | Out-File -FilePath "$aceDir\\ace-review-result.json" -Encoding utf8
+}
 `;
-	if (forceUpdate || !fs.existsSync(responseTrackPath)) {
-		fs.writeFileSync(responseTrackPath, responseTrackScript);
-		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_track_response.ps1`);
-	}
+	// Always update to get ACE_REVIEW parsing
+	fs.writeFileSync(responseTrackPath, responseTrackScript);
+	console.log('[ACE] Updated ace_track_response.ps1 with ACE_REVIEW parsing');
 
 	// Session Start Hook - Injects pattern context into new conversations
 	const sessionStartPath = path.join(scriptsDir, 'ace_session_start.ps1');
@@ -996,8 +1041,8 @@ try {
 
 	// Stop Hook with Git Context Aggregation
 	const stopHookPath = path.join(scriptsDir, 'ace_stop_hook.ps1');
-	const stopHookScript = `# ACE Stop Hook - Aggregates AI-Trail trajectory with git context + transcript
-# Input: status, loop_count, transcript_path (from common schema)
+	const stopHookScript = `# ACE Stop Hook - Aggregates trajectory + self-eval for task helpfulness
+# Input: status, loop_count, transcript_path, conversation_id
 
 $inputJson = [Console]::In.ReadToEnd()
 $data = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
@@ -1005,13 +1050,23 @@ $status = $data.status
 $loopCount = $data.loop_count
 $transcriptPath = $data.transcript_path
 
-if ($status -eq "completed" -and $loopCount -eq 0) {
+$aceDir = ".cursor\\ace"
+if (-not (Test-Path $aceDir)) { New-Item -ItemType Directory -Path $aceDir -Force | Out-Null }
+$evalFlag = "$aceDir\\.eval-requested"
+
+# Only process completed tasks
+if ($status -ne "completed") {
+    Write-Output '{}'
+    exit 0
+}
+
+if ($loopCount -eq 0) {
+    # ── FIRST STOP: aggregate + request self-eval ──
     $gitBranch = git rev-parse --abbrev-ref HEAD 2>$null
     if (-not $gitBranch) { $gitBranch = "unknown" }
     $gitHash = git rev-parse --short HEAD 2>$null
     if (-not $gitHash) { $gitHash = "unknown" }
 
-    $aceDir = ".cursor\\ace"
     $mcpCount = 0; $shellCount = 0; $editCount = 0; $responseCount = 0
     if (Test-Path "$aceDir\\mcp_trajectory.jsonl") {
         $mcpCount = (Get-Content "$aceDir\\mcp_trajectory.jsonl" | Measure-Object -Line).Lines
@@ -1031,18 +1086,34 @@ if ($status -eq "completed" -and $loopCount -eq 0) {
         @{transcript_path=$transcriptPath; saved_at=(Get-Date -Format "o")} | ConvertTo-Json -Compress | Out-File -FilePath "$aceDir\\last_transcript.json" -Encoding utf8
     }
 
+    # Check if ACE patterns were injected this task
+    $patternsInjected = 0
+    if (Test-Path "$aceDir\\ace-relevance.jsonl") {
+        $patternsInjected = (Select-String -Path "$aceDir\\ace-relevance.jsonl" -Pattern '"event": "search"' -SimpleMatch | Measure-Object).Count
+    }
+
     $summary = "MCP:$mcpCount Shell:$shellCount Edits:$editCount Responses:$responseCount"
     $transcriptNote = ""
     if ($transcriptPath) { $transcriptNote = " Transcript saved for learning." }
-    $msg = "Session complete. AI-Trail: $summary. Git: $gitBranch ($gitHash).$transcriptNote Call ace_learn to capture patterns."
+
+    if ($patternsInjected -gt 0) {
+        # Patterns were injected — ask for time-saved self-eval
+        New-Item -ItemType File -Path $evalFlag -Force | Out-Null
+        $msg = "Session complete. AI-Trail: $summary. Git: $gitBranch ($gitHash).$transcriptNote Call ace_learn to capture patterns. IMPORTANT: Before finishing, briefly evaluate: considering a human developer working WITHOUT the ACE pattern knowledge that was injected at task start, how much time would they have spent researching/figuring out what the patterns provided? Reply with: ACE_REVIEW: Xm saved | one-line reason"
+    } else {
+        $msg = "Session complete. AI-Trail: $summary. Git: $gitBranch ($gitHash).$transcriptNote Call ace_learn to capture patterns."
+    }
+
     Write-Output "{\`"followup_message\`": \`"$msg\`"}"
 } else {
+    # ── SUBSEQUENT STOPS: clean up and exit ──
+    if (Test-Path $evalFlag) { Remove-Item $evalFlag -Force }
     Write-Output '{}'
 }
 `;
-	// Always update stop hook to get git context feature
+	// Always update stop hook
 	fs.writeFileSync(stopHookPath, stopHookScript);
-	console.log('[ACE] Updated ace_stop_hook.ps1 with git context');
+	console.log('[ACE] Updated ace_stop_hook.ps1 with task helpfulness self-eval');
 
 	// Pre-Tool Use Gate
 	const preToolUsePath = path.join(scriptsDir, 'ace_pre_tool_use.ps1');
@@ -1190,13 +1261,14 @@ Write-Output '{"decision": "allow"}'
 
 	// Before Submit Prompt - Pattern context injection
 	const beforeSubmitPromptPath = path.join(scriptsDir, 'ace_before_submit_prompt.ps1');
-	const beforeSubmitPromptScript = `# ACE Before Submit Prompt Hook - Injects pattern context
+	const beforeSubmitPromptScript = `# ACE Before Submit Prompt Hook - Injects pattern context + logs injection for task helpfulness
 # Input: prompt_text
 
 $inputJson = [Console]::In.ReadToEnd()
 $input = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
 
 $aceDir = ".cursor\\ace"
+if (-not (Test-Path $aceDir)) { New-Item -ItemType Directory -Path $aceDir -Force | Out-Null }
 $cacheFile = "$aceDir\\pattern_cache.json"
 
 if (Test-Path $cacheFile) {
@@ -1204,7 +1276,13 @@ if (Test-Path $cacheFile) {
         $cache = Get-Content $cacheFile | ConvertFrom-Json
         $patternCount = $cache.patternCount
         if ($patternCount -gt 0) {
-            Write-Output "{\`"additional_context\`": \`"[ACE] $patternCount patterns available. Use ace_search before starting.\`"}"
+            $domains = if ($cache.domains) { ($cache.domains -join ", ") } else { "" }
+            $avgConf = if ($cache.avgConfidence) { $cache.avgConfidence } else { 0 }
+            $domainsJson = if ($cache.domains) { ($cache.domains | ForEach-Object { "\`"$_\`"" }) -join ", " } else { "" }
+            # Log injection event for task helpfulness tracking
+            $logEntry = "{\`"event\`": \`"search\`", \`"patterns_injected\`": $patternCount, \`"domains\`": [$domainsJson], \`"avg_confidence\`": $avgConf, \`"timestamp\`": \`"$(Get-Date -Format 'o')\`"}"
+            $logEntry | Out-File -FilePath "$aceDir\\ace-relevance.jsonl" -Encoding utf8 -Append
+            Write-Output "{\`"additional_context\`": \`"[ACE] $patternCount patterns available across domains: $domains. Use ace_search before starting.\`"}"
         } else {
             Write-Output '{}'
         }
@@ -1215,10 +1293,9 @@ if (Test-Path $cacheFile) {
     Write-Output '{}'
 }
 `;
-	if (forceUpdate || !fs.existsSync(beforeSubmitPromptPath)) {
-		fs.writeFileSync(beforeSubmitPromptPath, beforeSubmitPromptScript);
-		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_before_submit_prompt.ps1`);
-	}
+	// Always update to get relevance logging
+	fs.writeFileSync(beforeSubmitPromptPath, beforeSubmitPromptScript);
+	console.log('[ACE] Updated ace_before_submit_prompt.ps1 with relevance logging');
 
 	// After Agent Thought - Thinking capture
 	const afterAgentThoughtPath = path.join(scriptsDir, 'ace_after_agent_thought.ps1');
@@ -1321,18 +1398,41 @@ exit 0
 	// Agent Response Tracking
 	const responseTrackPath = path.join(scriptsDir, 'ace_track_response.sh');
 	const responseTrackScript = `#!/bin/bash
-# ACE Response Tracking Hook - Captures agent responses for AI-Trail
+# ACE Response Tracking Hook - Captures agent responses + parses ACE_REVIEW for task helpfulness
 # Input: text (assistant final text)
 
 input=$(cat)
-mkdir -p .cursor/ace
-echo "$input" >> .cursor/ace/response_trajectory.jsonl
+ace_dir=".cursor/ace"
+mkdir -p "$ace_dir"
+
+# Always log response to trajectory
+echo "$input" >> "$ace_dir/response_trajectory.jsonl"
+
+# Parse ACE_REVIEW from agent response (written during self-eval phase)
+response_text=$(echo "$input" | jq -r '.text // ""' 2>/dev/null || echo "")
+if echo "$response_text" | grep -q "ACE_REVIEW:"; then
+  # Extract time saved (e.g., "15m saved", "2m saved", "30s saved")
+  time_saved=$(echo "$response_text" | grep -oE 'ACE_REVIEW:[^|]*' | sed 's/ACE_REVIEW:[[:space:]]*//' | sed 's/[[:space:]]*$//')
+  # Extract reason (text after the pipe)
+  reason=$(echo "$response_text" | grep -oE 'ACE_REVIEW:[^|]*\\|[^"]*' | sed 's/.*|[[:space:]]*//' | head -c 200)
+  # Extract numeric minutes for helpful_pct approximation
+  minutes=$(echo "$time_saved" | grep -oE '[0-9]+' | head -1)
+  minutes=\${minutes:-0}
+  # Rough helpful % based on time: 0m=0%, 5m=30%, 15m=60%, 30m+=80%
+  if [ "$minutes" -ge 30 ] 2>/dev/null; then helpful_pct=80
+  elif [ "$minutes" -ge 15 ] 2>/dev/null; then helpful_pct=60
+  elif [ "$minutes" -ge 5 ] 2>/dev/null; then helpful_pct=30
+  elif [ "$minutes" -gt 0 ] 2>/dev/null; then helpful_pct=15
+  else helpful_pct=0; fi
+  # Write review result
+  echo "{\\"helpful_pct\\": $helpful_pct, \\"time_saved\\": \\"$time_saved\\", \\"reason\\": \\"$reason\\", \\"timestamp\\": \\"$(date -Iseconds)\\"}" > "$ace_dir/ace-review-result.json"
+fi
+
 exit 0
 `;
-	if (forceUpdate || !fs.existsSync(responseTrackPath)) {
-		fs.writeFileSync(responseTrackPath, responseTrackScript, { mode: 0o755 });
-		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_track_response.sh`);
-	}
+	// Always update to get ACE_REVIEW parsing
+	fs.writeFileSync(responseTrackPath, responseTrackScript, { mode: 0o755 });
+	console.log('[ACE] Updated ace_track_response.sh with ACE_REVIEW parsing');
 
 	// Session Start Hook - Injects pattern context into new conversations
 	const sessionStartPath = path.join(scriptsDir, 'ace_session_start.sh');
@@ -1556,48 +1656,69 @@ exit 0
 	// Stop Hook with Git Context Aggregation
 	const stopHookPath = path.join(scriptsDir, 'ace_stop_hook.sh');
 	const stopHookScript = `#!/bin/bash
-# ACE Stop Hook - Aggregates AI-Trail trajectory with git context + transcript
-# Input: status, loop_count, transcript_path (from common schema)
+# ACE Stop Hook - Aggregates trajectory + self-eval for task helpfulness
+# Input: status, loop_count, transcript_path, conversation_id
 
 input=$(cat)
 status=$(echo "$input" | jq -r '.status // empty')
 loop_count=$(echo "$input" | jq -r '.loop_count // 0')
 transcript_path=$(echo "$input" | jq -r '.transcript_path // empty')
+conversation_id=$(echo "$input" | jq -r '.conversation_id // empty')
 
-# Only process once on completed tasks
-if [ "$status" = "completed" ] && [ "$loop_count" = "0" ]; then
-  # Capture git context
+ace_dir=".cursor/ace"
+mkdir -p "$ace_dir"
+eval_flag="$ace_dir/.eval-requested"
+
+# Only process on completed tasks
+if [ "$status" != "completed" ]; then
+  echo '{}'
+  exit 0
+fi
+
+if [ "$loop_count" = "0" ]; then
+  # ── FIRST STOP: aggregate + request self-eval ──
   git_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
   git_hash=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 
-  # Count trajectory entries
-  ace_dir=".cursor/ace"
   mcp_count=$(wc -l < "$ace_dir/mcp_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
   shell_count=$(wc -l < "$ace_dir/shell_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
   edit_count=$(wc -l < "$ace_dir/edit_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
   response_count=$(wc -l < "$ace_dir/response_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
 
-  # Save transcript path for ace_learn to use
   if [ -n "$transcript_path" ]; then
     echo "{\\"transcript_path\\": \\"$transcript_path\\", \\"saved_at\\": \\"$(date -Iseconds)\\"}" > "$ace_dir/last_transcript.json"
   fi
 
-  # Build summary
+  # Check if ACE patterns were injected this task
+  patterns_injected=0
+  if [ -f "$ace_dir/ace-relevance.jsonl" ]; then
+    patterns_injected=$(grep -c '"event": "search"' "$ace_dir/ace-relevance.jsonl" 2>/dev/null || echo "0")
+  fi
+
   summary="MCP:$mcp_count Shell:$shell_count Edits:$edit_count Responses:$response_count"
   transcript_note=""
   if [ -n "$transcript_path" ]; then
     transcript_note=" Transcript saved for learning."
   fi
-  msg="Session complete. AI-Trail: $summary. Git: $git_branch ($git_hash).$transcript_note Call ace_learn to capture patterns."
 
-  echo "{\\\"followup_message\\\": \\\"$msg\\\"}"
+  if [ "$patterns_injected" -gt 0 ] 2>/dev/null; then
+    # Patterns were injected — ask for time-saved self-eval
+    touch "$eval_flag"
+    msg="Session complete. AI-Trail: $summary. Git: $git_branch ($git_hash).$transcript_note Call ace_learn to capture patterns. IMPORTANT: Before finishing, briefly evaluate: considering a human developer working WITHOUT the ACE pattern knowledge that was injected at task start, how much time would they have spent researching/figuring out what the patterns provided? Reply with: ACE_REVIEW: Xm saved | one-line reason"
+  else
+    msg="Session complete. AI-Trail: $summary. Git: $git_branch ($git_hash).$transcript_note Call ace_learn to capture patterns."
+  fi
+
+  echo "{\\"followup_message\\": \\"$msg\\"}"
 else
+  # ── SUBSEQUENT STOPS: clean up and exit ──
+  rm -f "$eval_flag" 2>/dev/null
   echo '{}'
 fi
 `;
-	// Always update stop hook to get git context feature
+	// Always update stop hook
 	fs.writeFileSync(stopHookPath, stopHookScript, { mode: 0o755 });
-	console.log('[ACE] Updated ace_stop_hook.sh with git context');
+	console.log('[ACE] Updated ace_stop_hook.sh with task helpfulness self-eval');
 
 	// Pre-Tool Use Gate
 	const preToolUsePath = path.join(scriptsDir, 'ace_pre_tool_use.sh');
@@ -1728,16 +1849,21 @@ echo '{"decision": "allow"}'
 	// Before Submit Prompt - Pattern context injection
 	const beforeSubmitPromptPath = path.join(scriptsDir, 'ace_before_submit_prompt.sh');
 	const beforeSubmitPromptScript = `#!/bin/bash
-# ACE Before Submit Prompt Hook - Injects pattern context
+# ACE Before Submit Prompt Hook - Injects pattern context + logs injection for task helpfulness
 # Input: prompt_text
 
 input=$(cat)
 ace_dir=".cursor/ace"
+mkdir -p "$ace_dir"
 
 if [ -f "$ace_dir/pattern_cache.json" ]; then
   pattern_count=$(jq -r '.patternCount // 0' "$ace_dir/pattern_cache.json" 2>/dev/null || echo "0")
   if [ "$pattern_count" -gt 0 ] 2>/dev/null; then
-    echo "{\\"additional_context\\": \\"[ACE] $pattern_count patterns available. Use ace_search before starting.\\"}"
+    domains=$(jq -r '.domains // [] | join(", ")' "$ace_dir/pattern_cache.json" 2>/dev/null || echo "")
+    avg_conf=$(jq -r '.avgConfidence // 0' "$ace_dir/pattern_cache.json" 2>/dev/null || echo "0")
+    # Log injection event for task helpfulness tracking
+    echo "{\\"event\\": \\"search\\", \\"patterns_injected\\": $pattern_count, \\"domains\\": [\\"$(echo "$domains" | sed 's/, /\\", \\"/g')\\"], \\"avg_confidence\\": $avg_conf, \\"timestamp\\": \\"$(date -Iseconds)\\"}" >> "$ace_dir/ace-relevance.jsonl"
+    echo "{\\"additional_context\\": \\"[ACE] $pattern_count patterns available across domains: $domains. Use ace_search before starting.\\"}"
   else
     echo '{}'
   fi
@@ -1745,10 +1871,9 @@ else
   echo '{}'
 fi
 `;
-	if (forceUpdate || !fs.existsSync(beforeSubmitPromptPath)) {
-		fs.writeFileSync(beforeSubmitPromptPath, beforeSubmitPromptScript, { mode: 0o755 });
-		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_before_submit_prompt.sh`);
-	}
+	// Always update to get relevance logging
+	fs.writeFileSync(beforeSubmitPromptPath, beforeSubmitPromptScript, { mode: 0o755 });
+	console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_before_submit_prompt.sh`);
 
 	// After Agent Thought - Thinking capture
 	const afterAgentThoughtPath = path.join(scriptsDir, 'ace_after_agent_thought.sh');

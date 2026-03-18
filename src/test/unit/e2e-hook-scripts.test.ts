@@ -830,3 +830,392 @@ describe('E2E: Full Hook Workflow Simulation', () => {
 		});
 	});
 });
+
+// ============================================================================
+// E2E: Task Helpfulness — Self-Eval Flow
+// ============================================================================
+
+describe('E2E: Task Helpfulness Self-Eval Flow', () => {
+	let tempDir: string;
+	let scriptsDir: string;
+	let workDir: string;
+
+	beforeEach(() => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-e2e-helpfulness-'));
+		scriptsDir = path.join(tempDir, '.cursor', 'scripts');
+		workDir = tempDir;
+		fs.mkdirSync(scriptsDir, { recursive: true });
+		// Create ace dir for relevance/review files
+		fs.mkdirSync(path.join(tempDir, '.cursor', 'ace'), { recursive: true });
+	});
+
+	afterEach(() => {
+		if (tempDir && fs.existsSync(tempDir)) {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	// -- Unix tests --
+	const describeUnix = isWindows ? describe.skip : describe;
+
+	describeUnix('Unix: beforeSubmitPrompt relevance logging', () => {
+		it('should log injection event to ace-relevance.jsonl when patterns exist', () => {
+			const aceDir = path.join(tempDir, '.cursor', 'ace');
+			// Write a pattern cache
+			fs.writeFileSync(path.join(aceDir, 'pattern_cache.json'), JSON.stringify({
+				patternCount: 15,
+				domains: ['auth', 'api'],
+				avgConfidence: 0.85
+			}));
+			// Write the script (matches updated extension.ts)
+			const scriptPath = path.join(scriptsDir, 'ace_before_submit_prompt.sh');
+			fs.writeFileSync(scriptPath, `#!/bin/bash
+input=$(cat)
+ace_dir=".cursor/ace"
+mkdir -p "$ace_dir"
+if [ -f "$ace_dir/pattern_cache.json" ]; then
+  pattern_count=$(jq -r '.patternCount // 0' "$ace_dir/pattern_cache.json" 2>/dev/null || echo "0")
+  if [ "$pattern_count" -gt 0 ] 2>/dev/null; then
+    domains=$(jq -r '.domains // [] | join(", ")' "$ace_dir/pattern_cache.json" 2>/dev/null || echo "")
+    avg_conf=$(jq -r '.avgConfidence // 0' "$ace_dir/pattern_cache.json" 2>/dev/null || echo "0")
+    echo "{\\"event\\": \\"search\\", \\"patterns_injected\\": $pattern_count, \\"domains\\": [\\"$(echo "$domains" | sed 's/, /\\", \\"/g')\\"], \\"avg_confidence\\": $avg_conf, \\"timestamp\\": \\"$(date -Iseconds)\\"}" >> "$ace_dir/ace-relevance.jsonl"
+    echo "{\\"additional_context\\": \\"[ACE] $pattern_count patterns available across domains: $domains. Use ace_search before starting.\\"}"
+  else
+    echo '{}'
+  fi
+else
+  echo '{}'
+fi
+`, { mode: 0o755 });
+
+			const result = runBashScript(scriptPath, '{"prompt_text":"fix the bug"}', workDir);
+			expect(result.exitCode).toBe(0);
+
+			const parsed = parseJsonOutput(result.stdout);
+			expect(parsed).toHaveProperty('additional_context');
+			expect(parsed.additional_context).toContain('15 patterns');
+
+			// Verify relevance log was written
+			const relevanceFile = path.join(aceDir, 'ace-relevance.jsonl');
+			expect(fs.existsSync(relevanceFile)).toBe(true);
+			const logContent = fs.readFileSync(relevanceFile, 'utf8').trim();
+			const logEntry = JSON.parse(logContent);
+			expect(logEntry.event).toBe('search');
+			expect(logEntry.patterns_injected).toBe(15);
+			expect(logEntry.avg_confidence).toBe(0.85);
+		});
+	});
+
+	describeUnix('Unix: stop hook self-eval request', () => {
+		it('should request self-eval when patterns were injected (loop_count=0)', () => {
+			const aceDir = path.join(tempDir, '.cursor', 'ace');
+			// Simulate patterns injected
+			fs.writeFileSync(path.join(aceDir, 'ace-relevance.jsonl'),
+				'{"event": "search", "patterns_injected": 10}\n');
+
+			const scriptPath = path.join(scriptsDir, 'ace_stop_hook.sh');
+			fs.writeFileSync(scriptPath, `#!/bin/bash
+input=$(cat)
+status=$(echo "$input" | jq -r '.status // empty')
+loop_count=$(echo "$input" | jq -r '.loop_count // 0')
+ace_dir=".cursor/ace"
+mkdir -p "$ace_dir"
+eval_flag="$ace_dir/.eval-requested"
+
+if [ "$status" != "completed" ]; then echo '{}'; exit 0; fi
+if [ "$loop_count" = "0" ]; then
+  patterns_injected=0
+  if [ -f "$ace_dir/ace-relevance.jsonl" ]; then
+    patterns_injected=$(grep -c '"event": "search"' "$ace_dir/ace-relevance.jsonl" 2>/dev/null || echo "0")
+  fi
+  if [ "$patterns_injected" -gt 0 ] 2>/dev/null; then
+    touch "$eval_flag"
+    msg="Session complete. IMPORTANT: ACE_REVIEW: Xm saved | one-line reason"
+  else
+    msg="Session complete."
+  fi
+  echo "{\\"followup_message\\": \\"$msg\\"}"
+else
+  rm -f "$eval_flag" 2>/dev/null
+  echo '{}'
+fi
+`, { mode: 0o755 });
+
+			const input = JSON.stringify({ status: 'completed', loop_count: 0 });
+			const result = runBashScript(scriptPath, input, workDir);
+			expect(result.exitCode).toBe(0);
+
+			const parsed = parseJsonOutput(result.stdout);
+			expect(parsed).toHaveProperty('followup_message');
+			expect(parsed.followup_message).toContain('ACE_REVIEW');
+
+			// Verify eval flag was created
+			expect(fs.existsSync(path.join(aceDir, '.eval-requested'))).toBe(true);
+		});
+
+		it('should NOT request self-eval when no patterns were injected', () => {
+			const scriptPath = path.join(scriptsDir, 'ace_stop_hook.sh');
+			fs.writeFileSync(scriptPath, `#!/bin/bash
+input=$(cat)
+status=$(echo "$input" | jq -r '.status // empty')
+loop_count=$(echo "$input" | jq -r '.loop_count // 0')
+ace_dir=".cursor/ace"
+mkdir -p "$ace_dir"
+eval_flag="$ace_dir/.eval-requested"
+
+if [ "$status" != "completed" ]; then echo '{}'; exit 0; fi
+if [ "$loop_count" = "0" ]; then
+  patterns_injected=0
+  if [ -f "$ace_dir/ace-relevance.jsonl" ]; then
+    patterns_injected=$(grep -c '"event": "search"' "$ace_dir/ace-relevance.jsonl" 2>/dev/null || echo "0")
+  fi
+  if [ "$patterns_injected" -gt 0 ] 2>/dev/null; then
+    touch "$eval_flag"
+    msg="Session complete. ACE_REVIEW request"
+  else
+    msg="Session complete."
+  fi
+  echo "{\\"followup_message\\": \\"$msg\\"}"
+else
+  rm -f "$eval_flag" 2>/dev/null
+  echo '{}'
+fi
+`, { mode: 0o755 });
+
+			const input = JSON.stringify({ status: 'completed', loop_count: 0 });
+			const result = runBashScript(scriptPath, input, workDir);
+			expect(result.exitCode).toBe(0);
+
+			const parsed = parseJsonOutput(result.stdout);
+			expect(parsed.followup_message).not.toContain('ACE_REVIEW');
+			expect(fs.existsSync(path.join(tempDir, '.cursor', 'ace', '.eval-requested'))).toBe(false);
+		});
+
+		it('should clean up eval flag on subsequent stop (loop_count>0)', () => {
+			const aceDir = path.join(tempDir, '.cursor', 'ace');
+			fs.writeFileSync(path.join(aceDir, '.eval-requested'), '');
+
+			const scriptPath = path.join(scriptsDir, 'ace_stop_hook.sh');
+			fs.writeFileSync(scriptPath, `#!/bin/bash
+input=$(cat)
+status=$(echo "$input" | jq -r '.status // empty')
+loop_count=$(echo "$input" | jq -r '.loop_count // 0')
+ace_dir=".cursor/ace"
+mkdir -p "$ace_dir"
+eval_flag="$ace_dir/.eval-requested"
+
+if [ "$status" != "completed" ]; then echo '{}'; exit 0; fi
+if [ "$loop_count" = "0" ]; then
+  echo "{\\"followup_message\\": \\"test\\"}"
+else
+  rm -f "$eval_flag" 2>/dev/null
+  echo '{}'
+fi
+`, { mode: 0o755 });
+
+			const input = JSON.stringify({ status: 'completed', loop_count: 1 });
+			const result = runBashScript(scriptPath, input, workDir);
+			expect(result.exitCode).toBe(0);
+
+			const parsed = parseJsonOutput(result.stdout);
+			expect(parsed).toEqual({});
+			expect(fs.existsSync(path.join(aceDir, '.eval-requested'))).toBe(false);
+		});
+	});
+
+	describeUnix('Unix: response tracking ACE_REVIEW parsing', () => {
+		it('should parse ACE_REVIEW and write ace-review-result.json', () => {
+			const aceDir = path.join(tempDir, '.cursor', 'ace');
+			const scriptPath = path.join(scriptsDir, 'ace_track_response.sh');
+			fs.writeFileSync(scriptPath, `#!/bin/bash
+input=$(cat)
+ace_dir=".cursor/ace"
+mkdir -p "$ace_dir"
+echo "$input" >> "$ace_dir/response_trajectory.jsonl"
+response_text=$(echo "$input" | jq -r '.text // ""' 2>/dev/null || echo "")
+if echo "$response_text" | grep -q "ACE_REVIEW:"; then
+  time_saved=$(echo "$response_text" | grep -oE 'ACE_REVIEW:[^|]*' | sed 's/ACE_REVIEW:[[:space:]]*//' | sed 's/[[:space:]]*$//')
+  reason=$(echo "$response_text" | grep -oE 'ACE_REVIEW:[^|]*\\|[^"]*' | sed 's/.*|[[:space:]]*//' | head -c 200)
+  minutes=$(echo "$time_saved" | grep -oE '[0-9]+' | head -1)
+  minutes=\${minutes:-0}
+  if [ "$minutes" -ge 30 ] 2>/dev/null; then helpful_pct=80
+  elif [ "$minutes" -ge 15 ] 2>/dev/null; then helpful_pct=60
+  elif [ "$minutes" -ge 5 ] 2>/dev/null; then helpful_pct=30
+  elif [ "$minutes" -gt 0 ] 2>/dev/null; then helpful_pct=15
+  else helpful_pct=0; fi
+  echo "{\\"helpful_pct\\": $helpful_pct, \\"time_saved\\": \\"$time_saved\\", \\"reason\\": \\"$reason\\"}" > "$ace_dir/ace-review-result.json"
+fi
+exit 0
+`, { mode: 0o755 });
+
+			const input = JSON.stringify({
+				text: 'Task done. ACE_REVIEW: 15m saved | Auth patterns saved OAuth research time'
+			});
+			const result = runBashScript(scriptPath, input, workDir);
+			expect(result.exitCode).toBe(0);
+
+			// Verify ace-review-result.json
+			const reviewFile = path.join(aceDir, 'ace-review-result.json');
+			expect(fs.existsSync(reviewFile)).toBe(true);
+			const review = JSON.parse(fs.readFileSync(reviewFile, 'utf8'));
+			expect(review.helpful_pct).toBe(60); // 15m → 60%
+			expect(review.time_saved).toBe('15m saved');
+			expect(review.reason).toContain('Auth patterns');
+		});
+
+		it('should NOT write review file when no ACE_REVIEW in response', () => {
+			const aceDir = path.join(tempDir, '.cursor', 'ace');
+			const scriptPath = path.join(scriptsDir, 'ace_track_response.sh');
+			fs.writeFileSync(scriptPath, `#!/bin/bash
+input=$(cat)
+ace_dir=".cursor/ace"
+mkdir -p "$ace_dir"
+echo "$input" >> "$ace_dir/response_trajectory.jsonl"
+response_text=$(echo "$input" | jq -r '.text // ""' 2>/dev/null || echo "")
+if echo "$response_text" | grep -q "ACE_REVIEW:"; then
+  echo "{\\"helpful_pct\\": 50}" > "$ace_dir/ace-review-result.json"
+fi
+exit 0
+`, { mode: 0o755 });
+
+			const input = JSON.stringify({ text: 'Just a normal response without review' });
+			const result = runBashScript(scriptPath, input, workDir);
+			expect(result.exitCode).toBe(0);
+			expect(fs.existsSync(path.join(aceDir, 'ace-review-result.json'))).toBe(false);
+		});
+	});
+
+	// -- PowerShell tests --
+	const describePwsh = hasPwsh() ? describe : describe.skip;
+
+	describePwsh('PowerShell: beforeSubmitPrompt relevance logging', () => {
+		it('should log injection event to ace-relevance.jsonl when patterns exist', () => {
+			const aceDir = path.join(tempDir, '.cursor', 'ace');
+			fs.writeFileSync(path.join(aceDir, 'pattern_cache.json'), JSON.stringify({
+				patternCount: 10,
+				domains: ['testing'],
+				avgConfidence: 0.7
+			}));
+
+			const scriptPath = path.join(scriptsDir, 'ace_before_submit_prompt.ps1');
+			fs.writeFileSync(scriptPath, `$inputJson = [Console]::In.ReadToEnd()
+$aceDir = ".cursor\\ace"
+if (-not (Test-Path $aceDir)) { New-Item -ItemType Directory -Path $aceDir -Force | Out-Null }
+$cacheFile = "$aceDir\\pattern_cache.json"
+if (Test-Path $cacheFile) {
+    try {
+        $cache = Get-Content $cacheFile | ConvertFrom-Json
+        $patternCount = $cache.patternCount
+        if ($patternCount -gt 0) {
+            $domains = if ($cache.domains) { ($cache.domains -join ", ") } else { "" }
+            $avgConf = if ($cache.avgConfidence) { $cache.avgConfidence } else { 0 }
+            $domainsJson = if ($cache.domains) { ($cache.domains | ForEach-Object { "\`"$_\`"" }) -join ", " } else { "" }
+            $logEntry = "{\`"event\`": \`"search\`", \`"patterns_injected\`": $patternCount, \`"domains\`": [$domainsJson], \`"avg_confidence\`": $avgConf}"
+            $logEntry | Out-File -FilePath "$aceDir\\ace-relevance.jsonl" -Encoding utf8 -Append
+            Write-Output "{\`"additional_context\`": \`"[ACE] $patternCount patterns available.\`"}"
+        } else { Write-Output '{}' }
+    } catch { Write-Output '{}' }
+} else { Write-Output '{}' }
+`);
+
+			const result = runPwshScript(scriptPath, '{"prompt_text":"test"}', workDir);
+			expect(result.exitCode).toBe(0);
+
+			const parsed = parseJsonOutput(result.stdout);
+			expect(parsed).toHaveProperty('additional_context');
+
+			const relevanceFile = path.join(aceDir, 'ace-relevance.jsonl');
+			expect(fs.existsSync(relevanceFile)).toBe(true);
+			const content = fs.readFileSync(relevanceFile, 'utf8').trim();
+			const logEntry = JSON.parse(content);
+			expect(logEntry.event).toBe('search');
+			expect(logEntry.patterns_injected).toBe(10);
+		});
+	});
+
+	describePwsh('PowerShell: stop hook self-eval request', () => {
+		it('should request self-eval when patterns were injected', () => {
+			const aceDir = path.join(tempDir, '.cursor', 'ace');
+			fs.writeFileSync(path.join(aceDir, 'ace-relevance.jsonl'),
+				'{"event": "search", "patterns_injected": 5}\n');
+
+			const scriptPath = path.join(scriptsDir, 'ace_stop_hook.ps1');
+			fs.writeFileSync(scriptPath, `$inputJson = [Console]::In.ReadToEnd()
+$data = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
+$status = $data.status
+$loopCount = $data.loop_count
+$aceDir = ".cursor\\ace"
+if (-not (Test-Path $aceDir)) { New-Item -ItemType Directory -Path $aceDir -Force | Out-Null }
+$evalFlag = "$aceDir\\.eval-requested"
+
+if ($status -ne "completed") { Write-Output '{}'; exit 0 }
+if ($loopCount -eq 0) {
+    $patternsInjected = 0
+    if (Test-Path "$aceDir\\ace-relevance.jsonl") {
+        $patternsInjected = (Select-String -Path "$aceDir\\ace-relevance.jsonl" -Pattern '"event": "search"' -SimpleMatch | Measure-Object).Count
+    }
+    if ($patternsInjected -gt 0) {
+        New-Item -ItemType File -Path $evalFlag -Force | Out-Null
+        $msg = "Session complete. ACE_REVIEW: Xm saved"
+    } else {
+        $msg = "Session complete."
+    }
+    Write-Output "{\`"followup_message\`": \`"$msg\`"}"
+} else {
+    if (Test-Path $evalFlag) { Remove-Item $evalFlag -Force }
+    Write-Output '{}'
+}
+`);
+
+			const input = JSON.stringify({ status: 'completed', loop_count: 0 });
+			const result = runPwshScript(scriptPath, input, workDir);
+			expect(result.exitCode).toBe(0);
+
+			const parsed = parseJsonOutput(result.stdout);
+			expect(parsed).toHaveProperty('followup_message');
+			expect(parsed.followup_message).toContain('ACE_REVIEW');
+			expect(fs.existsSync(path.join(aceDir, '.eval-requested'))).toBe(true);
+		});
+	});
+
+	describePwsh('PowerShell: response tracking ACE_REVIEW parsing', () => {
+		it('should parse ACE_REVIEW and write ace-review-result.json', () => {
+			const aceDir = path.join(tempDir, '.cursor', 'ace');
+			const scriptPath = path.join(scriptsDir, 'ace_track_response.ps1');
+			fs.writeFileSync(scriptPath, `$inputJson = [Console]::In.ReadToEnd()
+$aceDir = ".cursor\\ace"
+if (-not (Test-Path $aceDir)) { New-Item -ItemType Directory -Path $aceDir -Force | Out-Null }
+$inputJson | Out-File -Append -FilePath "$aceDir\\response_trajectory.jsonl" -Encoding utf8
+try {
+    $data = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
+    $responseText = if ($data.text) { $data.text } else { "" }
+} catch { $responseText = "" }
+if ($responseText -match "ACE_REVIEW:") {
+    if ($responseText -match "ACE_REVIEW:\\s*([^|]+)") { $timeSaved = $Matches[1].Trim() } else { $timeSaved = "" }
+    if ($responseText -match "ACE_REVIEW:[^|]*\\|\\s*(.+)") { $reason = $Matches[1].Trim() } else { $reason = "" }
+    if ($timeSaved -match "(\\d+)") { $minutes = [int]$Matches[1] } else { $minutes = 0 }
+    if ($minutes -ge 30) { $helpfulPct = 80 }
+    elseif ($minutes -ge 15) { $helpfulPct = 60 }
+    elseif ($minutes -ge 5) { $helpfulPct = 30 }
+    elseif ($minutes -gt 0) { $helpfulPct = 15 }
+    else { $helpfulPct = 0 }
+    $reviewResult = @{ helpful_pct = $helpfulPct; time_saved = $timeSaved; reason = $reason } | ConvertTo-Json -Compress
+    $reviewResult | Out-File -FilePath "$aceDir\\ace-review-result.json" -Encoding utf8
+}
+`);
+
+			const input = JSON.stringify({
+				text: 'Done. ACE_REVIEW: 5m saved | Saved time on config patterns'
+			});
+			const result = runPwshScript(scriptPath, input, workDir);
+			expect(result.exitCode).toBe(0);
+
+			const reviewFile = path.join(aceDir, 'ace-review-result.json');
+			expect(fs.existsSync(reviewFile)).toBe(true);
+			const review = JSON.parse(fs.readFileSync(reviewFile, 'utf8'));
+			expect(review.helpful_pct).toBe(30); // 5m → 30%
+			expect(review.time_saved).toContain('5m');
+			expect(review.reason).toContain('config patterns');
+		});
+	});
+});

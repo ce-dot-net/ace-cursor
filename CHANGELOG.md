@@ -5,6 +5,20 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.56] - 2026-03-18
+
+### Added
+- **ACE Task Helpfulness — Time Saved Transparency**
+  - Shows how much time ACE pattern knowledge saved the human developer per task
+  - Two-phase self-eval: stop hook asks AI to evaluate, response hook parses `ACE_REVIEW`
+  - `ace-relevance.jsonl` — Per-task pattern injection tracking (patterns count, domains, confidence)
+  - `ace-review-result.json` — Self-eval result (helpful %, time saved, reason)
+  - Status panel "Task Summary" section — patterns injected, domains, relevance %, helpful %, time saved
+  - `beforeSubmitPrompt` hooks (.sh/.ps1) — Log pattern injection events to ace-relevance.jsonl
+  - `stop` hooks (.sh/.ps1) — Request time-saved self-eval via `followup_message` when patterns were injected
+  - `afterAgentResponse` hooks (.sh/.ps1) — Parse `ACE_REVIEW: Xm saved | reason` from agent response
+  - Cross-platform: Full parity between Unix (bash) and Windows (PowerShell) scripts
+
 ## [0.2.55] - 2026-03-17
 
 ### Added
