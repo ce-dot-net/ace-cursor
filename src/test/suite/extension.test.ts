@@ -455,7 +455,7 @@ suite('ACE Extension Test Suite', () => {
 	test('Cursor rules file should have correct structure if exists', () => {
 		const workspaceFolders = vscode.workspace.workspaceFolders;
 		if (workspaceFolders && workspaceFolders.length > 0) {
-			const rulesPath = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'rules', 'ace-patterns.mdc');
+			const rulesPath = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'rules', 'ace-patterns', 'RULE.md');
 			if (fs.existsSync(rulesPath)) {
 				const content = fs.readFileSync(rulesPath, 'utf-8');
 				// Check frontmatter
@@ -708,20 +708,20 @@ suite('ACE Extension Test Suite', () => {
 		}
 	});
 
-	test('ace-patterns.mdc rules should show trajectory as array format', () => {
+	test('ace-patterns/RULE.md should show trajectory as array format', () => {
 		const workspaceFolders = vscode.workspace.workspaceFolders;
 		if (workspaceFolders && workspaceFolders.length > 0) {
-			const rulesPath = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'rules', 'ace-patterns.mdc');
+			const rulesPath = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'rules', 'ace-patterns', 'RULE.md');
 			if (fs.existsSync(rulesPath)) {
 				const content = fs.readFileSync(rulesPath, 'utf-8');
 				// Rules should also show trajectory as array format
 				assert.ok(
 					content.includes('trajectory'),
-					'ace-patterns.mdc should mention trajectory parameter'
+					'ace-patterns/RULE.md should mention trajectory parameter'
 				);
 				assert.ok(
 					content.includes('trajectory=[') || content.includes('trajectory: ['),
-					'ace-patterns.mdc should show trajectory as an array (not a string)'
+					'ace-patterns/RULE.md should show trajectory as an array (not a string)'
 				);
 			}
 		}

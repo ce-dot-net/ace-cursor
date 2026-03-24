@@ -5,6 +5,15 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.59] - 2026-03-24
+
+### Changed
+- **Hybrid stop hook** — Stop hook now checks if `ace_learn` was already called (via `ace-review-result.json`). If NOT called, sends `followup_message` nudging the AI to call `ace_learn` with `TIME_SAVED`. If already called, outputs `{}`. This ensures ace_learn gets called even when rules alone aren't enough.
+- **Migrated rules to folder format** — Rules now use `.cursor/rules/<name>/RULE.md` (Cursor 2.2+ format) instead of legacy `.mdc` files. Old `.mdc` files are automatically removed during workspace update.
+
+### Fixed
+- **ace_learn not being called** — The AI was ignoring rules-only instructions to call `ace_learn`. The hybrid approach (rules + stop hook fallback) ensures ace_learn is called with two chances.
+
 ## [0.2.58] - 2026-03-24
 
 ### Changed

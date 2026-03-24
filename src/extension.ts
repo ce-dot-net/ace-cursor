@@ -1098,13 +1098,15 @@ try {
 
 	// Stop Hook with Git Context Aggregation
 	const stopHookPath = path.join(scriptsDir, 'ace_stop_hook.ps1');
-	const stopHookScript = `# ACE Stop Hook - Aggregates trajectory summary on task completion
-# Helpfulness is now captured via afterMCPExecution when ace_learn is called
+	const stopHookScript = `# ACE Stop Hook - Hybrid: trajectory summary + ace_learn fallback nudge
+# Primary: afterMCPExecution detects ace_learn (via rules instruction)
+# Fallback: if ace_learn wasn't called, nudge the AI via followup_message
 # Input: status, loop_count, transcript_path, conversation_id
 
 $inputJson = [Console]::In.ReadToEnd()
 $data = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
 $status = $data.status
+$loopCount = if ($data.loop_count) { $data.loop_count } else { 0 }
 $transcriptPath = $data.transcript_path
 
 $aceDir = ".cursor\\ace"
@@ -1116,6 +1118,7 @@ if ($status -ne "completed") {
     exit 0
 }
 
+# Aggregate trajectory
 $gitBranch = git rev-parse --abbrev-ref HEAD 2>$null
 if (-not $gitBranch) { $gitBranch = "unknown" }
 $gitHash = git rev-parse --short HEAD 2>$null
@@ -1143,7 +1146,14 @@ $summary = "MCP:$mcpCount Shell:$shellCount Edits:$editCount Responses:$response
 $entry = @{event="stop"; summary=$summary; git_branch=$gitBranch; git_hash=$gitHash; timestamp=(Get-Date -Format "o")} | ConvertTo-Json -Compress
 $entry | Out-File -Append -FilePath "$aceDir\\ace-relevance.jsonl" -Encoding utf8
 
-Write-Output '{}'
+# Hybrid: check if ace_learn was already called (review file exists)
+if ($loopCount -eq 0 -and -not (Test-Path "$aceDir\\ace-review-result.json")) {
+    # ace_learn was NOT called — nudge the AI
+    $msg = "Now call ace_learn to capture what you learned. Start the output field with TIME_SAVED: Xm | reason (estimate minutes saved by ACE patterns, 0 if none helped)."
+    Write-Output "{\`"followup_message\`": \`"$msg\`"}"
+} else {
+    Write-Output '{}'
+}
 `;
 	// Always update stop hook
 	fs.writeFileSync(stopHookPath, stopHookScript);
@@ -1719,34 +1729,36 @@ exit 0
 	// Stop Hook with Git Context Aggregation
 	const stopHookPath = path.join(scriptsDir, 'ace_stop_hook.sh');
 	const stopHookScript = `#!/bin/bash
-# ACE Stop Hook - Aggregates trajectory summary on task completion
-# Helpfulness is now captured via afterMCPExecution when ace_learn is called
+# ACE Stop Hook - Hybrid: trajectory summary + ace_learn fallback nudge
+# Primary: afterMCPExecution detects ace_learn (via rules instruction)
+# Fallback: if ace_learn wasn't called, nudge the AI via followup_message
 # Input: status, loop_count, transcript_path, conversation_id
-# Requires: jq (checked at extension activation)
 
 input=$(cat)
 
-# Extract fields — bail gracefully without jq
+# Extract fields — works with or without jq
 if command -v jq >/dev/null 2>&1; then
   status=$(echo "$input" | jq -r '.status // empty')
+  loop_count=$(echo "$input" | jq -r '.loop_count // 0')
   transcript_path=$(echo "$input" | jq -r '.transcript_path // empty')
 else
   status=$(echo "$input" | grep -oE '"status"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*: *"//' | sed 's/"$//')
+  loop_count=$(echo "$input" | grep -oE '"loop_count"[[:space:]]*:[[:space:]]*[0-9]*' | head -1 | grep -oE '[0-9]+$' || echo "0")
   transcript_path=$(echo "$input" | grep -oE '"transcript_path"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*: *"//' | sed 's/"$//')
 fi
 
 ace_dir=".cursor/ace"
 mkdir -p "$ace_dir"
 
-# Only process on completed tasks
+# Only process completed tasks
 if [ "$status" != "completed" ]; then
   echo '{}'
   exit 0
 fi
 
+# Aggregate trajectory
 git_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 git_hash=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-
 mcp_count=$(wc -l < "$ace_dir/mcp_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
 shell_count=$(wc -l < "$ace_dir/shell_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
 edit_count=$(wc -l < "$ace_dir/edit_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
@@ -1759,7 +1771,14 @@ fi
 summary="MCP:$mcp_count Shell:$shell_count Edits:$edit_count Responses:$response_count"
 echo "{\\"event\\": \\"stop\\", \\"summary\\": \\"$summary\\", \\"git_branch\\": \\"$git_branch\\", \\"git_hash\\": \\"$git_hash\\", \\"timestamp\\": \\"$(date -Iseconds)\\"}" >> "$ace_dir/ace-relevance.jsonl"
 
-echo '{}'
+# Hybrid: check if ace_learn was already called (review file exists)
+if [ "$loop_count" = "0" ] && [ ! -f "$ace_dir/ace-review-result.json" ]; then
+  # ace_learn was NOT called — nudge the AI
+  msg="Now call ace_learn to capture what you learned. Start the output field with TIME_SAVED: Xm | reason (estimate minutes saved by ACE patterns, 0 if none helped)."
+  echo "{\\"followup_message\\": \\"$msg\\"}"
+else
+  echo '{}'
+fi
 `;
 	// Always update stop hook
 	fs.writeFileSync(stopHookPath, stopHookScript, { mode: 0o755 });
@@ -2197,7 +2216,22 @@ async function createCursorRules(folder?: vscode.WorkspaceFolder, forceUpdate: b
 		fs.mkdirSync(rulesDir, { recursive: true });
 	}
 
-	const rulesPath = path.join(rulesDir, 'ace-patterns.mdc');
+	// Migrate from legacy .mdc files to folder-based RULE.md format (Cursor 2.2+)
+	const legacyFiles = ['ace-patterns.mdc', 'ace-domain-search.md', 'ace-continuous-search.md'];
+	for (const legacy of legacyFiles) {
+		const legacyPath = path.join(rulesDir, legacy);
+		if (fs.existsSync(legacyPath)) {
+			fs.unlinkSync(legacyPath);
+			console.log(`[ACE] Removed legacy rule file: ${legacy}`);
+		}
+	}
+
+	// Create folder-based rules: .cursor/rules/<name>/RULE.md
+	const patternsRuleDir = path.join(rulesDir, 'ace-patterns');
+	if (!fs.existsSync(patternsRuleDir)) {
+		fs.mkdirSync(patternsRuleDir, { recursive: true });
+	}
+	const rulesPath = path.join(patternsRuleDir, 'RULE.md');
 	const rulesContent = `---
 description: ACE Pattern Learning - MANDATORY pattern search EVERY SESSION
 alwaysApply: true
@@ -2300,11 +2334,15 @@ ace_learn(
 	// Create if doesn't exist OR if force update requested (during version upgrade)
 	if (forceUpdate || !fs.existsSync(rulesPath)) {
 		fs.writeFileSync(rulesPath, rulesContent);
-		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace-patterns.mdc rules file`);
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace-patterns/RULE.md`);
 	}
 
-	// Create domain-aware search rule (Issue #3) - Updated for ace_list_domains (v0.2.30)
-	const domainRulePath = path.join(rulesDir, 'ace-domain-search.md');
+	// Create domain-aware search rule (folder-based)
+	const domainRuleDir = path.join(rulesDir, 'ace-domain-search');
+	if (!fs.existsSync(domainRuleDir)) {
+		fs.mkdirSync(domainRuleDir, { recursive: true });
+	}
+	const domainRulePath = path.join(domainRuleDir, 'RULE.md');
 	const domainRuleContent = `---
 description: Domain-aware ACE pattern search - discover and use actual domain names
 alwaysApply: true
@@ -2368,10 +2406,14 @@ Using non-existent domains returns 0 results. Always verify domain names exist f
 
 	// Always update domain rule to get latest patterns
 	fs.writeFileSync(domainRulePath, domainRuleContent);
-	console.log('[ACE] Updated ace-domain-search.md rules file');
+	console.log('[ACE] Updated ace-domain-search/RULE.md');
 
-	// Create continuous search rule (v0.2.28) - Updated for ace_list_domains (v0.2.30)
-	const continuousSearchRulePath = path.join(rulesDir, 'ace-continuous-search.md');
+	// Create continuous search rule (folder-based)
+	const continuousSearchRuleDir = path.join(rulesDir, 'ace-continuous-search');
+	if (!fs.existsSync(continuousSearchRuleDir)) {
+		fs.mkdirSync(continuousSearchRuleDir, { recursive: true });
+	}
+	const continuousSearchRulePath = path.join(continuousSearchRuleDir, 'RULE.md');
 	const continuousSearchRuleContent = `---
 description: Continuous pattern retrieval during extended work
 alwaysApply: true
@@ -2409,7 +2451,7 @@ not simple paths. Always use \`ace_list_domains\` to discover actual domain name
 
 	// Always update continuous search rule
 	fs.writeFileSync(continuousSearchRulePath, continuousSearchRuleContent);
-	console.log('[ACE] Updated ace-continuous-search.md rules file');
+	console.log('[ACE] Updated ace-continuous-search/RULE.md');
 }
 
 /**

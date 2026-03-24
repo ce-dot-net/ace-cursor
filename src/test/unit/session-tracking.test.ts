@@ -156,17 +156,22 @@ status=$(echo "$input" | jq -r '.status // empty')`;
 			expect(unixScriptTemplate).toContain('jq -r');
 		});
 
-		it('should log stop event to ace-relevance.jsonl (no followup_message)', () => {
+		it('should use hybrid approach: followup_message only when ace_learn not called', () => {
 			const unixLogTemplate = `
 summary="MCP:$mcp_count Shell:$shell_count Edits:$edit_count Responses:$response_count"
 echo "{\\"event\\": \\"stop\\", \\"summary\\": \\"$summary\\"}" >> "$ace_dir/ace-relevance.jsonl"
 
-echo '{}'`;
+if [ "$loop_count" = "0" ] && [ ! -f "$ace_dir/ace-review-result.json" ]; then
+  msg="Now call ace_learn"
+  echo "{\\"followup_message\\": \\"$msg\\"}"
+else
+  echo '{}'
+fi`;
 
-			expect(unixLogTemplate).toContain('event');
-			expect(unixLogTemplate).toContain('stop');
 			expect(unixLogTemplate).toContain('ace-relevance.jsonl');
-			expect(unixLogTemplate).not.toContain('followup_message');
+			expect(unixLogTemplate).toContain('ace-review-result.json');
+			expect(unixLogTemplate).toContain('followup_message');
+			expect(unixLogTemplate).toContain('loop_count');
 		});
 	});
 
@@ -183,22 +188,25 @@ $status = $data.status`;
 			expect(windowsScriptTemplate).toContain('ConvertFrom-Json');
 		});
 
-		it('should log stop event (no followup_message) for Windows', () => {
+		it('should use hybrid approach for Windows: followup_message when ace_learn not called', () => {
 			const windowsLogTemplate = `
-$summary = "MCP:$mcpCount Shell:$shellCount Edits:$editCount Responses:$responseCount"
-$entry = @{event="stop"; summary=$summary} | ConvertTo-Json -Compress
 $entry | Out-File -Append -FilePath "$aceDir\\ace-relevance.jsonl" -Encoding utf8
 
-Write-Output '{}'`;
+if ($loopCount -eq 0 -and -not (Test-Path "$aceDir\\ace-review-result.json")) {
+    $msg = "Now call ace_learn"
+    Write-Output "{\`"followup_message\`": \`"$msg\`"}"
+} else {
+    Write-Output '{}'
+}`;
 
-			expect(windowsLogTemplate).toContain('event');
-			expect(windowsLogTemplate).toContain('stop');
 			expect(windowsLogTemplate).toContain('ace-relevance.jsonl');
-			expect(windowsLogTemplate).not.toContain('followup_message');
+			expect(windowsLogTemplate).toContain('ace-review-result.json');
+			expect(windowsLogTemplate).toContain('followup_message');
+			expect(windowsLogTemplate).toContain('loopCount');
 		});
 	});
 
-	describe('Rules File (ace-patterns.mdc)', () => {
+	describe('Rules File (ace-patterns/RULE.md)', () => {
 		it('should instruct AI to use ace_search before tasks', () => {
 			const rulesContent = `
 ## HOW TO USE ace_search
@@ -281,18 +289,22 @@ ace_learn(
 		});
 	});
 
-	describe('Stop Hook Output Format', () => {
-		it('should output empty JSON (no followup_message needed)', () => {
-			// The simplified stop hook outputs {} — helpfulness is captured via afterMCPExecution
-			const emptyOutput = '{}';
+	describe('Stop Hook Output Format (Hybrid)', () => {
+		it('should output followup_message when ace_learn not yet called', () => {
+			const output = { followup_message: 'Now call ace_learn to capture what you learned.' };
+			const json = JSON.stringify(output);
+			const parsed = JSON.parse(json);
+			expect(parsed.followup_message).toContain('ace_learn');
+		});
 
+		it('should output empty JSON when ace_learn was already called', () => {
+			const emptyOutput = '{}';
 			const parsed = JSON.parse(emptyOutput);
 			expect(Object.keys(parsed).length).toBe(0);
 		});
 
 		it('should return empty JSON when not completed', () => {
 			const emptyOutput = '{}';
-
 			const parsed = JSON.parse(emptyOutput);
 			expect(Object.keys(parsed).length).toBe(0);
 		});
@@ -354,7 +366,7 @@ ace_learn(
 	});
 
 	describe('Actual Script File Content Verification', () => {
-		it('should verify Unix stop hook script uses simplified trajectory summary', () => {
+		it('should verify Unix stop hook script uses hybrid approach', () => {
 			const projectRoot = path.resolve(__dirname, '../../../..');
 			const scriptPath = path.join(projectRoot, '.cursor', 'scripts', 'ace_stop_hook.sh');
 
@@ -363,7 +375,9 @@ ace_learn(
 
 				expect(content).toContain('status');
 				expect(content).toContain('ace-relevance.jsonl');
-				expect(content).not.toContain('followup_message');
+				expect(content).toContain('ace-review-result.json');
+				expect(content).toContain('followup_message');
+				expect(content).toContain('loop_count');
 				expect(content).not.toContain('ACE_REVIEW');
 			}
 		});
@@ -383,7 +397,7 @@ ace_learn(
 
 		it('should verify rules file has TIME_SAVED instructions', () => {
 			const projectRoot = path.resolve(__dirname, '../../../..');
-			const rulesPath = path.join(projectRoot, '.cursor', 'rules', 'ace-patterns.mdc');
+			const rulesPath = path.join(projectRoot, '.cursor', 'rules', 'ace-patterns', 'RULE.md');
 
 			if (fs.existsSync(rulesPath)) {
 				const content = fs.readFileSync(rulesPath, 'utf-8');

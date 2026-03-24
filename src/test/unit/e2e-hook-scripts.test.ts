@@ -899,27 +899,50 @@ fi
 		});
 	});
 
-	describeUnix('Unix: stop hook trajectory summary (simplified)', () => {
-		it('should output empty JSON and log stop event on completed task', () => {
-			const scriptPath = path.join(scriptsDir, 'ace_stop_hook.sh');
-			fs.writeFileSync(scriptPath, `#!/bin/bash
+	describeUnix('Unix: stop hook hybrid — ace_learn fallback', () => {
+		// Shared script for all tests in this block
+		const stopScript = `#!/bin/bash
 input=$(cat)
 status=$(echo "$input" | jq -r '.status // empty')
+loop_count=$(echo "$input" | jq -r '.loop_count // 0')
 ace_dir=".cursor/ace"
 mkdir -p "$ace_dir"
 
 if [ "$status" != "completed" ]; then echo '{}'; exit 0; fi
 
-mcp_count=$(wc -l < "$ace_dir/mcp_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
-shell_count=$(wc -l < "$ace_dir/shell_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
-edit_count=$(wc -l < "$ace_dir/edit_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
-response_count=$(wc -l < "$ace_dir/response_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
-
-summary="MCP:$mcp_count Shell:$shell_count Edits:$edit_count Responses:$response_count"
+summary="MCP:0 Shell:0 Edits:0 Responses:0"
 echo "{\\"event\\": \\"stop\\", \\"summary\\": \\"$summary\\"}" >> "$ace_dir/ace-relevance.jsonl"
 
-echo '{}'
-`, { mode: 0o755 });
+if [ "$loop_count" = "0" ] && [ ! -f "$ace_dir/ace-review-result.json" ]; then
+  msg="Now call ace_learn to capture what you learned. Start the output field with TIME_SAVED: Xm | reason."
+  echo "{\\"followup_message\\": \\"$msg\\"}"
+else
+  echo '{}'
+fi
+`;
+
+		it('should send followup_message when ace_learn was NOT called (no review file)', () => {
+			const scriptPath = path.join(scriptsDir, 'ace_stop_hook.sh');
+			fs.writeFileSync(scriptPath, stopScript, { mode: 0o755 });
+
+			const input = JSON.stringify({ status: 'completed', loop_count: 0 });
+			const result = runBashScript(scriptPath, input, workDir);
+			expect(result.exitCode).toBe(0);
+
+			const parsed = parseJsonOutput(result.stdout);
+			expect(parsed).toHaveProperty('followup_message');
+			expect(parsed.followup_message).toContain('ace_learn');
+			expect(parsed.followup_message).toContain('TIME_SAVED');
+		});
+
+		it('should output empty JSON when ace_learn WAS called (review file exists)', () => {
+			const aceDir = path.join(tempDir, '.cursor', 'ace');
+			// Simulate ace_learn already called — review file exists
+			fs.writeFileSync(path.join(aceDir, 'ace-review-result.json'),
+				'{"helpful_pct": 60, "time_saved": "15m", "reason": "test"}');
+
+			const scriptPath = path.join(scriptsDir, 'ace_stop_hook.sh');
+			fs.writeFileSync(scriptPath, stopScript, { mode: 0o755 });
 
 			const input = JSON.stringify({ status: 'completed', loop_count: 0 });
 			const result = runBashScript(scriptPath, input, workDir);
@@ -927,8 +950,38 @@ echo '{}'
 
 			const parsed = parseJsonOutput(result.stdout);
 			expect(parsed).toEqual({});
+		});
 
-			// Verify stop event was logged
+		it('should output empty JSON on subsequent stop (loop_count > 0)', () => {
+			const scriptPath = path.join(scriptsDir, 'ace_stop_hook.sh');
+			fs.writeFileSync(scriptPath, stopScript, { mode: 0o755 });
+
+			const input = JSON.stringify({ status: 'completed', loop_count: 1 });
+			const result = runBashScript(scriptPath, input, workDir);
+			expect(result.exitCode).toBe(0);
+
+			const parsed = parseJsonOutput(result.stdout);
+			expect(parsed).toEqual({});
+		});
+
+		it('should skip non-completed tasks', () => {
+			const scriptPath = path.join(scriptsDir, 'ace_stop_hook.sh');
+			fs.writeFileSync(scriptPath, stopScript, { mode: 0o755 });
+
+			const input = JSON.stringify({ status: 'aborted', loop_count: 0 });
+			const result = runBashScript(scriptPath, input, workDir);
+			expect(result.exitCode).toBe(0);
+			const parsed = parseJsonOutput(result.stdout);
+			expect(parsed).toEqual({});
+		});
+
+		it('should log stop event to ace-relevance.jsonl', () => {
+			const scriptPath = path.join(scriptsDir, 'ace_stop_hook.sh');
+			fs.writeFileSync(scriptPath, stopScript, { mode: 0o755 });
+
+			const input = JSON.stringify({ status: 'completed', loop_count: 0 });
+			runBashScript(scriptPath, input, workDir);
+
 			const aceDir = path.join(tempDir, '.cursor', 'ace');
 			const relevanceFile = path.join(aceDir, 'ace-relevance.jsonl');
 			expect(fs.existsSync(relevanceFile)).toBe(true);
@@ -936,22 +989,6 @@ echo '{}'
 			const entry = JSON.parse(content);
 			expect(entry.event).toBe('stop');
 			expect(entry.summary).toContain('MCP:');
-		});
-
-		it('should skip non-completed tasks', () => {
-			const scriptPath = path.join(scriptsDir, 'ace_stop_hook.sh');
-			fs.writeFileSync(scriptPath, `#!/bin/bash
-input=$(cat)
-status=$(echo "$input" | jq -r '.status // empty')
-if [ "$status" != "completed" ]; then echo '{}'; exit 0; fi
-echo '{}'
-`, { mode: 0o755 });
-
-			const input = JSON.stringify({ status: 'aborted', loop_count: 0 });
-			const result = runBashScript(scriptPath, input, workDir);
-			expect(result.exitCode).toBe(0);
-			const parsed = parseJsonOutput(result.stdout);
-			expect(parsed).toEqual({});
 		});
 	});
 
@@ -1189,28 +1226,49 @@ if (Test-Path $cacheFile) {
 		});
 	});
 
-	describePwsh('PowerShell: stop hook trajectory summary (simplified)', () => {
-		it('should output empty JSON and log stop event on completed task', () => {
-			const scriptPath = path.join(scriptsDir, 'ace_stop_hook.ps1');
-			fs.writeFileSync(scriptPath, `$inputJson = [Console]::In.ReadToEnd()
+	describePwsh('PowerShell: stop hook hybrid — ace_learn fallback', () => {
+		const psStopScript = `$inputJson = [Console]::In.ReadToEnd()
 $data = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
 $status = $data.status
+$loopCount = if ($data.loop_count) { $data.loop_count } else { 0 }
 $aceDir = ".cursor\\ace"
 if (-not (Test-Path $aceDir)) { New-Item -ItemType Directory -Path $aceDir -Force | Out-Null }
 
 if ($status -ne "completed") { Write-Output '{}'; exit 0 }
 
-$mcpCount = 0; $shellCount = 0; $editCount = 0; $responseCount = 0
-if (Test-Path "$aceDir\\mcp_trajectory.jsonl") {
-    $mcpCount = (Get-Content "$aceDir\\mcp_trajectory.jsonl" | Measure-Object -Line).Lines
-}
-
-$summary = "MCP:$mcpCount Shell:$shellCount Edits:$editCount Responses:$responseCount"
+$summary = "MCP:0 Shell:0 Edits:0 Responses:0"
 $entry = @{event="stop"; summary=$summary} | ConvertTo-Json -Compress
 $entry | Out-File -Append -FilePath "$aceDir\\ace-relevance.jsonl" -Encoding utf8
 
-Write-Output '{}'
-`);
+if ($loopCount -eq 0 -and -not (Test-Path "$aceDir\\ace-review-result.json")) {
+    $msg = "Now call ace_learn to capture what you learned. Start the output field with TIME_SAVED: Xm | reason."
+    Write-Output "{\`"followup_message\`": \`"$msg\`"}"
+} else {
+    Write-Output '{}'
+}
+`;
+
+		it('should send followup_message when ace_learn was NOT called', () => {
+			const scriptPath = path.join(scriptsDir, 'ace_stop_hook.ps1');
+			fs.writeFileSync(scriptPath, psStopScript);
+
+			const input = JSON.stringify({ status: 'completed', loop_count: 0 });
+			const result = runPwshScript(scriptPath, input, workDir);
+			expect(result.exitCode).toBe(0);
+
+			const parsed = parseJsonOutput(result.stdout);
+			expect(parsed).toHaveProperty('followup_message');
+			expect(parsed.followup_message).toContain('ace_learn');
+			expect(parsed.followup_message).toContain('TIME_SAVED');
+		});
+
+		it('should output empty JSON when ace_learn WAS called (review file exists)', () => {
+			const aceDir = path.join(tempDir, '.cursor', 'ace');
+			fs.writeFileSync(path.join(aceDir, 'ace-review-result.json'),
+				'{"helpful_pct": 30, "time_saved": "5m", "reason": "test"}');
+
+			const scriptPath = path.join(scriptsDir, 'ace_stop_hook.ps1');
+			fs.writeFileSync(scriptPath, psStopScript);
 
 			const input = JSON.stringify({ status: 'completed', loop_count: 0 });
 			const result = runPwshScript(scriptPath, input, workDir);
@@ -1218,15 +1276,18 @@ Write-Output '{}'
 
 			const parsed = parseJsonOutput(result.stdout);
 			expect(parsed).toEqual({});
+		});
 
-			// Verify stop event was logged
-			const aceDir = path.join(tempDir, '.cursor', 'ace');
-			const relevanceFile = path.join(aceDir, 'ace-relevance.jsonl');
-			expect(fs.existsSync(relevanceFile)).toBe(true);
-			const content = fs.readFileSync(relevanceFile, 'utf8').trim();
-			const entry = JSON.parse(content);
-			expect(entry.event).toBe('stop');
-			expect(entry.summary).toContain('MCP:');
+		it('should output empty JSON on subsequent stop (loop_count > 0)', () => {
+			const scriptPath = path.join(scriptsDir, 'ace_stop_hook.ps1');
+			fs.writeFileSync(scriptPath, psStopScript);
+
+			const input = JSON.stringify({ status: 'completed', loop_count: 1 });
+			const result = runPwshScript(scriptPath, input, workDir);
+			expect(result.exitCode).toBe(0);
+
+			const parsed = parseJsonOutput(result.stdout);
+			expect(parsed).toEqual({});
 		});
 	});
 
