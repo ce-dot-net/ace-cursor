@@ -16,53 +16,72 @@ After each task completes, the user sees in the status panel:
 ─────────────────────────────
 ```
 
-## Architecture
+## Architecture (v2 — afterMCPExecution approach)
 
 ### Data Flow
 
 ```
-beforeSubmitPrompt              → Logs pattern injection to ace-relevance.jsonl
-postToolUse/afterShellExecution → Logs tool usage + duration
-stop (1st, loop_count=0)       → Checks if patterns injected, sends followup_message for self-eval
-afterAgentResponse              → Parses ACE_REVIEW from response, writes ace-review-result.json
-stop (2nd, loop_count=1)        → Empty output, task ends
-Status panel webview            → Reads ace-review-result.json + ace-relevance.jsonl, shows summary
+beforeSubmitPrompt        → Logs pattern injection to ace-relevance.jsonl
+afterMCPExecution         → Detects ace_learn call, extracts TIME_SAVED from output field
+                            → Writes ace-review-result.json
+Extension file watcher    → Detects ace-review-result.json change, flashes status bar
+stop                      → Logs trajectory summary to ace-relevance.jsonl (no followup_message)
+Status panel webview      → Reads ace-review-result.json + ace-relevance.jsonl, shows summary
 ```
+
+### Why afterMCPExecution (not stop + ACE_REVIEW)
+
+The previous approach used the `stop` hook to send a `followup_message` asking the AI to
+self-evaluate with `ACE_REVIEW: Xm saved | reason`. This was fragile because:
+- Required an extra agent loop (stop → followup → response → parse)
+- Text parsing of agent response was error-prone
+- Only fired once per session, not per task
+
+The new approach detects `ace_learn` MCP calls directly:
+- Fires per task (every time ace_learn is called)
+- Extracts structured data from `tool_input.output` field
+- No extra agent loop needed
+- Clean parsing of `TIME_SAVED:` prefix
 
 ### Files
 
 | File | Purpose |
 |---|---|
 | `.cursor/ace/ace-relevance.jsonl` | Per-event metrics log |
-| `.cursor/ace/ace-review-result.json` | Self-eval result (time saved + reason) |
+| `.cursor/ace/ace-review-result.json` | Task helpfulness result (time saved + reason) |
 | `.cursor/ace/pattern_cache.json` | Cached patterns (existing) |
 
 ## Implementation
 
-### 1. Enhanced `ace_before_submit_prompt.sh/.ps1`
-- Log pattern injection event to `ace-relevance.jsonl`
-- Track: patterns_injected, domains, avg_confidence, timestamp
+### 1. Enhanced `ace_track_mcp.sh/.ps1` (afterMCPExecution hook)
+- Detects when `tool_name` matches `ace_learn`
+- Parses `tool_input.output` for `TIME_SAVED: Xm | reason` on first line
+- Calculates `helpful_pct` from minutes (0=0%, 1-4=15%, 5-14=30%, 15-29=60%, 30+=80%)
+- Writes `ace-review-result.json`
 
-### 2. Enhanced `ace_stop_hook.sh/.ps1`
-- On first stop (loop_count=0) with patterns injected:
-  - Send `followup_message` asking agent to self-evaluate time saved
-- On subsequent stops (loop_count>0):
-  - Normal exit (let task end)
+### 2. Updated `ace-patterns.mdc` rules
+- Instructs AI to prefix `output` field with `TIME_SAVED: Xm | reason\n`
+- Example format in rules ensures AI compliance
 
-### 3. Enhanced `ace_track_response.sh/.ps1`
-- Parse response for `ACE_REVIEW:` pattern
-- Extract time_saved and reason
-- Write `ace-review-result.json`
+### 3. Simplified `ace_stop_hook.sh/.ps1`
+- No longer sends `followup_message` for self-eval
+- Only aggregates trajectory summary to `ace-relevance.jsonl`
+- Returns `{}` (empty output)
 
-### 4. Status panel webview enhancement
-- New "Task Summary" section
+### 4. Simplified `ace_track_response.sh/.ps1`
+- No longer parses `ACE_REVIEW:` from response text
+- Only logs response to trajectory
+
+### 5. Extension file watcher
+- Watches `.cursor/ace/ace-review-result.json` for changes
+- On change: reads time_saved, flashes status bar with `$(clock) ~Xm saved by ACE`
+- Reverts to normal status bar after 8 seconds
+
+### 6. Status panel webview
+- Reads `ace-review-result.json` + `ace-relevance.jsonl`
 - Shows: patterns injected, domains, relevance %, time saved, reason
-- Reads from `ace-review-result.json` + `ace-relevance.jsonl`
 
-### 5. Status bar update
-- After self-eval: flash `$(clock) ~15m saved by ACE`
-
-### 6. Tests (E2E + unit)
-- Script execution tests for enhanced hooks
-- Self-eval parsing tests
-- Status panel rendering tests
+### 7. Tests (E2E + unit)
+- Unix + PowerShell: ace_track_mcp detects ace_learn, parses TIME_SAVED, writes result
+- Unix + PowerShell: simplified stop hook outputs {} and logs stop event
+- Session tracking: validates new flow end-to-end

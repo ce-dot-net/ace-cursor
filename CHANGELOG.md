@@ -5,6 +5,24 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.58] - 2026-03-24
+
+### Changed
+- **Task Helpfulness: afterMCPExecution approach** — Replaced fragile stop-hook `followup_message` + `ACE_REVIEW` text parsing with direct `afterMCPExecution` hook detection. When the AI calls `ace_learn`, the hook extracts `TIME_SAVED: Xm | reason` from the output field and writes `ace-review-result.json` immediately — no extra agent loop needed.
+- **Simplified stop hook** — No longer sends `followup_message` for self-eval. Only aggregates trajectory summary to `ace-relevance.jsonl`.
+- **Simplified response hook** — No longer parses `ACE_REVIEW:` from agent response. Only logs trajectory.
+- **Rules updated** — `ace-patterns.mdc` and `ace-learn.md` now instruct AI to prefix `output` field with `TIME_SAVED: Xm | reason\n` in `ace_learn` calls.
+
+### Added
+- **Status bar flash on ace_learn** — File watcher on `ace-review-result.json` flashes `$(clock) ~Xm saved by ACE` for 8 seconds after each task.
+- **jq availability check** — Extension warns in output channel if `jq` is not installed (macOS/Linux), with install instructions.
+- **jq-free fallback** — Static bash scripts work without `jq` via grep+sed fallback for critical helpfulness path.
+
+### Fixed
+- **Greedy pipe matching** — `sed 's/.*|//'` replaced with `sed 's/^[^|]*|//'` so reason text containing `|` is preserved correctly.
+- **JSON injection in reason** — Quotes in reason text are now escaped before writing to JSON.
+- **Cross-platform parity** — PowerShell scripts updated to match new architecture (all edge cases verified).
+
 ## [0.2.57] - 2026-03-18
 
 ### Fixed

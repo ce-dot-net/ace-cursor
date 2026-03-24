@@ -84,17 +84,17 @@ describe('Session ID Tracking Implementation', () => {
 			expect(loopResult.stdout.trim()).toBe('0');
 		});
 
-		it('should generate AI-Trail summary WITHOUT session_id', () => {
+		it('should log stop event to ace-relevance.jsonl', () => {
 			if (!isUnix) {
 				return;
 			}
 
-			// Stop hook message does NOT include session_id
-			const msg = 'Session complete. AI-Trail: MCP:5 Shell:3 Edits:2 Responses:1. Git: main (abc123). Call ace_learn to capture patterns.';
+			// Stop hook now logs a stop event instead of sending followup_message
+			const stopEvent = { event: 'stop', summary: 'MCP:5 Shell:3 Edits:2 Responses:1', git_branch: 'main', git_hash: 'abc123' };
 
-			expect(msg).toContain('AI-Trail:');
-			expect(msg).toContain('Call ace_learn');
-			expect(msg).not.toContain('session_id=');
+			expect(stopEvent.event).toBe('stop');
+			expect(stopEvent.summary).toContain('MCP:');
+			expect(stopEvent.git_branch).toBe('main');
 		});
 
 		it('should only generate summary on status=completed and loop_count=0', () => {
@@ -133,77 +133,73 @@ describe('Session ID Tracking Implementation', () => {
 			expect(loopCount).toBe(0);
 		});
 
-		it('should generate AI-Trail summary without session_id for Windows', () => {
-			// Stop hook message does NOT include session_id
-			const msg = 'Session complete. AI-Trail: MCP:5 Shell:3 Edits:2 Responses:1. Git: main (abc123). Call ace_learn to capture patterns.';
+		it('should log stop event to ace-relevance.jsonl for Windows', () => {
+			// Stop hook now logs a stop event instead of sending followup_message
+			const stopEvent = { event: 'stop', summary: 'MCP:5 Shell:3 Edits:2 Responses:1', git_branch: 'main', git_hash: 'abc123' };
 
-			expect(msg).toContain('AI-Trail:');
-			expect(msg).toContain('Call ace_learn');
-			expect(msg).not.toContain('session_id=');
+			expect(stopEvent.event).toBe('stop');
+			expect(stopEvent.summary).toContain('MCP:');
 		});
 	});
 
 	describe('Extension Stop Hook Template (Unix)', () => {
-		it('should NOT contain conversation_id extraction in Unix script template', () => {
+		it('should contain status extraction in Unix script template', () => {
 			// The Unix stop hook script template from extension.ts
 			const unixScriptTemplate = `#!/bin/bash
-# ACE Stop Hook - Aggregates AI-Trail trajectory with git context
-# Input: status, loop_count
+# ACE Stop Hook - Aggregates trajectory summary on task completion
+# Input: status, loop_count, transcript_path, conversation_id
 
 input=$(cat)
-status=$(echo "$input" | jq -r '.status // empty')
-loop_count=$(echo "$input" | jq -r '.loop_count // 0')`;
+status=$(echo "$input" | jq -r '.status // empty')`;
 
-			expect(unixScriptTemplate).not.toContain('conversation_id');
 			expect(unixScriptTemplate).toContain('status');
-			expect(unixScriptTemplate).toContain('loop_count');
 			expect(unixScriptTemplate).toContain('jq -r');
 		});
 
-		it('should generate AI-Trail summary without session_id handling', () => {
-			const unixMsgTemplate = `
-  summary="MCP:$mcp_count Shell:$shell_count Edits:$edit_count Responses:$response_count"
-  msg="Session complete. AI-Trail: $summary. Git: $git_branch ($git_hash). Call ace_learn to capture patterns."
+		it('should log stop event to ace-relevance.jsonl (no followup_message)', () => {
+			const unixLogTemplate = `
+summary="MCP:$mcp_count Shell:$shell_count Edits:$edit_count Responses:$response_count"
+echo "{\\"event\\": \\"stop\\", \\"summary\\": \\"$summary\\"}" >> "$ace_dir/ace-relevance.jsonl"
 
-  echo "{\\"followup_message\\": \\"$msg\\"}"`;
+echo '{}'`;
 
-			expect(unixMsgTemplate).toContain('AI-Trail:');
-			expect(unixMsgTemplate).toContain('Call ace_learn');
-			expect(unixMsgTemplate).not.toContain('session_id');
+			expect(unixLogTemplate).toContain('event');
+			expect(unixLogTemplate).toContain('stop');
+			expect(unixLogTemplate).toContain('ace-relevance.jsonl');
+			expect(unixLogTemplate).not.toContain('followup_message');
 		});
 	});
 
 	describe('Extension Stop Hook Template (Windows)', () => {
-		it('should NOT contain conversation_id extraction in Windows script template', () => {
-			const windowsScriptTemplate = `# ACE Stop Hook - Aggregates AI-Trail trajectory with git context
-# Input: status, loop_count
+		it('should contain status extraction in Windows script template', () => {
+			const windowsScriptTemplate = `# ACE Stop Hook - Aggregates trajectory summary on task completion
+# Input: status, loop_count, transcript_path, conversation_id
 
 $inputJson = [Console]::In.ReadToEnd()
 $data = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
-$status = $data.status
-$loopCount = $data.loop_count`;
+$status = $data.status`;
 
-			expect(windowsScriptTemplate).not.toContain('conversationId');
 			expect(windowsScriptTemplate).toContain('$status');
-			expect(windowsScriptTemplate).toContain('$loopCount');
 			expect(windowsScriptTemplate).toContain('ConvertFrom-Json');
 		});
 
-		it('should generate AI-Trail summary without session_id for Windows', () => {
-			const windowsMsgTemplate = `
-    $summary = "MCP:$mcpCount Shell:$shellCount Edits:$editCount Responses:$responseCount"
-    $msg = "Session complete. AI-Trail: $summary. Git: $gitBranch ($gitHash). Call ace_learn to capture patterns."
+		it('should log stop event (no followup_message) for Windows', () => {
+			const windowsLogTemplate = `
+$summary = "MCP:$mcpCount Shell:$shellCount Edits:$editCount Responses:$responseCount"
+$entry = @{event="stop"; summary=$summary} | ConvertTo-Json -Compress
+$entry | Out-File -Append -FilePath "$aceDir\\ace-relevance.jsonl" -Encoding utf8
 
-    Write-Output "{\`"followup_message\`": \`"$msg\`"}"`;
+Write-Output '{}'`;
 
-			expect(windowsMsgTemplate).toContain('AI-Trail:');
-			expect(windowsMsgTemplate).toContain('Call ace_learn');
-			expect(windowsMsgTemplate).not.toContain('session_id');
+			expect(windowsLogTemplate).toContain('event');
+			expect(windowsLogTemplate).toContain('stop');
+			expect(windowsLogTemplate).toContain('ace-relevance.jsonl');
+			expect(windowsLogTemplate).not.toContain('followup_message');
 		});
 	});
 
 	describe('Rules File (ace-patterns.mdc)', () => {
-		it('should instruct AI to remember session_id from ace_search', () => {
+		it('should instruct AI to use ace_search before tasks', () => {
 			const rulesContent = `
 ## HOW TO USE ace_search
 
@@ -212,59 +208,37 @@ $loopCount = $data.loop_count`;
    \`\`\`
    ace_search(query="<user's task description>")
    \`\`\`
-3. **IMPORTANT: Note the \`session_id\` in the response** - you'll need it for ace_learn!
-4. **Review returned patterns** (5-10 relevant ones)
-5. **Apply patterns to implementation**
+3. **Review returned patterns** (5-10 relevant ones)
+4. **Apply patterns to implementation**`;
 
-**Example:**
-- User: "Implement JWT authentication"
-- You call: \`ace_search(query="JWT authentication")\`
-- Returns: \`{ results: [...], session_id: "abc-123-..." }\`
-- **Remember session_id "abc-123-..." for ace_learn!**`;
-
-			expect(rulesContent).toContain('Note the `session_id` in the response');
-			expect(rulesContent).toContain('Remember session_id');
 			expect(rulesContent).toContain('ace_search');
+			expect(rulesContent).toContain('Review returned patterns');
 		});
 
-		it('should instruct to pass session_id from ace_search to ace_learn', () => {
+		it('should instruct to include TIME_SAVED in ace_learn output', () => {
 			const rulesContent = `
-**THEN call ace_learn with the session_id from your earlier ace_search call:**
+**IMPORTANT: Include TIME_SAVED on the FIRST LINE of the output field.**
+
 \`\`\`
 ace_learn(
   task="<what you accomplished>",
   trajectory=["<key steps>"],
   success=true,
-  output="<lessons learned>",
-  git={commit_hash: "<from AI-Trail>", branch: "<from AI-Trail>"},
-  session_id="<session_id from ace_search response>"
+  output="TIME_SAVED: Xm | <one-line reason>\\n<lessons learned>"
 )
 \`\`\``;
 
-			expect(rulesContent).toContain('session_id from ace_search response');
+			expect(rulesContent).toContain('TIME_SAVED');
 			expect(rulesContent).toContain('ace_learn');
-			expect(rulesContent).toContain('session_id=');
+			expect(rulesContent).toContain('output');
 		});
 
-		it('should emphasize session_id is critical for attribution', () => {
-			const rulesContent = `
-**CRITICAL: Always include session_id!**
-- The \`session_id\` comes from your ace_search response at the START of the task
-- It links this learning to the patterns you searched and used
-- This enables pattern attribution tracking on the server`;
+		it('should show TIME_SAVED format with minutes and reason', () => {
+			const example = 'TIME_SAVED: 15m | Auth patterns avoided OAuth docs research';
 
-			expect(rulesContent).toContain('CRITICAL');
-			expect(rulesContent).toContain('session_id');
-			expect(rulesContent).toContain('pattern attribution');
-			expect(rulesContent).toContain('ace_search response');
-		});
-
-		it('should show AI-Trail message format WITHOUT session_id', () => {
-			const expectedFormat = 'Session complete. AI-Trail: MCP:X Shell:Y Edits:Z Responses:W. Git: branch (hash). Call ace_learn to capture patterns.';
-
-			expect(expectedFormat).toContain('AI-Trail:');
-			expect(expectedFormat).toContain('Call ace_learn');
-			expect(expectedFormat).not.toContain('session_id=');
+			expect(example).toContain('TIME_SAVED:');
+			expect(example).toContain('15m');
+			expect(example).toContain('|');
 		});
 	});
 
@@ -307,36 +281,16 @@ ace_learn(
 		});
 	});
 
-	describe('Followup Message Format', () => {
-		it('should output valid JSON with followup_message', () => {
-			const msg = 'Session complete. AI-Trail: MCP:5 Shell:3 Edits:2 Responses:1. Git: main (abc123). Call ace_learn to capture patterns.';
+	describe('Stop Hook Output Format', () => {
+		it('should output empty JSON (no followup_message needed)', () => {
+			// The simplified stop hook outputs {} — helpfulness is captured via afterMCPExecution
+			const emptyOutput = '{}';
 
-			const output = { followup_message: msg };
-
-			expect(() => JSON.stringify(output)).not.toThrow();
-
-			const parsed = JSON.parse(JSON.stringify(output));
-			expect(parsed.followup_message).toContain('AI-Trail:');
-			expect(parsed.followup_message).not.toContain('session_id=');
+			const parsed = JSON.parse(emptyOutput);
+			expect(Object.keys(parsed).length).toBe(0);
 		});
 
-		it('should escape quotes correctly in Unix bash', () => {
-			// Unix uses \" for escaping in echo
-			const unixEcho = 'echo "{\\"followup_message\\": \\"$msg\\"}"';
-
-			expect(unixEcho).toContain('\\"');
-			expect(unixEcho).toContain('followup_message');
-		});
-
-		it('should escape quotes correctly in Windows PowerShell', () => {
-			// Windows uses backtick ` for escaping in strings
-			const windowsWrite = 'Write-Output "{\`"followup_message\`": \`"$msg\`"}"';
-
-			expect(windowsWrite).toContain('`"');
-			expect(windowsWrite).toContain('followup_message');
-		});
-
-		it('should return empty JSON when not completed or loop_count > 0', () => {
+		it('should return empty JSON when not completed', () => {
 			const emptyOutput = '{}';
 
 			const parsed = JSON.parse(emptyOutput);
@@ -347,99 +301,96 @@ ace_learn(
 	describe('Integration: Full Session Tracking Flow', () => {
 		const isUnix = process.platform !== 'win32';
 
-		it('should complete full session tracking flow on Unix', () => {
+		it('should complete full session tracking flow via afterMCPExecution', () => {
 			if (!isUnix) {
 				return;
 			}
 
 			// Simulate the complete flow:
-			// 1. AI calls ace_search and gets session_id
+			// 1. AI calls ace_search
 			const aceSearchResponse = {
 				results: [],
 				session_id: 'integration-test-uuid',
 			};
+			expect(aceSearchResponse.session_id).toBeTruthy();
 
 			// 2. AI works on the task...
 
-			// 3. Stop hook generates AI-Trail summary (no session_id)
-			const status = 'completed';
-			const loopCount = 0;
-
-			if (status === 'completed' && loopCount === 0) {
-				const summary = 'MCP:10 Shell:5 Edits:3 Responses:2';
-				const gitBranch = 'main';
-				const gitHash = 'abc123';
-
-				const msg = `Session complete. AI-Trail: ${summary}. Git: ${gitBranch} (${gitHash}). Call ace_learn to capture patterns.`;
-				const output = { followup_message: msg };
-
-				// Verify output message does NOT contain session_id
-				expect(output.followup_message).toContain('AI-Trail:');
-				expect(output.followup_message).not.toContain('session_id=');
-			}
-
-			// 4. AI sees message and calls ace_learn with remembered session_id
+			// 3. AI calls ace_learn with TIME_SAVED in output
 			const aceLearnCall = {
 				task: 'Test task',
 				trajectory: ['Step 1'],
 				success: true,
-				output: 'Done',
-				git: { commit_hash: 'abc123', branch: 'main' },
-				session_id: aceSearchResponse.session_id, // AI remembered this!
+				output: 'TIME_SAVED: 10m | Patterns saved research time\nImportant lesson learned.',
 			};
 
-			expect(aceLearnCall.session_id).toBe('integration-test-uuid');
+			expect(aceLearnCall.output).toContain('TIME_SAVED:');
+
+			// 4. afterMCPExecution hook detects ace_learn, extracts TIME_SAVED
+			const firstLine = aceLearnCall.output.split('\n')[0];
+			const match = firstLine.match(/TIME_SAVED:\s*(\S+)\s*\|\s*(.+)/);
+
+			expect(match).toBeTruthy();
+			expect(match![1]).toBe('10m');
+			expect(match![2]).toContain('Patterns saved');
+
+			// 5. Hook writes ace-review-result.json — extension file watcher flashes status bar
+			const reviewResult = {
+				helpful_pct: 30, // 10m → 30%
+				time_saved: match![1],
+				reason: match![2],
+			};
+			expect(reviewResult.helpful_pct).toBe(30);
 		});
 
 		it('should not process when status is not completed', () => {
 			const status: string = 'running';
-			const loopCount: number = 0;
 
-			// Should not generate message (simulates hook logic)
-			const shouldGenerate = status === 'completed' && loopCount === 0;
+			// Should not generate stop event
+			const shouldProcess = status === 'completed';
 
-			expect(shouldGenerate).toBe(false);
-		});
-
-		it('should not process when loop_count is greater than 0', () => {
-			const status: string = 'completed';
-			const loopCount: number = 1;
-
-			// Should not generate message (simulates hook logic)
-			const shouldGenerate = status === 'completed' && loopCount === 0;
-
-			expect(shouldGenerate).toBe(false);
+			expect(shouldProcess).toBe(false);
 		});
 	});
 
 	describe('Actual Script File Content Verification', () => {
-		it('should verify Unix stop hook script does NOT handle session_id', () => {
+		it('should verify Unix stop hook script uses simplified trajectory summary', () => {
 			const projectRoot = path.resolve(__dirname, '../../../..');
 			const scriptPath = path.join(projectRoot, '.cursor', 'scripts', 'ace_stop_hook.sh');
 
 			if (fs.existsSync(scriptPath)) {
 				const content = fs.readFileSync(scriptPath, 'utf-8');
 
-				expect(content).not.toContain('conversation_id');
-				expect(content).not.toContain('session_id');
 				expect(content).toContain('status');
-				expect(content).toContain('loop_count');
-				expect(content).toContain('followup_message');
-				expect(content).toContain('AI-Trail:');
+				expect(content).toContain('ace-relevance.jsonl');
+				expect(content).not.toContain('followup_message');
+				expect(content).not.toContain('ACE_REVIEW');
 			}
 		});
 
-		it('should verify rules file has correct session_id instructions', () => {
+		it('should verify Unix MCP tracking hook detects ace_learn', () => {
+			const projectRoot = path.resolve(__dirname, '../../../..');
+			const scriptPath = path.join(projectRoot, '.cursor', 'scripts', 'ace_track_mcp.sh');
+
+			if (fs.existsSync(scriptPath)) {
+				const content = fs.readFileSync(scriptPath, 'utf-8');
+
+				expect(content).toContain('ace_learn');
+				expect(content).toContain('TIME_SAVED');
+				expect(content).toContain('ace-review-result.json');
+			}
+		});
+
+		it('should verify rules file has TIME_SAVED instructions', () => {
 			const projectRoot = path.resolve(__dirname, '../../../..');
 			const rulesPath = path.join(projectRoot, '.cursor', 'rules', 'ace-patterns.mdc');
 
 			if (fs.existsSync(rulesPath)) {
 				const content = fs.readFileSync(rulesPath, 'utf-8');
 
-				expect(content).toContain('session_id');
 				expect(content).toContain('ace_search');
 				expect(content).toContain('ace_learn');
-				expect(content).toContain('Remember session_id' || 'Note the `session_id`');
+				expect(content).toContain('TIME_SAVED');
 			}
 		});
 	});

@@ -899,182 +899,245 @@ fi
 		});
 	});
 
-	describeUnix('Unix: stop hook self-eval request', () => {
-		it('should request self-eval when patterns were injected (loop_count=0)', () => {
-			const aceDir = path.join(tempDir, '.cursor', 'ace');
-			// Simulate patterns injected
-			fs.writeFileSync(path.join(aceDir, 'ace-relevance.jsonl'),
-				'{"event": "search", "patterns_injected": 10}\n');
-
+	describeUnix('Unix: stop hook trajectory summary (simplified)', () => {
+		it('should output empty JSON and log stop event on completed task', () => {
 			const scriptPath = path.join(scriptsDir, 'ace_stop_hook.sh');
 			fs.writeFileSync(scriptPath, `#!/bin/bash
 input=$(cat)
 status=$(echo "$input" | jq -r '.status // empty')
-loop_count=$(echo "$input" | jq -r '.loop_count // 0')
 ace_dir=".cursor/ace"
 mkdir -p "$ace_dir"
-eval_flag="$ace_dir/.eval-requested"
 
 if [ "$status" != "completed" ]; then echo '{}'; exit 0; fi
-if [ "$loop_count" = "0" ]; then
-  patterns_injected=0
-  if [ -f "$ace_dir/ace-relevance.jsonl" ]; then
-    patterns_injected=$(grep -c '"event": "search"' "$ace_dir/ace-relevance.jsonl" 2>/dev/null || echo "0")
-  fi
-  if [ "$patterns_injected" -gt 0 ] 2>/dev/null; then
-    touch "$eval_flag"
-    msg="Session complete. IMPORTANT: ACE_REVIEW: Xm saved | one-line reason"
-  else
-    msg="Session complete."
-  fi
-  echo "{\\"followup_message\\": \\"$msg\\"}"
-else
-  rm -f "$eval_flag" 2>/dev/null
-  echo '{}'
-fi
+
+mcp_count=$(wc -l < "$ace_dir/mcp_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
+shell_count=$(wc -l < "$ace_dir/shell_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
+edit_count=$(wc -l < "$ace_dir/edit_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
+response_count=$(wc -l < "$ace_dir/response_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
+
+summary="MCP:$mcp_count Shell:$shell_count Edits:$edit_count Responses:$response_count"
+echo "{\\"event\\": \\"stop\\", \\"summary\\": \\"$summary\\"}" >> "$ace_dir/ace-relevance.jsonl"
+
+echo '{}'
 `, { mode: 0o755 });
 
 			const input = JSON.stringify({ status: 'completed', loop_count: 0 });
-			const result = runBashScript(scriptPath, input, workDir);
-			expect(result.exitCode).toBe(0);
-
-			const parsed = parseJsonOutput(result.stdout);
-			expect(parsed).toHaveProperty('followup_message');
-			expect(parsed.followup_message).toContain('ACE_REVIEW');
-
-			// Verify eval flag was created
-			expect(fs.existsSync(path.join(aceDir, '.eval-requested'))).toBe(true);
-		});
-
-		it('should NOT request self-eval when no patterns were injected', () => {
-			const scriptPath = path.join(scriptsDir, 'ace_stop_hook.sh');
-			fs.writeFileSync(scriptPath, `#!/bin/bash
-input=$(cat)
-status=$(echo "$input" | jq -r '.status // empty')
-loop_count=$(echo "$input" | jq -r '.loop_count // 0')
-ace_dir=".cursor/ace"
-mkdir -p "$ace_dir"
-eval_flag="$ace_dir/.eval-requested"
-
-if [ "$status" != "completed" ]; then echo '{}'; exit 0; fi
-if [ "$loop_count" = "0" ]; then
-  patterns_injected=0
-  if [ -f "$ace_dir/ace-relevance.jsonl" ]; then
-    patterns_injected=$(grep -c '"event": "search"' "$ace_dir/ace-relevance.jsonl" 2>/dev/null || echo "0")
-  fi
-  if [ "$patterns_injected" -gt 0 ] 2>/dev/null; then
-    touch "$eval_flag"
-    msg="Session complete. ACE_REVIEW request"
-  else
-    msg="Session complete."
-  fi
-  echo "{\\"followup_message\\": \\"$msg\\"}"
-else
-  rm -f "$eval_flag" 2>/dev/null
-  echo '{}'
-fi
-`, { mode: 0o755 });
-
-			const input = JSON.stringify({ status: 'completed', loop_count: 0 });
-			const result = runBashScript(scriptPath, input, workDir);
-			expect(result.exitCode).toBe(0);
-
-			const parsed = parseJsonOutput(result.stdout);
-			expect(parsed.followup_message).not.toContain('ACE_REVIEW');
-			expect(fs.existsSync(path.join(tempDir, '.cursor', 'ace', '.eval-requested'))).toBe(false);
-		});
-
-		it('should clean up eval flag on subsequent stop (loop_count>0)', () => {
-			const aceDir = path.join(tempDir, '.cursor', 'ace');
-			fs.writeFileSync(path.join(aceDir, '.eval-requested'), '');
-
-			const scriptPath = path.join(scriptsDir, 'ace_stop_hook.sh');
-			fs.writeFileSync(scriptPath, `#!/bin/bash
-input=$(cat)
-status=$(echo "$input" | jq -r '.status // empty')
-loop_count=$(echo "$input" | jq -r '.loop_count // 0')
-ace_dir=".cursor/ace"
-mkdir -p "$ace_dir"
-eval_flag="$ace_dir/.eval-requested"
-
-if [ "$status" != "completed" ]; then echo '{}'; exit 0; fi
-if [ "$loop_count" = "0" ]; then
-  echo "{\\"followup_message\\": \\"test\\"}"
-else
-  rm -f "$eval_flag" 2>/dev/null
-  echo '{}'
-fi
-`, { mode: 0o755 });
-
-			const input = JSON.stringify({ status: 'completed', loop_count: 1 });
 			const result = runBashScript(scriptPath, input, workDir);
 			expect(result.exitCode).toBe(0);
 
 			const parsed = parseJsonOutput(result.stdout);
 			expect(parsed).toEqual({});
-			expect(fs.existsSync(path.join(aceDir, '.eval-requested'))).toBe(false);
+
+			// Verify stop event was logged
+			const aceDir = path.join(tempDir, '.cursor', 'ace');
+			const relevanceFile = path.join(aceDir, 'ace-relevance.jsonl');
+			expect(fs.existsSync(relevanceFile)).toBe(true);
+			const content = fs.readFileSync(relevanceFile, 'utf8').trim();
+			const entry = JSON.parse(content);
+			expect(entry.event).toBe('stop');
+			expect(entry.summary).toContain('MCP:');
+		});
+
+		it('should skip non-completed tasks', () => {
+			const scriptPath = path.join(scriptsDir, 'ace_stop_hook.sh');
+			fs.writeFileSync(scriptPath, `#!/bin/bash
+input=$(cat)
+status=$(echo "$input" | jq -r '.status // empty')
+if [ "$status" != "completed" ]; then echo '{}'; exit 0; fi
+echo '{}'
+`, { mode: 0o755 });
+
+			const input = JSON.stringify({ status: 'aborted', loop_count: 0 });
+			const result = runBashScript(scriptPath, input, workDir);
+			expect(result.exitCode).toBe(0);
+			const parsed = parseJsonOutput(result.stdout);
+			expect(parsed).toEqual({});
 		});
 	});
 
-	describeUnix('Unix: response tracking ACE_REVIEW parsing', () => {
-		it('should parse ACE_REVIEW and write ace-review-result.json', () => {
+	describeUnix('Unix: MCP tracking ace_learn helpfulness detection', () => {
+		it('should detect ace_learn and write ace-review-result.json from TIME_SAVED in output', () => {
 			const aceDir = path.join(tempDir, '.cursor', 'ace');
-			const scriptPath = path.join(scriptsDir, 'ace_track_response.sh');
+			const scriptPath = path.join(scriptsDir, 'ace_track_mcp.sh');
 			fs.writeFileSync(scriptPath, `#!/bin/bash
 input=$(cat)
 ace_dir=".cursor/ace"
 mkdir -p "$ace_dir"
-echo "$input" >> "$ace_dir/response_trajectory.jsonl"
-response_text=$(echo "$input" | jq -r '.text // ""' 2>/dev/null || echo "")
-if echo "$response_text" | grep -q "ACE_REVIEW:"; then
-  time_saved=$(echo "$response_text" | grep -oE 'ACE_REVIEW:[^|]*' | sed 's/ACE_REVIEW:[[:space:]]*//' | sed 's/[[:space:]]*$//')
-  reason=$(echo "$response_text" | grep -oE 'ACE_REVIEW:[^|]*\\|[^"]*' | sed 's/.*|[[:space:]]*//' | head -c 200)
-  minutes=$(echo "$time_saved" | grep -oE '[0-9]+' | head -1)
-  minutes=\${minutes:-0}
-  if [ "$minutes" -ge 30 ] 2>/dev/null; then helpful_pct=80
-  elif [ "$minutes" -ge 15 ] 2>/dev/null; then helpful_pct=60
-  elif [ "$minutes" -ge 5 ] 2>/dev/null; then helpful_pct=30
-  elif [ "$minutes" -gt 0 ] 2>/dev/null; then helpful_pct=15
-  else helpful_pct=0; fi
-  echo "{\\"helpful_pct\\": $helpful_pct, \\"time_saved\\": \\"$time_saved\\", \\"reason\\": \\"$reason\\"}" > "$ace_dir/ace-review-result.json"
+echo "$input" >> "$ace_dir/mcp_trajectory.jsonl"
+
+tool_name=$(echo "$input" | jq -r '.tool_name // ""' 2>/dev/null || echo "")
+if echo "$tool_name" | grep -qi "ace_learn"; then
+  tool_input_raw=$(echo "$input" | jq -r '.tool_input // ""' 2>/dev/null || echo "")
+  output_field=$(echo "$tool_input_raw" | jq -r '.output // ""' 2>/dev/null || echo "")
+  if [ -z "$output_field" ]; then
+    output_field=$(echo "$tool_input_raw" | jq -r '. | fromjson? | .output // ""' 2>/dev/null || echo "")
+  fi
+
+  if echo "$output_field" | head -1 | grep -q "TIME_SAVED:"; then
+    first_line=$(echo "$output_field" | head -1)
+    time_saved=$(echo "$first_line" | sed 's/TIME_SAVED:[[:space:]]*//' | sed 's/[[:space:]]*|.*//' | sed 's/[[:space:]]*$//')
+    reason=""
+    if echo "$first_line" | grep -q '|'; then
+      reason=$(echo "$first_line" | sed 's/^[^|]*|[[:space:]]*//' | head -c 200)
+    fi
+    minutes=$(echo "$time_saved" | grep -oE '[0-9]+' | head -1)
+    minutes=\${minutes:-0}
+    if [ "$minutes" -ge 30 ] 2>/dev/null; then helpful_pct=80
+    elif [ "$minutes" -ge 15 ] 2>/dev/null; then helpful_pct=60
+    elif [ "$minutes" -ge 5 ] 2>/dev/null; then helpful_pct=30
+    elif [ "$minutes" -gt 0 ] 2>/dev/null; then helpful_pct=15
+    else helpful_pct=0; fi
+    echo "{\\"helpful_pct\\": $helpful_pct, \\"time_saved\\": \\"$time_saved\\", \\"reason\\": \\"$reason\\"}" > "$ace_dir/ace-review-result.json"
+  fi
 fi
 exit 0
 `, { mode: 0o755 });
 
 			const input = JSON.stringify({
-				text: 'Task done. ACE_REVIEW: 15m saved | Auth patterns saved OAuth research time'
+				tool_name: 'ace_learn',
+				tool_input: {
+					task: 'Implemented JWT auth',
+					trajectory: ['Added middleware'],
+					success: true,
+					output: 'TIME_SAVED: 15m | Auth patterns avoided OAuth docs research\nAlways use httpOnly cookies.'
+				},
+				result_json: '{}',
+				duration: 1234
 			});
 			const result = runBashScript(scriptPath, input, workDir);
 			expect(result.exitCode).toBe(0);
 
-			// Verify ace-review-result.json
+			// Verify ace-review-result.json was written
 			const reviewFile = path.join(aceDir, 'ace-review-result.json');
 			expect(fs.existsSync(reviewFile)).toBe(true);
 			const review = JSON.parse(fs.readFileSync(reviewFile, 'utf8'));
 			expect(review.helpful_pct).toBe(60); // 15m → 60%
-			expect(review.time_saved).toBe('15m saved');
+			expect(review.time_saved).toBe('15m');
 			expect(review.reason).toContain('Auth patterns');
 		});
 
-		it('should NOT write review file when no ACE_REVIEW in response', () => {
+		it('should NOT write review file for non-ace_learn MCP calls', () => {
 			const aceDir = path.join(tempDir, '.cursor', 'ace');
-			const scriptPath = path.join(scriptsDir, 'ace_track_response.sh');
+			const scriptPath = path.join(scriptsDir, 'ace_track_mcp.sh');
 			fs.writeFileSync(scriptPath, `#!/bin/bash
 input=$(cat)
 ace_dir=".cursor/ace"
 mkdir -p "$ace_dir"
-echo "$input" >> "$ace_dir/response_trajectory.jsonl"
-response_text=$(echo "$input" | jq -r '.text // ""' 2>/dev/null || echo "")
-if echo "$response_text" | grep -q "ACE_REVIEW:"; then
-  echo "{\\"helpful_pct\\": 50}" > "$ace_dir/ace-review-result.json"
+echo "$input" >> "$ace_dir/mcp_trajectory.jsonl"
+
+tool_name=$(echo "$input" | jq -r '.tool_name // ""' 2>/dev/null || echo "")
+if echo "$tool_name" | grep -qi "ace_learn"; then
+  echo "should not reach here" > "$ace_dir/ace-review-result.json"
 fi
 exit 0
 `, { mode: 0o755 });
 
-			const input = JSON.stringify({ text: 'Just a normal response without review' });
+			const input = JSON.stringify({
+				tool_name: 'ace_search',
+				tool_input: { query: 'test' },
+				result_json: '{}',
+				duration: 500
+			});
 			const result = runBashScript(scriptPath, input, workDir);
 			expect(result.exitCode).toBe(0);
 			expect(fs.existsSync(path.join(aceDir, 'ace-review-result.json'))).toBe(false);
+		});
+
+		it('should NOT write review file when ace_learn output has no TIME_SAVED', () => {
+			const aceDir = path.join(tempDir, '.cursor', 'ace');
+			const scriptPath = path.join(scriptsDir, 'ace_track_mcp.sh');
+			fs.writeFileSync(scriptPath, `#!/bin/bash
+input=$(cat)
+ace_dir=".cursor/ace"
+mkdir -p "$ace_dir"
+echo "$input" >> "$ace_dir/mcp_trajectory.jsonl"
+
+tool_name=$(echo "$input" | jq -r '.tool_name // ""' 2>/dev/null || echo "")
+if echo "$tool_name" | grep -qi "ace_learn"; then
+  tool_input_raw=$(echo "$input" | jq -r '.tool_input // ""' 2>/dev/null || echo "")
+  output_field=$(echo "$tool_input_raw" | jq -r '.output // ""' 2>/dev/null || echo "")
+  if echo "$output_field" | head -1 | grep -q "TIME_SAVED:"; then
+    echo "{\\"helpful_pct\\": 50}" > "$ace_dir/ace-review-result.json"
+  fi
+fi
+exit 0
+`, { mode: 0o755 });
+
+			const input = JSON.stringify({
+				tool_name: 'ace_learn',
+				tool_input: {
+					task: 'Quick fix',
+					trajectory: ['Fixed typo'],
+					success: true,
+					output: 'Minor typo fix, no patterns used.'
+				},
+				result_json: '{}',
+				duration: 300
+			});
+			const result = runBashScript(scriptPath, input, workDir);
+			expect(result.exitCode).toBe(0);
+			expect(fs.existsSync(path.join(aceDir, 'ace-review-result.json'))).toBe(false);
+		});
+
+		it('should handle tool_input as JSON string (double-encoded)', () => {
+			const aceDir = path.join(tempDir, '.cursor', 'ace');
+			const scriptPath = path.join(scriptsDir, 'ace_track_mcp.sh');
+			fs.writeFileSync(scriptPath, `#!/bin/bash
+input=$(cat)
+ace_dir=".cursor/ace"
+mkdir -p "$ace_dir"
+echo "$input" >> "$ace_dir/mcp_trajectory.jsonl"
+
+tool_name=$(echo "$input" | jq -r '.tool_name // ""' 2>/dev/null || echo "")
+if echo "$tool_name" | grep -qi "ace_learn"; then
+  tool_input_raw=$(echo "$input" | jq -r '.tool_input // ""' 2>/dev/null || echo "")
+  output_field=$(echo "$tool_input_raw" | jq -r '.output // ""' 2>/dev/null || echo "")
+  if [ -z "$output_field" ]; then
+    output_field=$(echo "$tool_input_raw" | jq -r '. | fromjson? | .output // ""' 2>/dev/null || echo "")
+  fi
+
+  if echo "$output_field" | head -1 | grep -q "TIME_SAVED:"; then
+    first_line=$(echo "$output_field" | head -1)
+    time_saved=$(echo "$first_line" | sed 's/TIME_SAVED:[[:space:]]*//' | sed 's/[[:space:]]*|.*//' | sed 's/[[:space:]]*$//')
+    reason=""
+    if echo "$first_line" | grep -q '|'; then
+      reason=$(echo "$first_line" | sed 's/^[^|]*|[[:space:]]*//' | head -c 200)
+    fi
+    minutes=$(echo "$time_saved" | grep -oE '[0-9]+' | head -1)
+    minutes=\${minutes:-0}
+    if [ "$minutes" -ge 30 ] 2>/dev/null; then helpful_pct=80
+    elif [ "$minutes" -ge 15 ] 2>/dev/null; then helpful_pct=60
+    elif [ "$minutes" -ge 5 ] 2>/dev/null; then helpful_pct=30
+    elif [ "$minutes" -gt 0 ] 2>/dev/null; then helpful_pct=15
+    else helpful_pct=0; fi
+    echo "{\\"helpful_pct\\": $helpful_pct, \\"time_saved\\": \\"$time_saved\\", \\"reason\\": \\"$reason\\"}" > "$ace_dir/ace-review-result.json"
+  fi
+fi
+exit 0
+`, { mode: 0o755 });
+
+			// Simulate tool_input as a JSON string (how Cursor sometimes sends it)
+			const toolInput = JSON.stringify({
+				task: 'Fixed auth bug',
+				trajectory: ['Debugged token flow'],
+				success: true,
+				output: 'TIME_SAVED: 30m | Patterns identified token expiry issue immediately'
+			});
+			const input = JSON.stringify({
+				tool_name: 'ace_learn',
+				tool_input: toolInput, // string, not object
+				result_json: '{}',
+				duration: 2000
+			});
+			const result = runBashScript(scriptPath, input, workDir);
+			expect(result.exitCode).toBe(0);
+
+			const reviewFile = path.join(aceDir, 'ace-review-result.json');
+			expect(fs.existsSync(reviewFile)).toBe(true);
+			const review = JSON.parse(fs.readFileSync(reviewFile, 'utf8'));
+			expect(review.helpful_pct).toBe(80); // 30m → 80%
+			expect(review.time_saved).toBe('30m');
+			expect(review.reason).toContain('token expiry');
 		});
 	});
 
@@ -1126,38 +1189,27 @@ if (Test-Path $cacheFile) {
 		});
 	});
 
-	describePwsh('PowerShell: stop hook self-eval request', () => {
-		it('should request self-eval when patterns were injected', () => {
-			const aceDir = path.join(tempDir, '.cursor', 'ace');
-			fs.writeFileSync(path.join(aceDir, 'ace-relevance.jsonl'),
-				'{"event": "search", "patterns_injected": 5}\n');
-
+	describePwsh('PowerShell: stop hook trajectory summary (simplified)', () => {
+		it('should output empty JSON and log stop event on completed task', () => {
 			const scriptPath = path.join(scriptsDir, 'ace_stop_hook.ps1');
 			fs.writeFileSync(scriptPath, `$inputJson = [Console]::In.ReadToEnd()
 $data = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
 $status = $data.status
-$loopCount = $data.loop_count
 $aceDir = ".cursor\\ace"
 if (-not (Test-Path $aceDir)) { New-Item -ItemType Directory -Path $aceDir -Force | Out-Null }
-$evalFlag = "$aceDir\\.eval-requested"
 
 if ($status -ne "completed") { Write-Output '{}'; exit 0 }
-if ($loopCount -eq 0) {
-    $patternsInjected = 0
-    if (Test-Path "$aceDir\\ace-relevance.jsonl") {
-        $patternsInjected = (Select-String -Path "$aceDir\\ace-relevance.jsonl" -Pattern '"event": "search"' -SimpleMatch | Measure-Object).Count
-    }
-    if ($patternsInjected -gt 0) {
-        New-Item -ItemType File -Path $evalFlag -Force | Out-Null
-        $msg = "Session complete. ACE_REVIEW: Xm saved"
-    } else {
-        $msg = "Session complete."
-    }
-    Write-Output "{\`"followup_message\`": \`"$msg\`"}"
-} else {
-    if (Test-Path $evalFlag) { Remove-Item $evalFlag -Force }
-    Write-Output '{}'
+
+$mcpCount = 0; $shellCount = 0; $editCount = 0; $responseCount = 0
+if (Test-Path "$aceDir\\mcp_trajectory.jsonl") {
+    $mcpCount = (Get-Content "$aceDir\\mcp_trajectory.jsonl" | Measure-Object -Line).Lines
 }
+
+$summary = "MCP:$mcpCount Shell:$shellCount Edits:$editCount Responses:$responseCount"
+$entry = @{event="stop"; summary=$summary} | ConvertTo-Json -Compress
+$entry | Out-File -Append -FilePath "$aceDir\\ace-relevance.jsonl" -Encoding utf8
+
+Write-Output '{}'
 `);
 
 			const input = JSON.stringify({ status: 'completed', loop_count: 0 });
@@ -1165,40 +1217,74 @@ if ($loopCount -eq 0) {
 			expect(result.exitCode).toBe(0);
 
 			const parsed = parseJsonOutput(result.stdout);
-			expect(parsed).toHaveProperty('followup_message');
-			expect(parsed.followup_message).toContain('ACE_REVIEW');
-			expect(fs.existsSync(path.join(aceDir, '.eval-requested'))).toBe(true);
+			expect(parsed).toEqual({});
+
+			// Verify stop event was logged
+			const aceDir = path.join(tempDir, '.cursor', 'ace');
+			const relevanceFile = path.join(aceDir, 'ace-relevance.jsonl');
+			expect(fs.existsSync(relevanceFile)).toBe(true);
+			const content = fs.readFileSync(relevanceFile, 'utf8').trim();
+			const entry = JSON.parse(content);
+			expect(entry.event).toBe('stop');
+			expect(entry.summary).toContain('MCP:');
 		});
 	});
 
-	describePwsh('PowerShell: response tracking ACE_REVIEW parsing', () => {
-		it('should parse ACE_REVIEW and write ace-review-result.json', () => {
+	describePwsh('PowerShell: MCP tracking ace_learn helpfulness detection', () => {
+		it('should detect ace_learn and write ace-review-result.json from TIME_SAVED', () => {
 			const aceDir = path.join(tempDir, '.cursor', 'ace');
-			const scriptPath = path.join(scriptsDir, 'ace_track_response.ps1');
+			const scriptPath = path.join(scriptsDir, 'ace_track_mcp.ps1');
 			fs.writeFileSync(scriptPath, `$inputJson = [Console]::In.ReadToEnd()
 $aceDir = ".cursor\\ace"
 if (-not (Test-Path $aceDir)) { New-Item -ItemType Directory -Path $aceDir -Force | Out-Null }
-$inputJson | Out-File -Append -FilePath "$aceDir\\response_trajectory.jsonl" -Encoding utf8
+$inputJson | Out-File -Append -FilePath "$aceDir\\mcp_trajectory.jsonl" -Encoding utf8
+
 try {
     $data = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
-    $responseText = if ($data.text) { $data.text } else { "" }
-} catch { $responseText = "" }
-if ($responseText -match "ACE_REVIEW:") {
-    if ($responseText -match "ACE_REVIEW:\\s*([^|]+)") { $timeSaved = $Matches[1].Trim() } else { $timeSaved = "" }
-    if ($responseText -match "ACE_REVIEW:[^|]*\\|\\s*(.+)") { $reason = $Matches[1].Trim() } else { $reason = "" }
-    if ($timeSaved -match "(\\d+)") { $minutes = [int]$Matches[1] } else { $minutes = 0 }
-    if ($minutes -ge 30) { $helpfulPct = 80 }
-    elseif ($minutes -ge 15) { $helpfulPct = 60 }
-    elseif ($minutes -ge 5) { $helpfulPct = 30 }
-    elseif ($minutes -gt 0) { $helpfulPct = 15 }
-    else { $helpfulPct = 0 }
-    $reviewResult = @{ helpful_pct = $helpfulPct; time_saved = $timeSaved; reason = $reason } | ConvertTo-Json -Compress
-    $reviewResult | Out-File -FilePath "$aceDir\\ace-review-result.json" -Encoding utf8
+    $toolName = if ($data.tool_name) { $data.tool_name } else { "" }
+} catch { $toolName = "" }
+
+if ($toolName -match "ace_learn") {
+    try {
+        $toolInput = $data.tool_input
+        if ($toolInput -is [string]) {
+            $toolInput = $toolInput | ConvertFrom-Json -ErrorAction SilentlyContinue
+        }
+        $outputField = if ($toolInput.output) { $toolInput.output } else { "" }
+    } catch { $outputField = "" }
+
+    $firstLine = ($outputField -split "\\n")[0]
+    if ($firstLine -match "^TIME_SAVED:\\s*([^|]+?)\\s*(?:\\|\\s*(.+))?$") {
+        $timeSaved = $Matches[1].Trim()
+        $reason = if ($Matches[2]) { $Matches[2].Trim().Substring(0, [Math]::Min(200, $Matches[2].Trim().Length)) } else { "" }
+
+        if ($timeSaved -match "(\\d+)") { $minutes = [int]$Matches[1] } else { $minutes = 0 }
+        if ($minutes -ge 30) { $helpfulPct = 80 }
+        elseif ($minutes -ge 15) { $helpfulPct = 60 }
+        elseif ($minutes -ge 5) { $helpfulPct = 30 }
+        elseif ($minutes -gt 0) { $helpfulPct = 15 }
+        else { $helpfulPct = 0 }
+
+        $reviewResult = @{
+            helpful_pct = $helpfulPct
+            time_saved = $timeSaved
+            reason = $reason
+        } | ConvertTo-Json -Compress
+        $reviewResult | Out-File -FilePath "$aceDir\\ace-review-result.json" -Encoding utf8
+    }
 }
 `);
 
 			const input = JSON.stringify({
-				text: 'Done. ACE_REVIEW: 5m saved | Saved time on config patterns'
+				tool_name: 'ace_learn',
+				tool_input: {
+					task: 'Implemented config system',
+					trajectory: ['Added config module'],
+					success: true,
+					output: 'TIME_SAVED: 5m | Saved time on config patterns\nUse env vars for secrets.'
+				},
+				result_json: '{}',
+				duration: 1000
 			});
 			const result = runPwshScript(scriptPath, input, workDir);
 			expect(result.exitCode).toBe(0);

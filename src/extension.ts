@@ -305,11 +305,56 @@ export async function activate(context: vscode.ExtensionContext) {
 			trajectoryWatcher.onDidChange(showActivity);
 			trajectoryWatcher.onDidCreate(showActivity);
 			context.subscriptions.push(trajectoryWatcher);
+
+			// Watch ace-review-result.json for task helpfulness display
+			const reviewPattern = new vscode.RelativePattern(workspaceRoot, '.cursor/ace/ace-review-result.json');
+			const reviewWatcher = vscode.workspace.createFileSystemWatcher(reviewPattern);
+
+			let reviewTimeout: NodeJS.Timeout | undefined;
+			const showTimeSaved = () => {
+				if (!statusBarItem) { return; }
+				try {
+					const reviewPath = path.join(workspaceRoot, '.cursor', 'ace', 'ace-review-result.json');
+					if (!fs.existsSync(reviewPath)) { return; }
+					const review = JSON.parse(fs.readFileSync(reviewPath, 'utf8'));
+					const timeSaved = review.time_saved || '';
+					const reason = review.reason || '';
+					if (timeSaved) {
+						const savedText = `$(clock) ~${timeSaved} saved by ACE`;
+						statusBarItem.text = savedText;
+						statusBarItem.tooltip = reason ? `ACE: ${reason}` : 'ACE task helpfulness';
+						aceOutput?.appendLine(`[${new Date().toLocaleTimeString()}] Task helpfulness: ~${timeSaved} saved — ${reason}`);
+						clearTimeout(reviewTimeout);
+						reviewTimeout = setTimeout(() => {
+							if (statusBarItem) {
+								refreshStatusBar();
+							}
+						}, 8000);
+					}
+				} catch {
+					// Ignore parse errors
+				}
+			};
+
+			reviewWatcher.onDidChange(showTimeSaved);
+			reviewWatcher.onDidCreate(showTimeSaved);
+			context.subscriptions.push(reviewWatcher);
 		}
 
 		console.log('[ACE] Extension activated successfully');
 
-		// 9. Check workspace version and prompt for update if needed
+		// 9. Check jq availability (needed for hook scripts on Unix/macOS)
+		if (process.platform !== 'win32') {
+			const { execSync } = require('child_process');
+			try {
+				execSync('command -v jq', { stdio: 'ignore' });
+			} catch {
+				console.warn('[ACE] jq not found — some hook features (task helpfulness) will be limited. Install: brew install jq (macOS) or apt install jq (Linux)');
+				aceOutput?.appendLine('[ACE] Warning: jq not found. Install jq for full hook functionality (brew install jq / apt install jq)');
+			}
+		}
+
+		// 10. Check workspace version and prompt for update if needed
 		await checkWorkspaceVersionAndPrompt(context);
 	} catch (error) {
 		console.error('[ACE] Activation error:', error);
@@ -678,19 +723,72 @@ function createWindowsHookScripts(scriptsDir: string, forceUpdate: boolean = fal
 	// MCP Execution Tracking (PostToolUse equivalent)
 	const mcpTrackPath = path.join(scriptsDir, 'ace_track_mcp.ps1');
 	const mcpTrackScript = `# ACE MCP Tracking Hook - Captures tool executions for AI-Trail
+# Also detects ace_learn calls and extracts task helpfulness (TIME_SAVED)
 # Input: tool_name, tool_input, result_json, duration
+
+$inputJson = [Console]::In.ReadToEnd()
 
 $aceDir = ".cursor\\ace"
 if (-not (Test-Path $aceDir)) {
     New-Item -ItemType Directory -Path $aceDir -Force | Out-Null
 }
 
-$input | Out-File -Append -FilePath "$aceDir\\mcp_trajectory.jsonl" -Encoding utf8
+# Always log to trajectory
+$inputJson | Out-File -Append -FilePath "$aceDir\\mcp_trajectory.jsonl" -Encoding utf8
+
+# Detect ace_learn call — extract helpfulness from tool_input.output
+try {
+    $data = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
+    $toolName = if ($data.tool_name) { $data.tool_name } else { "" }
+} catch {
+    $toolName = ""
+}
+
+if ($toolName -match "ace_learn") {
+    try {
+        # tool_input may be string or object
+        $toolInput = $data.tool_input
+        if ($toolInput -is [string]) {
+            $toolInput = $toolInput | ConvertFrom-Json -ErrorAction SilentlyContinue
+        }
+        $outputField = if ($toolInput.output) { $toolInput.output } else { "" }
+    } catch {
+        $outputField = ""
+    }
+
+    # Look for TIME_SAVED: Xm | reason on the first line
+    $firstLine = ($outputField -split "\\n")[0]
+    if ($firstLine -match "^TIME_SAVED:\\s*([^|]+?)\\s*(?:\\|\\s*(.+))?$") {
+        $timeSaved = $Matches[1].Trim()
+        $reason = if ($Matches[2]) { $Matches[2].Trim().Substring(0, [Math]::Min(200, $Matches[2].Trim().Length)) } else { "" }
+
+        # Extract numeric minutes for helpful_pct
+        if ($timeSaved -match "(\\d+)") {
+            $minutes = [int]$Matches[1]
+        } else {
+            $minutes = 0
+        }
+        # Map time to helpful %: 0m=0%, 1-4m=15%, 5-14m=30%, 15-29m=60%, 30m+=80%
+        if ($minutes -ge 30) { $helpfulPct = 80 }
+        elseif ($minutes -ge 15) { $helpfulPct = 60 }
+        elseif ($minutes -ge 5) { $helpfulPct = 30 }
+        elseif ($minutes -gt 0) { $helpfulPct = 15 }
+        else { $helpfulPct = 0 }
+
+        # Write review result (overwrites previous)
+        $reviewResult = @{
+            helpful_pct = $helpfulPct
+            time_saved = $timeSaved
+            reason = $reason
+            timestamp = (Get-Date -Format "o")
+        } | ConvertTo-Json -Compress
+        $reviewResult | Out-File -FilePath "$aceDir\\ace-review-result.json" -Encoding utf8
+    }
+}
 `;
-	if (forceUpdate || !fs.existsSync(mcpTrackPath)) {
-		fs.writeFileSync(mcpTrackPath, mcpTrackScript);
-		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_track_mcp.ps1`);
-	}
+	// Always update to get ace_learn helpfulness detection
+	fs.writeFileSync(mcpTrackPath, mcpTrackScript);
+	console.log(`[ACE] Updated ace_track_mcp.ps1 with ace_learn helpfulness detection`);
 
 	// Shell Execution Tracking
 	const shellTrackPath = path.join(scriptsDir, 'ace_track_shell.ps1');
@@ -711,7 +809,7 @@ $input | Out-File -Append -FilePath "$aceDir\\shell_trajectory.jsonl" -Encoding 
 
 	// Agent Response Tracking
 	const responseTrackPath = path.join(scriptsDir, 'ace_track_response.ps1');
-	const responseTrackScript = `# ACE Response Tracking Hook - Captures agent responses + parses ACE_REVIEW for task helpfulness
+	const responseTrackScript = `# ACE Response Tracking Hook - Captures agent responses for AI-Trail
 # Input: text (assistant final text)
 
 $inputJson = [Console]::In.ReadToEnd()
@@ -721,55 +819,12 @@ if (-not (Test-Path $aceDir)) {
     New-Item -ItemType Directory -Path $aceDir -Force | Out-Null
 }
 
-# Always log response to trajectory
+# Log response to trajectory
 $inputJson | Out-File -Append -FilePath "$aceDir\\response_trajectory.jsonl" -Encoding utf8
-
-# Parse ACE_REVIEW from agent response (written during self-eval phase)
-try {
-    $data = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
-    $responseText = if ($data.text) { $data.text } else { "" }
-} catch {
-    $responseText = ""
-}
-
-if ($responseText -match "ACE_REVIEW:") {
-    # Extract time saved (e.g., "15m saved", "2m saved")
-    if ($responseText -match "ACE_REVIEW:\s*([^|]+)") {
-        $timeSaved = $Matches[1].Trim()
-    } else {
-        $timeSaved = ""
-    }
-    # Extract reason (text after the pipe)
-    if ($responseText -match "ACE_REVIEW:[^|]*\|\s*(.+)") {
-        $reason = $Matches[1].Trim().Substring(0, [Math]::Min(200, $Matches[1].Trim().Length))
-    } else {
-        $reason = ""
-    }
-    # Extract numeric minutes for helpful_pct approximation
-    if ($timeSaved -match "(\d+)") {
-        $minutes = [int]$Matches[1]
-    } else {
-        $minutes = 0
-    }
-    # Rough helpful % based on time: 0m=0%, 5m=30%, 15m=60%, 30m+=80%
-    if ($minutes -ge 30) { $helpfulPct = 80 }
-    elseif ($minutes -ge 15) { $helpfulPct = 60 }
-    elseif ($minutes -ge 5) { $helpfulPct = 30 }
-    elseif ($minutes -gt 0) { $helpfulPct = 15 }
-    else { $helpfulPct = 0 }
-    # Write review result
-    $reviewResult = @{
-        helpful_pct = $helpfulPct
-        time_saved = $timeSaved
-        reason = $reason
-        timestamp = (Get-Date -Format "o")
-    } | ConvertTo-Json -Compress
-    $reviewResult | Out-File -FilePath "$aceDir\\ace-review-result.json" -Encoding utf8
-}
 `;
-	// Always update to get ACE_REVIEW parsing
+	// Always update response tracking
 	fs.writeFileSync(responseTrackPath, responseTrackScript);
-	console.log('[ACE] Updated ace_track_response.ps1 with ACE_REVIEW parsing');
+	console.log('[ACE] Updated ace_track_response.ps1');
 
 	// Session Start Hook - Injects pattern context into new conversations
 	const sessionStartPath = path.join(scriptsDir, 'ace_session_start.ps1');
@@ -1043,18 +1098,17 @@ try {
 
 	// Stop Hook with Git Context Aggregation
 	const stopHookPath = path.join(scriptsDir, 'ace_stop_hook.ps1');
-	const stopHookScript = `# ACE Stop Hook - Aggregates trajectory + self-eval for task helpfulness
+	const stopHookScript = `# ACE Stop Hook - Aggregates trajectory summary on task completion
+# Helpfulness is now captured via afterMCPExecution when ace_learn is called
 # Input: status, loop_count, transcript_path, conversation_id
 
 $inputJson = [Console]::In.ReadToEnd()
 $data = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
 $status = $data.status
-$loopCount = $data.loop_count
 $transcriptPath = $data.transcript_path
 
 $aceDir = ".cursor\\ace"
 if (-not (Test-Path $aceDir)) { New-Item -ItemType Directory -Path $aceDir -Force | Out-Null }
-$evalFlag = "$aceDir\\.eval-requested"
 
 # Only process completed tasks
 if ($status -ne "completed") {
@@ -1062,60 +1116,38 @@ if ($status -ne "completed") {
     exit 0
 }
 
-if ($loopCount -eq 0) {
-    # ── FIRST STOP: aggregate + request self-eval ──
-    $gitBranch = git rev-parse --abbrev-ref HEAD 2>$null
-    if (-not $gitBranch) { $gitBranch = "unknown" }
-    $gitHash = git rev-parse --short HEAD 2>$null
-    if (-not $gitHash) { $gitHash = "unknown" }
+$gitBranch = git rev-parse --abbrev-ref HEAD 2>$null
+if (-not $gitBranch) { $gitBranch = "unknown" }
+$gitHash = git rev-parse --short HEAD 2>$null
+if (-not $gitHash) { $gitHash = "unknown" }
 
-    $mcpCount = 0; $shellCount = 0; $editCount = 0; $responseCount = 0
-    if (Test-Path "$aceDir\\mcp_trajectory.jsonl") {
-        $mcpCount = (Get-Content "$aceDir\\mcp_trajectory.jsonl" | Measure-Object -Line).Lines
-    }
-    if (Test-Path "$aceDir\\shell_trajectory.jsonl") {
-        $shellCount = (Get-Content "$aceDir\\shell_trajectory.jsonl" | Measure-Object -Line).Lines
-    }
-    if (Test-Path "$aceDir\\edit_trajectory.jsonl") {
-        $editCount = (Get-Content "$aceDir\\edit_trajectory.jsonl" | Measure-Object -Line).Lines
-    }
-    if (Test-Path "$aceDir\\response_trajectory.jsonl") {
-        $responseCount = (Get-Content "$aceDir\\response_trajectory.jsonl" | Measure-Object -Line).Lines
-    }
-
-    # Save transcript path for ace_learn
-    if ($transcriptPath) {
-        @{transcript_path=$transcriptPath; saved_at=(Get-Date -Format "o")} | ConvertTo-Json -Compress | Out-File -FilePath "$aceDir\\last_transcript.json" -Encoding utf8
-    }
-
-    # Check if ACE patterns were injected this task
-    $patternsInjected = 0
-    if (Test-Path "$aceDir\\ace-relevance.jsonl") {
-        $patternsInjected = (Select-String -Path "$aceDir\\ace-relevance.jsonl" -Pattern '"event": "search"' -SimpleMatch | Measure-Object).Count
-    }
-
-    $summary = "MCP:$mcpCount Shell:$shellCount Edits:$editCount Responses:$responseCount"
-    $transcriptNote = ""
-    if ($transcriptPath) { $transcriptNote = " Transcript saved for learning." }
-
-    if ($patternsInjected -gt 0) {
-        # Patterns were injected — ask for time-saved self-eval
-        New-Item -ItemType File -Path $evalFlag -Force | Out-Null
-        $msg = "[ACE Task Summary] $patternsInjected pattern searches used | AI-Trail: $summary | Git: $gitBranch ($gitHash)$transcriptNote --- How helpful was ACE knowledge for this task? Estimate how much time a human developer saved by having the injected patterns (vs researching docs, exploring code, trial-and-error). Reply: ACE_REVIEW: Xm saved | one-line reason"
-    } else {
-        $msg = "[ACE Task Summary] AI-Trail: $summary | Git: $gitBranch ($gitHash)$transcriptNote"
-    }
-
-    Write-Output "{\`"followup_message\`": \`"$msg\`"}"
-} else {
-    # ── SUBSEQUENT STOPS: clean up and exit ──
-    if (Test-Path $evalFlag) { Remove-Item $evalFlag -Force }
-    Write-Output '{}'
+$mcpCount = 0; $shellCount = 0; $editCount = 0; $responseCount = 0
+if (Test-Path "$aceDir\\mcp_trajectory.jsonl") {
+    $mcpCount = (Get-Content "$aceDir\\mcp_trajectory.jsonl" | Measure-Object -Line).Lines
 }
+if (Test-Path "$aceDir\\shell_trajectory.jsonl") {
+    $shellCount = (Get-Content "$aceDir\\shell_trajectory.jsonl" | Measure-Object -Line).Lines
+}
+if (Test-Path "$aceDir\\edit_trajectory.jsonl") {
+    $editCount = (Get-Content "$aceDir\\edit_trajectory.jsonl" | Measure-Object -Line).Lines
+}
+if (Test-Path "$aceDir\\response_trajectory.jsonl") {
+    $responseCount = (Get-Content "$aceDir\\response_trajectory.jsonl" | Measure-Object -Line).Lines
+}
+
+if ($transcriptPath) {
+    @{transcript_path=$transcriptPath; saved_at=(Get-Date -Format "o")} | ConvertTo-Json -Compress | Out-File -FilePath "$aceDir\\last_transcript.json" -Encoding utf8
+}
+
+$summary = "MCP:$mcpCount Shell:$shellCount Edits:$editCount Responses:$responseCount"
+$entry = @{event="stop"; summary=$summary; git_branch=$gitBranch; git_hash=$gitHash; timestamp=(Get-Date -Format "o")} | ConvertTo-Json -Compress
+$entry | Out-File -Append -FilePath "$aceDir\\ace-relevance.jsonl" -Encoding utf8
+
+Write-Output '{}'
 `;
 	// Always update stop hook
 	fs.writeFileSync(stopHookPath, stopHookScript);
-	console.log('[ACE] Updated ace_stop_hook.ps1 with task helpfulness self-eval');
+	console.log('[ACE] Updated ace_stop_hook.ps1');
 
 	// Pre-Tool Use Gate
 	const preToolUsePath = path.join(scriptsDir, 'ace_pre_tool_use.ps1');
@@ -1369,17 +1401,64 @@ function createUnixHookScripts(scriptsDir: string, forceUpdate: boolean = false)
 	const mcpTrackPath = path.join(scriptsDir, 'ace_track_mcp.sh');
 	const mcpTrackScript = `#!/bin/bash
 # ACE MCP Tracking Hook - Captures tool executions for AI-Trail
+# Also detects ace_learn calls and extracts task helpfulness (TIME_SAVED)
 # Input: tool_name, tool_input, result_json, duration
+# Requires: jq (checked at extension activation)
 
 input=$(cat)
-mkdir -p .cursor/ace
-echo "$input" >> .cursor/ace/mcp_trajectory.jsonl
+ace_dir=".cursor/ace"
+mkdir -p "$ace_dir"
+
+# Always log to trajectory
+echo "$input" >> "$ace_dir/mcp_trajectory.jsonl"
+
+# Bail if jq is not available
+if ! command -v jq >/dev/null 2>&1; then exit 0; fi
+
+# Detect ace_learn call — extract helpfulness from tool_input.output
+tool_name=$(echo "$input" | jq -r '.tool_name // ""' 2>/dev/null || echo "")
+if echo "$tool_name" | grep -qi "ace_learn"; then
+  # tool_input is a JSON string — parse it to get the output field
+  tool_input_raw=$(echo "$input" | jq -r '.tool_input // ""' 2>/dev/null || echo "")
+  # tool_input may be a string or object; try parsing as JSON
+  output_field=$(echo "$tool_input_raw" | jq -r '.output // ""' 2>/dev/null || echo "")
+  if [ -z "$output_field" ]; then
+    # Fallback: tool_input might be a JSON string that needs double-parse
+    output_field=$(echo "$tool_input_raw" | jq -r '. | fromjson? | .output // ""' 2>/dev/null || echo "")
+  fi
+
+  # Look for TIME_SAVED: Xm | reason on the first line of output
+  if echo "$output_field" | head -1 | grep -q "TIME_SAVED:"; then
+    first_line=$(echo "$output_field" | head -1)
+    # Extract time (e.g., "15m", "2m", "30s")
+    time_saved=$(echo "$first_line" | sed 's/TIME_SAVED:[[:space:]]*//' | sed 's/[[:space:]]*|.*//' | sed 's/[[:space:]]*\$//')
+    # Extract reason (after the first pipe only)
+    reason=""
+    if echo "$first_line" | grep -q '|'; then
+      reason=$(echo "$first_line" | sed 's/^[^|]*|[[:space:]]*//' | head -c 200)
+    fi
+    # Sanitize reason — remove quotes that would break JSON
+    reason=$(echo "$reason" | sed 's/"/\\\\"/g')
+    # Extract numeric minutes for helpful_pct
+    minutes=$(echo "$time_saved" | grep -oE '[0-9]+' | head -1)
+    minutes=\${minutes:-0}
+    # Map time to helpful %: 0m=0%, 1-4m=15%, 5-14m=30%, 15-29m=60%, 30m+=80%
+    if [ "$minutes" -ge 30 ] 2>/dev/null; then helpful_pct=80
+    elif [ "$minutes" -ge 15 ] 2>/dev/null; then helpful_pct=60
+    elif [ "$minutes" -ge 5 ] 2>/dev/null; then helpful_pct=30
+    elif [ "$minutes" -gt 0 ] 2>/dev/null; then helpful_pct=15
+    else helpful_pct=0; fi
+
+    # Write review result (overwrites previous)
+    echo "{\\"helpful_pct\\": $helpful_pct, \\"time_saved\\": \\"$time_saved\\", \\"reason\\": \\"$reason\\", \\"timestamp\\": \\"$(date -Iseconds)\\"}" > "$ace_dir/ace-review-result.json"
+  fi
+fi
+
 exit 0
 `;
-	if (forceUpdate || !fs.existsSync(mcpTrackPath)) {
-		fs.writeFileSync(mcpTrackPath, mcpTrackScript, { mode: 0o755 });
-		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_track_mcp.sh`);
-	}
+	// Always update to get ace_learn helpfulness detection
+	fs.writeFileSync(mcpTrackPath, mcpTrackScript, { mode: 0o755 });
+	console.log(`[ACE] Updated ace_track_mcp.sh with ace_learn helpfulness detection`);
 
 	// Shell Execution Tracking
 	const shellTrackPath = path.join(scriptsDir, 'ace_track_shell.sh');
@@ -1400,41 +1479,21 @@ exit 0
 	// Agent Response Tracking
 	const responseTrackPath = path.join(scriptsDir, 'ace_track_response.sh');
 	const responseTrackScript = `#!/bin/bash
-# ACE Response Tracking Hook - Captures agent responses + parses ACE_REVIEW for task helpfulness
+# ACE Response Tracking Hook - Captures agent responses for AI-Trail
 # Input: text (assistant final text)
 
 input=$(cat)
 ace_dir=".cursor/ace"
 mkdir -p "$ace_dir"
 
-# Always log response to trajectory
+# Log response to trajectory
 echo "$input" >> "$ace_dir/response_trajectory.jsonl"
-
-# Parse ACE_REVIEW from agent response (written during self-eval phase)
-response_text=$(echo "$input" | jq -r '.text // ""' 2>/dev/null || echo "")
-if echo "$response_text" | grep -q "ACE_REVIEW:"; then
-  # Extract time saved (e.g., "15m saved", "2m saved", "30s saved")
-  time_saved=$(echo "$response_text" | grep -oE 'ACE_REVIEW:[^|]*' | sed 's/ACE_REVIEW:[[:space:]]*//' | sed 's/[[:space:]]*$//')
-  # Extract reason (text after the pipe)
-  reason=$(echo "$response_text" | grep -oE 'ACE_REVIEW:[^|]*\\|[^"]*' | sed 's/.*|[[:space:]]*//' | head -c 200)
-  # Extract numeric minutes for helpful_pct approximation
-  minutes=$(echo "$time_saved" | grep -oE '[0-9]+' | head -1)
-  minutes=\${minutes:-0}
-  # Rough helpful % based on time: 0m=0%, 5m=30%, 15m=60%, 30m+=80%
-  if [ "$minutes" -ge 30 ] 2>/dev/null; then helpful_pct=80
-  elif [ "$minutes" -ge 15 ] 2>/dev/null; then helpful_pct=60
-  elif [ "$minutes" -ge 5 ] 2>/dev/null; then helpful_pct=30
-  elif [ "$minutes" -gt 0 ] 2>/dev/null; then helpful_pct=15
-  else helpful_pct=0; fi
-  # Write review result
-  echo "{\\"helpful_pct\\": $helpful_pct, \\"time_saved\\": \\"$time_saved\\", \\"reason\\": \\"$reason\\", \\"timestamp\\": \\"$(date -Iseconds)\\"}" > "$ace_dir/ace-review-result.json"
-fi
 
 exit 0
 `;
-	// Always update to get ACE_REVIEW parsing
+	// Always update response tracking
 	fs.writeFileSync(responseTrackPath, responseTrackScript, { mode: 0o755 });
-	console.log('[ACE] Updated ace_track_response.sh with ACE_REVIEW parsing');
+	console.log('[ACE] Updated ace_track_response.sh');
 
 	// Session Start Hook - Injects pattern context into new conversations
 	const sessionStartPath = path.join(scriptsDir, 'ace_session_start.sh');
@@ -1660,18 +1719,24 @@ exit 0
 	// Stop Hook with Git Context Aggregation
 	const stopHookPath = path.join(scriptsDir, 'ace_stop_hook.sh');
 	const stopHookScript = `#!/bin/bash
-# ACE Stop Hook - Aggregates trajectory + self-eval for task helpfulness
+# ACE Stop Hook - Aggregates trajectory summary on task completion
+# Helpfulness is now captured via afterMCPExecution when ace_learn is called
 # Input: status, loop_count, transcript_path, conversation_id
+# Requires: jq (checked at extension activation)
 
 input=$(cat)
-status=$(echo "$input" | jq -r '.status // empty')
-loop_count=$(echo "$input" | jq -r '.loop_count // 0')
-transcript_path=$(echo "$input" | jq -r '.transcript_path // empty')
-conversation_id=$(echo "$input" | jq -r '.conversation_id // empty')
+
+# Extract fields — bail gracefully without jq
+if command -v jq >/dev/null 2>&1; then
+  status=$(echo "$input" | jq -r '.status // empty')
+  transcript_path=$(echo "$input" | jq -r '.transcript_path // empty')
+else
+  status=$(echo "$input" | grep -oE '"status"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*: *"//' | sed 's/"$//')
+  transcript_path=$(echo "$input" | grep -oE '"transcript_path"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*: *"//' | sed 's/"$//')
+fi
 
 ace_dir=".cursor/ace"
 mkdir -p "$ace_dir"
-eval_flag="$ace_dir/.eval-requested"
 
 # Only process on completed tasks
 if [ "$status" != "completed" ]; then
@@ -1679,50 +1744,26 @@ if [ "$status" != "completed" ]; then
   exit 0
 fi
 
-if [ "$loop_count" = "0" ]; then
-  # ── FIRST STOP: aggregate + request self-eval ──
-  git_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
-  git_hash=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+git_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+git_hash=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 
-  mcp_count=$(wc -l < "$ace_dir/mcp_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
-  shell_count=$(wc -l < "$ace_dir/shell_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
-  edit_count=$(wc -l < "$ace_dir/edit_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
-  response_count=$(wc -l < "$ace_dir/response_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
+mcp_count=$(wc -l < "$ace_dir/mcp_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
+shell_count=$(wc -l < "$ace_dir/shell_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
+edit_count=$(wc -l < "$ace_dir/edit_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
+response_count=$(wc -l < "$ace_dir/response_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
 
-  if [ -n "$transcript_path" ]; then
-    echo "{\\"transcript_path\\": \\"$transcript_path\\", \\"saved_at\\": \\"$(date -Iseconds)\\"}" > "$ace_dir/last_transcript.json"
-  fi
-
-  # Check if ACE patterns were injected this task
-  patterns_injected=0
-  if [ -f "$ace_dir/ace-relevance.jsonl" ]; then
-    patterns_injected=$(grep -c '"event": "search"' "$ace_dir/ace-relevance.jsonl" 2>/dev/null || echo "0")
-  fi
-
-  summary="MCP:$mcp_count Shell:$shell_count Edits:$edit_count Responses:$response_count"
-  transcript_note=""
-  if [ -n "$transcript_path" ]; then
-    transcript_note=" Transcript saved for learning."
-  fi
-
-  if [ "$patterns_injected" -gt 0 ] 2>/dev/null; then
-    # Patterns were injected — ask for time-saved self-eval
-    touch "$eval_flag"
-    msg="[ACE Task Summary] $patterns_injected pattern searches used | AI-Trail: $summary | Git: $git_branch ($git_hash)$transcript_note --- How helpful was ACE knowledge for this task? Estimate how much time a human developer saved by having the injected patterns (vs researching docs, exploring code, trial-and-error). Reply: ACE_REVIEW: Xm saved | one-line reason"
-  else
-    msg="[ACE Task Summary] AI-Trail: $summary | Git: $git_branch ($git_hash)$transcript_note"
-  fi
-
-  echo "{\\"followup_message\\": \\"$msg\\"}"
-else
-  # ── SUBSEQUENT STOPS: clean up and exit ──
-  rm -f "$eval_flag" 2>/dev/null
-  echo '{}'
+if [ -n "$transcript_path" ]; then
+  echo "{\\"transcript_path\\": \\"$transcript_path\\", \\"saved_at\\": \\"$(date -Iseconds)\\"}" > "$ace_dir/last_transcript.json"
 fi
+
+summary="MCP:$mcp_count Shell:$shell_count Edits:$edit_count Responses:$response_count"
+echo "{\\"event\\": \\"stop\\", \\"summary\\": \\"$summary\\", \\"git_branch\\": \\"$git_branch\\", \\"git_hash\\": \\"$git_hash\\", \\"timestamp\\": \\"$(date -Iseconds)\\"}" >> "$ace_dir/ace-relevance.jsonl"
+
+echo '{}'
 `;
 	// Always update stop hook
 	fs.writeFileSync(stopHookPath, stopHookScript, { mode: 0o755 });
-	console.log('[ACE] Updated ace_stop_hook.sh with task helpfulness self-eval');
+	console.log('[ACE] Updated ace_stop_hook.sh');
 
 	// Pre-Tool Use Gate
 	const preToolUsePath = path.join(scriptsDir, 'ace_pre_tool_use.sh');
@@ -2060,12 +2101,14 @@ Use the \`ace_learn\` MCP tool to capture what was learned.
 
 **IMPORTANT: All 4 parameters (task, trajectory, success, output) are required. The trajectory MUST be an array of strings.**
 
+**IMPORTANT: Start the output field with \`TIME_SAVED: Xm | reason\` to report helpfulness.**
+
 \`\`\`
 ace_learn(
   task: "Brief description of what was done",
   trajectory: ["Step 1: what you did first", "Step 2: what you did next"],
   success: true,
-  output: "Important lessons, patterns, or insights discovered"
+  output: "TIME_SAVED: Xm | one-line reason\\nImportant lessons, patterns, or insights discovered"
 )
 \`\`\`
 
@@ -2077,7 +2120,7 @@ ace_learn(
   task: "Implemented JWT authentication",
   trajectory: ["Added auth middleware to Express app", "Created login endpoint with bcrypt", "Added token refresh with httpOnly cookies"],
   success: true,
-  output: "Always use httpOnly cookies for refresh tokens. Access tokens should be short-lived (15min)."
+  output: "TIME_SAVED: 15m | Auth patterns avoided OAuth docs research\\nAlways use httpOnly cookies for refresh tokens. Access tokens should be short-lived (15min)."
 )
 \`\`\`
 
@@ -2213,30 +2256,37 @@ Always prefer ace_search with user's task as query.
 
 ## AFTER Completing Substantial Work - SINGLE ace_learn Call
 
-**Wait for the AI-Trail summary, THEN call \`ace_learn\` ONCE.**
+**Call \`ace_learn\` ONCE after completing your task.**
 
 Do NOT call ace_learn immediately after each implementation step.
-Wait until you see the session summary with AI-Trail statistics:
-\`\`\`
-Session complete. AI-Trail: MCP:X Shell:Y Edits:Z Responses:W. Git: branch (hash).
-\`\`\`
+Wait until the task is fully complete, then call ace_learn with the full context.
 
-**THEN call ace_learn with the full context:**
+**IMPORTANT: Include TIME_SAVED on the FIRST LINE of the output field.**
+Estimate how much time the ACE patterns saved the developer (vs researching docs, exploring code, trial-and-error).
+
 \`\`\`
 ace_learn(
   task="<what you accomplished>",
   trajectory=["<key steps>"],
   success=true,
-  output="<lessons learned>",
-  git={commit_hash: "<from AI-Trail>", branch: "<from AI-Trail>"}
+  output="TIME_SAVED: Xm | <one-line reason>\\n<lessons learned>"
 )
 \`\`\`
 
-**WHY single call at end?**
-- AI-Trail summary includes full execution statistics
-- Git context (branch + commit hash) is available
-- Avoids redundant captures
-- More efficient server processing
+**Example:**
+\`\`\`
+ace_learn(
+  task="Implemented JWT authentication",
+  trajectory=["Added auth middleware", "Created login endpoint", "Added token refresh"],
+  success=true,
+  output="TIME_SAVED: 15m | Auth patterns avoided OAuth docs research\\nAlways use httpOnly cookies for refresh tokens."
+)
+\`\`\`
+
+**TIME_SAVED format:** \`TIME_SAVED: Xm | reason\`
+- X = estimated minutes saved (0 if patterns weren't helpful)
+- reason = one-line explanation of what patterns helped with
+- Rest of output = normal lessons learned (after newline)
 
 ## Available ACE MCP Tools
 
