@@ -5,6 +5,11 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.60] - 2026-03-28
+
+### Added
+- **`ACE_CLIENT_ID=cursor` env var** — MCP subprocess now sends `X-ACE-Client: cursor` header via `ACE_CLIENT_ID` env var (ace-sdk 2.12.0+). Enables per-extension analytics tracking in ACE server BigQuery.
+
 ## [0.2.59] - 2026-03-24
 
 ### Changed

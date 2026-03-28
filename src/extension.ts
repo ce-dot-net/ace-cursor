@@ -504,7 +504,9 @@ async function registerMcpServer(context: vscode.ExtensionContext): Promise<void
 	}
 
 	// Build environment variables for MCP server
-	const env: Record<string, string> = {};
+	const env: Record<string, string> = {
+		ACE_CLIENT_ID: 'cursor'  // Per-extension analytics tracking (ace-sdk 2.12.0+)
+	};
 	if (aceConfig?.serverUrl) env.ACE_SERVER_URL = aceConfig.serverUrl;
 	if (aceConfig?.projectId) env.ACE_PROJECT_ID = aceConfig.projectId;
 	if (aceConfig?.orgId) env.ACE_ORG_ID = aceConfig.orgId;
