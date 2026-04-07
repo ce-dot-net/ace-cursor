@@ -365,6 +365,73 @@ export async function activate(context: vscode.ExtensionContext) {
 
 		// 10. Check workspace version and prompt for update if needed
 		await checkWorkspaceVersionAndPrompt(context);
+
+		// 11. Periodic auth health check — detect token expiry + MCP server errors
+		const authHealthInterval = setInterval(() => {
+			// Check hard cap expiry
+			const hardCap = getHardCapInfo();
+			if (hardCap) {
+				if (hardCap.isExpired) {
+					if (statusBarItem) {
+						statusBarItem.text = '$(warning) ACE: Session expired';
+						statusBarItem.tooltip = 'ACE session expired. Click to re-login.';
+					}
+					vscode.window.showErrorMessage(
+						'ACE: Session expired (7-day hard cap). Please login again.',
+						'Login'
+					).then(s => { if (s === 'Login') vscode.commands.executeCommand('ace.login'); });
+					clearInterval(authHealthInterval);
+					return;
+				}
+				if (hardCap.isApproaching && hardCap.hoursRemaining <= 12) {
+					aceOutput?.appendLine(`[${new Date().toLocaleTimeString()}] Auth: hard cap in ${hardCap.hoursRemaining}h`);
+				}
+			}
+
+			// Check refresh token expiry
+			const expiration = getTokenExpiration();
+			if (expiration?.refreshExpires) {
+				const refreshExpired = new Date(expiration.refreshExpires).getTime() < Date.now();
+				if (refreshExpired) {
+					if (statusBarItem) {
+						statusBarItem.text = '$(warning) ACE: Login required';
+						statusBarItem.tooltip = 'ACE refresh token expired. Click to re-login.';
+					}
+					vscode.window.showErrorMessage(
+						'ACE: Session expired. Please login again.',
+						'Login'
+					).then(s => { if (s === 'Login') vscode.commands.executeCommand('ace.login'); });
+					clearInterval(authHealthInterval);
+					return;
+				}
+			}
+
+			// Check MCP server status file
+			const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+			if (wsRoot) {
+				try {
+					const projectHash = wsRoot.replace(/\//g, '-').replace(/^-/, '');
+					const statusPath = path.join(
+						os.homedir(), '.cursor', 'projects', projectHash,
+						'mcps', 'user-ce-dot-net.cursor-ace-extension-extension-ace-pattern-learning', 'STATUS.md'
+					);
+					if (fs.existsSync(statusPath)) {
+						const status = fs.readFileSync(statusPath, 'utf8');
+						if (status.includes('errored') || status.includes('error')) {
+							aceOutput?.appendLine(`[${new Date().toLocaleTimeString()}] MCP server in error state — may need reload`);
+							if (statusBarItem && !statusBarItem.text.includes('warning')) {
+								statusBarItem.text = '$(warning) ACE: MCP error';
+								statusBarItem.tooltip = 'ACE MCP server errored. Try: Cmd+Shift+P → Developer: Reload Window';
+							}
+						}
+					}
+				} catch {
+					// Ignore status check errors
+				}
+			}
+		}, 30 * 60 * 1000); // Every 30 minutes
+
+		context.subscriptions.push({ dispose: () => clearInterval(authHealthInterval) });
 	} catch (error) {
 		console.error('[ACE] Activation error:', error);
 		vscode.window.showErrorMessage(`ACE extension activation failed: ${error instanceof Error ? error.message : String(error)}`);

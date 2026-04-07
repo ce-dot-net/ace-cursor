@@ -5,6 +5,12 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.66] - 2026-04-07
+
+### Added
+- **Periodic auth health check** — Every 30 minutes, checks for token expiry (7-day hard cap, refresh token) and shows re-login popup when expired. Updates status bar to `$(warning) ACE: Session expired`.
+- **MCP server status monitoring** — Checks Cursor's MCP status file for error state and warns in status bar + output channel. Prevents silent MCP server failures from going undetected.
+
 ## [0.2.65] - 2026-04-07
 
 ### Fixed
