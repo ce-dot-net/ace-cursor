@@ -5,6 +5,15 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.61] - 2026-04-07
+
+### Added
+- **`summary` field in ace_learn** — Rules now instruct the AI to include a summary of what it built, why it made key decisions, and what it learned. This enables richer pattern extraction on the server side.
+
+### Changed
+- **Updated `@ace-sdk/core` to ^2.13.1** — Adds typed `summary` field to `ExecutionTrace.result` interface.
+- **Rules updated** — `ace-patterns/RULE.md` and `ace-learn.md` now include `summary` parameter with guidance on including architectural decisions and lessons learned.
+
 ## [0.2.60] - 2026-03-28
 
 ### Added

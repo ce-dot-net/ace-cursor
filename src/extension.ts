@@ -2124,12 +2124,15 @@ Use the \`ace_learn\` MCP tool to capture what was learned.
 
 **IMPORTANT: Start the output field with \`TIME_SAVED: Xm | reason\` to report helpfulness.**
 
+**IMPORTANT: Include \`summary\` — your last response to the user about the completed work.**
+
 \`\`\`
 ace_learn(
   task: "Brief description of what was done",
   trajectory: ["Step 1: what you did first", "Step 2: what you did next"],
   success: true,
-  output: "TIME_SAVED: Xm | one-line reason\\nImportant lessons, patterns, or insights discovered"
+  output: "TIME_SAVED: Xm | one-line reason\\nImportant lessons, patterns, or insights discovered",
+  summary: "What you built, why you made key decisions, and what you learned"
 )
 \`\`\`
 
@@ -2141,7 +2144,8 @@ ace_learn(
   task: "Implemented JWT authentication",
   trajectory: ["Added auth middleware to Express app", "Created login endpoint with bcrypt", "Added token refresh with httpOnly cookies"],
   success: true,
-  output: "TIME_SAVED: 15m | Auth patterns avoided OAuth docs research\\nAlways use httpOnly cookies for refresh tokens. Access tokens should be short-lived (15min)."
+  output: "TIME_SAVED: 15m | Auth patterns avoided OAuth docs research\\nAlways use httpOnly cookies for refresh tokens. Access tokens should be short-lived (15min).",
+  summary: "Implemented JWT auth with HS256 signing. Switched from RS256 because no key rotation infra. Used httpOnly cookies after playbook warned against localStorage. Server on port 3007 with /login, /protected, /health."
 )
 \`\`\`
 
@@ -2305,9 +2309,16 @@ ace_learn(
   task="<what you accomplished>",
   trajectory=["<key steps>"],
   success=true,
-  output="TIME_SAVED: Xm | <one-line reason>\\n<lessons learned>"
+  output="TIME_SAVED: Xm | <one-line reason>\\n<lessons learned>",
+  summary="<your last response — include WHAT you built, WHY you made key decisions, and what you LEARNED>"
 )
 \`\`\`
+
+**summary tips** (the server uses this for better pattern extraction):
+- Include what you built AND why (architectural decisions)
+- Mention what went wrong or what you changed approach on
+- Note which ACE patterns helped and how
+- Example: "Initially tried X but switched to Y because Z. The playbook pattern about W saved time."
 
 **Example:**
 \`\`\`
@@ -2315,7 +2326,8 @@ ace_learn(
   task="Implemented JWT authentication",
   trajectory=["Added auth middleware", "Created login endpoint", "Added token refresh"],
   success=true,
-  output="TIME_SAVED: 15m | Auth patterns avoided OAuth docs research\\nAlways use httpOnly cookies for refresh tokens."
+  output="TIME_SAVED: 15m | Auth patterns avoided OAuth docs research\\nAlways use httpOnly cookies for refresh tokens.",
+  summary="I implemented JWT auth with HS256 signing. Initially tried RS256 but switched to HS256 because the project has no key rotation infra. Used httpOnly cookies after the playbook warned against localStorage tokens. The /login endpoint validates credentials, /protected verifies with timingSafeEqual."
 )
 \`\`\`
 

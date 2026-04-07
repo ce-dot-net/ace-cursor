@@ -20,6 +20,11 @@ const commonOptions = {
   // Handle ESM modules (needed for @ace-sdk/core which is ESM-only)
   mainFields: ['module', 'main'],
   conditions: ['import', 'require', 'node'],
+  // @ace-sdk/core@2.13.1 uses import.meta.url in version.js — provide a CJS shim
+  // Only applies in CJS context where import.meta is undefined and require is available
+  banner: {
+    js: 'try{if(typeof import.meta==="undefined"&&typeof require!=="undefined"){Object.defineProperty(globalThis,"import",{value:{meta:{url:require("url").pathToFileURL(__filename).href}}})}}catch(e){}',
+  },
 };
 
 async function build() {
