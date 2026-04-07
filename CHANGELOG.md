@@ -5,6 +5,11 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.62] - 2026-04-07
+
+### Fixed
+- **CI build: `import.meta.url` shim for `@ace-sdk/core` v2.13.1** — The SDK uses `import.meta.url` in `version.js` which is `undefined` when esbuild bundles to CJS. Added a targeted banner shim to extension and test bundles only (not the test runner which loads as ESM).
+
 ## [0.2.61] - 2026-04-07
 
 ### Added
