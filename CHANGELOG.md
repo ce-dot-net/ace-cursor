@@ -5,6 +5,12 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.64] - 2026-04-07
+
+### Fixed
+- **Pass `ACE_API_TOKEN` to MCP subprocess** — The MCP server needs the auth token to connect to the ACE API. Previously only `ACE_SERVER_URL`, `ACE_PROJECT_ID`, and `ACE_ORG_ID` were passed, causing `❌ Failed to load configuration: missing required fields` when the config file token expired.
+- **Login prompt on missing token** — Extension now detects when no auth token is available at activation and prompts the user to login.
+
 ## [0.2.63] - 2026-04-07
 
 ### Fixed

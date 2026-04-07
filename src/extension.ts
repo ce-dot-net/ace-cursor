@@ -232,6 +232,15 @@ export async function activate(context: vscode.ExtensionContext) {
 	console.log('[ACE] Extension activating...');
 	extensionContext = context;
 
+	// Ensure SDK auth/config are stored in ephemeral temp location (/tmp by default).
+	const aceConfigPath = getAceGlobalConfigPath();
+	process.env.ACE_CONFIG_PATH = aceConfigPath;
+	try {
+		fs.mkdirSync(path.dirname(aceConfigPath), { recursive: true });
+	} catch (error) {
+		console.warn('[ACE] Failed to ensure ACE config directory:', error instanceof Error ? error.message : String(error));
+	}
+
 	// Suppress punycode deprecation warnings from dependencies
 	const originalEmitWarning = process.emitWarning;
 	process.emitWarning = function(warning: any, ...args: any[]) {
@@ -503,6 +512,22 @@ async function registerMcpServer(context: vscode.ExtensionContext): Promise<void
 		console.log('[ACE] No ACE configuration found - MCP server will use defaults');
 	}
 
+	// Get auth token from device login
+	const userAuth = loadUserAuth();
+	if (!userAuth?.token) {
+		console.log('[ACE] No auth token - prompting login');
+		vscode.window.showWarningMessage(
+			'ACE: Not logged in. Pattern retrieval and learning require authentication.',
+			'Login'
+		).then(selection => {
+			if (selection === 'Login') {
+				vscode.commands.executeCommand('ace.login');
+			}
+		});
+		// Still register MCP server — it will fail but Cursor shows error state
+		// User can re-login and reload to fix
+	}
+
 	// Build environment variables for MCP server
 	const env: Record<string, string> = {
 		ACE_CLIENT_ID: 'cursor'  // Per-extension analytics tracking (ace-sdk 2.12.0+)
@@ -510,6 +535,7 @@ async function registerMcpServer(context: vscode.ExtensionContext): Promise<void
 	if (aceConfig?.serverUrl) env.ACE_SERVER_URL = aceConfig.serverUrl;
 	if (aceConfig?.projectId) env.ACE_PROJECT_ID = aceConfig.projectId;
 	if (aceConfig?.orgId) env.ACE_ORG_ID = aceConfig.orgId;
+	if (userAuth?.token) env.ACE_API_TOKEN = userAuth.token;
 
 	try {
 		// Register the MCP server using Cursor's API
