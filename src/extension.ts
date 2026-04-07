@@ -3,7 +3,7 @@
  *
  * This extension registers the @ace-sdk/mcp server with Cursor's native MCP API.
  * The AI automatically invokes MCP tools based on their descriptions:
- * - ace_get_playbook: "ALWAYS call FIRST" - AI calls before every task
+ * - ace_search: "ALWAYS call FIRST" - AI searches relevant patterns before every task
  * - ace_learn: "ALWAYS call AFTER" - AI calls after every substantial task
  *
  * No file watchers, no heuristics - the AI decides based on tool descriptions.
@@ -394,7 +394,7 @@ export async function activate(context: vscode.ExtensionContext) {
 			vscode.window.showInformationMessage('ACE learning is now automatic via MCP. The AI will capture lessons learned.');
 		}),
 		vscode.commands.registerCommand('ace.autoSearch', () => {
-			vscode.window.showInformationMessage('ACE search is now automatic via MCP. The AI calls ace_get_playbook before every task.');
+			vscode.window.showInformationMessage('ACE search is now automatic via MCP. The AI calls ace_search before every task.');
 		}),
 		vscode.commands.registerCommand('ace.devices', showDevicesQuickPick)
 	);
@@ -2197,7 +2197,7 @@ Available ACE commands and MCP tools.
 
 ## MCP Tools (Use These Directly)
 
-- \`ace_get_playbook()\` - Get all patterns (call BEFORE tasks)
+- \`ace_get_playbook()\` - Get ALL patterns (only for export/backup, prefer ace_search)
 - \`ace_search(query)\` - Search for specific patterns
 - \`ace_learn(task, trajectory, output, success)\` - Capture learning (call AFTER tasks)
 - \`ace_bootstrap(mode, thoroughness)\` - Initialize playbook
@@ -2206,7 +2206,7 @@ Available ACE commands and MCP tools.
 ## Automatic Features
 
 The MCP tools are designed for automatic invocation:
-- **ace_get_playbook**: Called automatically before every task
+- **ace_search**: Called automatically before every task (5-10 relevant patterns)
 - **ace_learn**: Called automatically after substantial work
 
 ## UI Commands (Command Palette)
@@ -2483,7 +2483,7 @@ not simple paths. Always use \`ace_list_domains\` to discover actual domain name
 
 ## Example Workflow
 
-1. Start task → \`ace_get_playbook()\` to retrieve all patterns
+1. Start task → \`ace_search("your task description")\` to retrieve relevant patterns
 2. 5+ edits later → \`ace_search("error handling")\` for fresh patterns
 3. Need focused results → \`ace_list_domains()\` then \`ace_search(..., allowed_domains=[...])\`
 4. Task complete → \`ace_learn(...)\` to capture lessons
@@ -2605,7 +2605,7 @@ export { initializeWorkspace };
 async function runSearchCommand(): Promise<void> {
 	vscode.window.showInformationMessage(
 		'ACE search is handled automatically via MCP. ' +
-		'In Cursor chat, the AI calls ace_search or ace_get_playbook before tasks.'
+		'In Cursor chat, the AI calls ace_search before tasks to retrieve relevant patterns.'
 	);
 }
 
@@ -2726,10 +2726,10 @@ async function runDiagnosticCommand(): Promise<void> {
 		if (fs.existsSync(rulesPath)) {
 			diagnostics.push('✅ Cursor Rules: Found');
 			const rulesContent = fs.readFileSync(rulesPath, 'utf-8');
-			if (rulesContent.includes('ace_get_playbook')) {
-				diagnostics.push('  → Rules mention ace_get_playbook');
+			if (rulesContent.includes('ace_search')) {
+				diagnostics.push('  → Rules mention ace_search');
 			} else {
-				issues.push('⚠️ Rules file missing ace_get_playbook reference');
+				issues.push('⚠️ Rules file missing ace_search reference');
 			}
 		} else {
 			issues.push('⚠️ Cursor rules file not found');
@@ -2765,7 +2765,7 @@ async function runDiagnosticCommand(): Promise<void> {
 		...fixes,
 		'',
 		'NOTE: Even if everything is configured, the AI decides when to call MCP tools.',
-		'Try explicitly asking: "Please call ace_get_playbook to retrieve patterns"',
+		'Try explicitly asking: "Please call ace_search to retrieve patterns for my task"',
 		'',
 		'For automatic triggering, ensure:',
 		'1. MCP server is registered (requires Cursor, not VS Code)',
