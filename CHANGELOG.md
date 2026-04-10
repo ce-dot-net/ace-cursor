@@ -5,6 +5,13 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.69] - 2026-04-10
+
+### Changed
+- **Bumped `@ace-sdk/core` to ^2.14.0** — CJS build ships natively, no more `import.meta.url` workarounds.
+- **Removed esbuild `importMetaPlugin`** — SDK now inlines version at build time. Cleaned up ~25 lines of workaround code.
+- **`ace_learn` now returns in <1s** — `@ace-sdk/mcp@2.16.3` ships fire-and-forget SSE. Users via `npx` get this automatically. No more 10-17s blocking.
+
 ## [0.2.68] - 2026-04-10
 
 ### Changed
