@@ -266,20 +266,85 @@ export async function activate(context: vscode.ExtensionContext) {
 	console.log('[ACE] Status bar created and shown');
 
 	try {
-		// 2. Register MCP server with Cursor
+		// 2. Check if ACE should activate for this workspace (opt-in per workspace)
+		const wsConfig = vscode.workspace.getConfiguration('ace');
+		const aceEnabledSetting = wsConfig.inspect<boolean>('enabled');
+		const aceExplicitlySet = aceEnabledSetting?.workspaceValue !== undefined
+			|| aceEnabledSetting?.workspaceFolderValue !== undefined;
+		const aceEnabled = wsConfig.get<boolean>('enabled');
+
+		// Check if workspace was previously initialized (has settings.json with version)
+		const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		const hasAceSettings = wsRoot && fs.existsSync(path.join(wsRoot, '.cursor', 'ace', 'settings.json'));
+
+		if (aceExplicitlySet && aceEnabled === false) {
+			// User explicitly disabled ACE for this workspace
+			console.log('[ACE] Disabled for this workspace (ace.enabled=false)');
+			if (statusBarItem) {
+				statusBarItem.text = '$(circle-slash) ACE: Disabled';
+				statusBarItem.tooltip = 'ACE is disabled for this workspace. Click to configure.';
+				statusBarItem.command = 'ace.configure';
+			}
+			return;
+		}
+
+		if (!hasAceSettings && !aceExplicitlySet) {
+			// Workspace never had ACE and user hasn't explicitly set ace.enabled
+			if (!wsRoot) {
+				// No workspace folder (e.g., CI, untitled window) — skip silently
+				console.log('[ACE] No workspace folder — skipping initialization');
+				return;
+			}
+			// Show opt-in prompt — don't auto-activate
+			console.log('[ACE] New workspace, no ACE settings — showing opt-in prompt');
+			const choice = await vscode.window.showInformationMessage(
+				'Enable ACE pattern learning for this workspace?',
+				'Yes, enable',
+				'Not now',
+				'Never for this workspace'
+			);
+
+			if (choice === 'Never for this workspace') {
+				await wsConfig.update('enabled', false, vscode.ConfigurationTarget.Workspace);
+				console.log('[ACE] User chose "Never" — disabled for this workspace');
+				if (statusBarItem) {
+					statusBarItem.text = '$(circle-slash) ACE: Disabled';
+					statusBarItem.tooltip = 'ACE disabled for this workspace. Click to configure.';
+					statusBarItem.command = 'ace.configure';
+				}
+				return;
+			}
+
+			if (choice !== 'Yes, enable') {
+				// "Not now" or dismissed — skip silently, ask again next time
+				console.log('[ACE] User chose "Not now" — skipping initialization');
+				if (statusBarItem) {
+					statusBarItem.text = '$(book) ACE: Not initialized';
+					statusBarItem.tooltip = 'Click to initialize ACE for this workspace';
+					statusBarItem.command = 'ace.initializeWorkspace';
+				}
+				return;
+			}
+
+			// User chose "Yes, enable" — mark workspace as enabled and continue
+			await wsConfig.update('enabled', true, vscode.ConfigurationTarget.Workspace);
+			console.log('[ACE] User opted in — initializing workspace');
+		}
+
+		// 3. Register MCP server with Cursor
 		await registerMcpServer(context);
 
-		// 3. Create Cursor hooks for learning backup
+		// 4. Create Cursor hooks for learning backup
 		await createCursorHooks();
 
-		// 4. Create Cursor Rules file for AI instructions
+		// 5. Create Cursor Rules file for AI instructions
 		await createCursorRules();
 
-		// 5. Initialize workspace monitor for real-time folder tracking
+		// 6. Initialize workspace monitor for real-time folder tracking
 		console.log('[ACE] Initializing workspace monitor with getAceConfig');
 		initWorkspaceMonitor(context, statusBarItem, getAceConfig);
 
-		// 6. Check auth status and prompt for login if needed
+		// 7. Check auth status and prompt for login if needed
 		await checkAuthOnActivation();
 
 		// 7. Preload patterns in background (non-blocking)
