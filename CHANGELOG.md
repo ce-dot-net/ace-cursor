@@ -5,6 +5,14 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.67] - 2026-04-10
+
+### Added
+- **Uninstall cleanup** — `vscode:uninstall` hook removes ACE hooks, scripts, rules, commands, and data from `.cursor/` when the extension is uninstalled. Preserves non-ACE hooks in `hooks.json`. Prevents stale hooks from causing errors after removal.
+
+### Documentation
+- **SDK spec: ace_learn fire-and-forget** — Documented the blocking issue where `ace_learn` takes 10-17s and blocks the user. Fix requires `@ace-sdk/mcp` change to not await server analysis.
+
 ## [0.2.66] - 2026-04-07
 
 ### Added

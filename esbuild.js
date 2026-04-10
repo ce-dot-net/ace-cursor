@@ -55,6 +55,14 @@ async function build() {
   });
   console.log('Extension build complete');
 
+  // Build uninstall cleanup script (vscode:uninstall hook)
+  await esbuild.build({
+    ...commonOptions,
+    entryPoints: ['src/lifecycle/uninstall.ts'],
+    outfile: 'dist/lifecycle/uninstall.js',
+    external: [], // Self-contained, no externals needed (only uses node builtins)
+  });
+
   // Build test runner — NO banner (loads as ESM in some CI environments)
   await esbuild.build({
     ...commonOptions,

@@ -2,7 +2,7 @@
   "name": "cursor-ace-extension",
   "displayName": "ACE for Cursor",
   "description": "Native Cursor extension for ACE pattern learning. Automatically retrieves patterns before tasks and captures learning after via MCP.",
-  "version": "0.2.66",
+  "version": "0.2.67",
   "publisher": "ce-dot-net",
   "author": "Code Engine GmbH",
   "license": "MIT",
@@ -121,7 +121,8 @@
     "test:all": "npm run test:unit && npm run test",
     "test:compile": "tsc -p ./",
     "package": "vsce package",
-    "package:test": "npm run build && vsce package --out test-extension.vsix"
+    "package:test": "npm run build && vsce package --out test-extension.vsix",
+    "vscode:uninstall": "node ./dist/lifecycle/uninstall.js"
   },
   "devDependencies": {
     "@types/glob": "^8.1.0",
