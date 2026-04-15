@@ -12,6 +12,19 @@ import { loadConfig, loadUserAuth, getDefaultOrgId, getUsagePercentage, isNearLi
 import type { UsageInfo, UsageMetric } from '@ace-sdk/core';
 import { getLastUsageInfo, getAceClient } from '../ace/client';
 
+/**
+ * Format a numeric count for display in the status panel.
+ *
+ * Server-side aggregates (e.g. helpful_total) can arrive as noisy floats like
+ * 148.7999999999998. Round to 1 decimal place and strip a trailing ".0" so
+ * integers render cleanly (e.g. 5 → "5", 148.7999999999998 → "148.8").
+ */
+export function formatCount(n: number): string {
+	const rounded = Math.round(n * 10) / 10;
+	const s = rounded.toFixed(1);
+	return s.endsWith('.0') ? s.slice(0, -2) : s;
+}
+
 export class StatusPanel {
 	public static currentPanel: StatusPanel | undefined;
 	private readonly _panel: vscode.WebviewPanel;
@@ -1041,11 +1054,11 @@ export class StatusPanel {
 	<!-- Quality Metrics -->
 	<div class="quality-metrics">
 		<div class="quality-item">
-			<div class="quality-value positive">${helpfulTotal}</div>
+			<div class="quality-value positive">${formatCount(helpfulTotal)}</div>
 			<div class="quality-label">👍 Helpful</div>
 		</div>
 		<div class="quality-item">
-			<div class="quality-value negative">${harmfulTotal}</div>
+			<div class="quality-value negative">${formatCount(harmfulTotal)}</div>
 			<div class="quality-label">👎 Harmful</div>
 		</div>
 		<div class="quality-item">
@@ -1063,7 +1076,7 @@ export class StatusPanel {
 				${p.content?.substring(0, 200)}${p.content?.length > 200 ? '...' : ''}
 				<div class="pattern-meta">
 					<span class="pattern-badge">${p.section?.replace(/_/g, ' ') || 'general'}</span>
-					<span>👍 ${p.helpful || 0}</span>
+					<span>👍 ${formatCount(p.helpful || 0)}</span>
 					<span>📊 ${Math.round((p.confidence || 0) * 100)}% confidence</span>
 					${p.domain ? `<span>🏷️ ${p.domain}</span>` : ''}
 				</div>
