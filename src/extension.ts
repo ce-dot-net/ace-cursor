@@ -31,6 +31,7 @@ import {
 	getPreToolUseScriptContent,
 	getPreToolUsePsScriptContent,
 } from './ace/hookScripts';
+import { shouldWriteHooksAndRulesWithoutOptin } from './ace/optInHelpers';
 
 let statusBarItem: vscode.StatusBarItem;
 let extensionContext: vscode.ExtensionContext;
@@ -285,6 +286,21 @@ export async function activate(context: vscode.ExtensionContext) {
 		// Check if workspace was previously initialized (has settings.json with version)
 		const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 		const hasAceSettings = wsRoot && fs.existsSync(path.join(wsRoot, '.cursor', 'ace', 'settings.json'));
+
+		// Split opt-in: if .cursor/ exists in any workspace folder, write hooks+rules
+		// silently regardless of MCP-registration opt-in. The pre_tool_use gate
+		// (commit 1b98ba0) needs hooks present even in /tmp tasks dismissed by user.
+		const wsFolders = vscode.workspace.workspaceFolders ?? [];
+		for (const f of wsFolders) {
+			if (shouldWriteHooksAndRulesWithoutOptin(f.uri.fsPath, fs.existsSync)) {
+				try {
+					await createCursorHooks(f, false);
+					await createCursorRules(f, false);
+				} catch (err) {
+					console.error(`[ACE] split-optin hooks/rules write failed for ${f.uri.fsPath}:`, err);
+				}
+			}
+		}
 
 		if (aceExplicitlySet && aceEnabled === false) {
 			// User explicitly disabled ACE for this workspace
