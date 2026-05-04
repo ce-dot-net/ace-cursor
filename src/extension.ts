@@ -14,6 +14,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { getAceGlobalConfigPath } from './ace/globalConfigPath';
+import { getDiagnosticRulesPath } from './ace/diagnosticHelpers';
 import { StatusPanel } from './webviews/statusPanel';
 import { ConfigurePanel } from './webviews/configurePanel';
 import { readContext, readWorkspaceVersion, writeWorkspaceVersion, pickWorkspaceFolder, getTargetFolder, isMultiRootWorkspace, type AceContext } from './ace/context';
@@ -2854,7 +2855,7 @@ async function runDiagnosticCommand(): Promise<void> {
 
 	// 3. Check rules file
 	if (targetFolder) {
-		const rulesPath = path.join(targetFolder.uri.fsPath, '.cursor', 'rules', 'ace-patterns.mdc');
+		const rulesPath = getDiagnosticRulesPath(targetFolder.uri.fsPath);
 		if (fs.existsSync(rulesPath)) {
 			diagnostics.push('✅ Cursor Rules: Found');
 			const rulesContent = fs.readFileSync(rulesPath, 'utf-8');
