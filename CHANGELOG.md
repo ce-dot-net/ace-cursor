@@ -5,6 +5,14 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.74] - 2026-05-05
+
+### Changed
+- **Migrated hook/rule writes to `writeFileAtomic`** — all 47 `fs.writeFileSync` callsites inside `createCursorHooks` and `createCursorRules` now use the tempfile-then-rename helper added in v0.2.73. Prevents partial reads if Cursor's hook engine opens a hook or rule file mid-write. No behavior change in the no-contention path.
+
+### Fixed
+- **`ux-improvements.test.ts:82` TS2367** — added explicit `: string` type annotations to two test-local version constants so the literal-vs-literal `!==` comparison is legal under strict TS. The pre-existing error has shadowed every release back to v0.2.70; cleared now.
+
 ## [0.2.73] - 2026-05-05
 
 ### Added
