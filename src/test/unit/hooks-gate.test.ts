@@ -9,6 +9,7 @@ import {
 	getAcePatternsRuleContent,
 	getDomainSearchRuleContent,
 	getContinuousSearchRuleContent,
+	getMcpTrackScriptContent,
 } from '../../ace/hookScripts';
 
 describe('ace-patterns RULE.md content', () => {
@@ -59,5 +60,38 @@ describe('rule getters return non-empty strings', () => {
 		expect(getAcePatternsRuleContent().length).toBeGreaterThan(100);
 		expect(getDomainSearchRuleContent().length).toBeGreaterThan(100);
 		expect(getContinuousSearchRuleContent().length).toBeGreaterThan(100);
+	});
+});
+
+describe('ace_track_mcp.sh content', () => {
+	it('writes search-done flag when tool_name is ace_search', () => {
+		const script = getMcpTrackScriptContent();
+		// The script must check for ace_search BARE name (afterMCPExecution
+		// delivers tool_name without MCP: prefix per real log evidence).
+		expect(script).toMatch(/\$tool_name.*=.*"?ace_search"?/);
+		expect(script).toContain('search-done');
+	});
+
+	it('uses bare tool_name (no MCP: prefix) for the comparison', () => {
+		const script = getMcpTrackScriptContent();
+		// Negative assertion: must NOT use MCP:ace_search for matching here
+		expect(script).not.toContain('MCP:ace_search');
+	});
+
+	it('creates the per-generation flag directory before touching the flag', () => {
+		const script = getMcpTrackScriptContent();
+		expect(script).toContain('mkdir -p');
+		expect(script).toContain('sessions');
+	});
+
+	it('uses conversation_id and generation_id from input', () => {
+		const script = getMcpTrackScriptContent();
+		expect(script).toContain('conversation_id');
+		expect(script).toContain('generation_id');
+	});
+
+	it('preserves the existing ace_learn detection (does not regress)', () => {
+		const script = getMcpTrackScriptContent();
+		expect(script).toContain('ace_learn');
 	});
 });
