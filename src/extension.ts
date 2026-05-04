@@ -2577,9 +2577,11 @@ ace_search("testing patterns", allowed_domains=["test"])
 Using non-existent domains returns 0 results. Always verify domain names exist first.
 `;
 
-	// Always update domain rule to get latest patterns
-	fs.writeFileSync(domainRulePath, domainRuleContent);
-	console.log('[ACE] Updated ace-domain-search/RULE.md');
+	// Create if doesn't exist OR if force update requested (during version upgrade)
+	if (forceUpdate || !fs.existsSync(domainRulePath)) {
+		fs.writeFileSync(domainRulePath, domainRuleContent);
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace-domain-search/RULE.md`);
+	}
 
 	// Create continuous search rule (folder-based)
 	const continuousSearchRuleDir = path.join(rulesDir, 'ace-continuous-search');
@@ -2622,9 +2624,11 @@ not simple paths. Always use \`ace_list_domains\` to discover actual domain name
 4. Task complete → \`ace_learn(...)\` to capture lessons
 `;
 
-	// Always update continuous search rule
-	fs.writeFileSync(continuousSearchRulePath, continuousSearchRuleContent);
-	console.log('[ACE] Updated ace-continuous-search/RULE.md');
+	// Create if doesn't exist OR if force update requested (during version upgrade)
+	if (forceUpdate || !fs.existsSync(continuousSearchRulePath)) {
+		fs.writeFileSync(continuousSearchRulePath, continuousSearchRuleContent);
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace-continuous-search/RULE.md`);
+	}
 }
 
 /**
