@@ -5,6 +5,26 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.73] - 2026-05-05
+
+### Added
+- **Per-prompt `ace_search` enforcement** — `ace_pre_tool_use.sh` (and `.ps1`) now actively gate all non-ace tools via Cursor's `preToolUse` hook. AI is blocked from any other tool until `ace_search` runs for the current `generation_id` (Cursor regenerates this per user prompt). `ace_track_mcp.sh` writes a flag file at `.cursor/ace/sessions/<conv>/<gen>.search-done` when `ace_search` completes, unblocking subsequent tools. Output schema migrated from Claude Code-style `{"decision":...}` to Cursor canonical `{"permission":...,"agent_message":"..."}`.
+- **Multi-root workspace support** (Cursor 3.2) — `onDidChangeWorkspaceFolders` listener initializes hooks + rules in newly added folders that have a `.cursor/` directory.
+- **`ACE: Uninstall Cleanup` command** — surgically removes ACE-installed rules, scripts, gate-flag sessions, and ace_* entries from `.cursor/hooks.json` while preserving user customizations. Run before uninstalling the extension.
+- **`writeFileAtomic` helper** — tempfile-then-rename for safer hook/rule file writes (foundation for follow-up callsite migration).
+
+### Changed
+- **Split opt-in** — hooks + rules now write silently when `.cursor/` already exists in the workspace, regardless of the MCP-registration opt-in modal. Pure `/tmp` scratch folders with no `.cursor/` stay out of scope. Fixes the v0.2.68 regression where dismissing the opt-in modal disabled all of `ace_search` enforcement, even though the rules and hooks were cheap to write.
+- **`ace-patterns/RULE.md` trigger phrasing** — replaced "EVERY NEW CHAT SESSION" with "first response in this conversation" for an AI-detectable trigger. Section header renamed to "PER-PROMPT REQUIREMENT" to match the new gate enforcement reality.
+- **Secondary rules `alwaysApply` collapse** — `ace-domain-search/RULE.md` and `ace-continuous-search/RULE.md` switched to `alwaysApply: false` with `description:` frontmatter. Cursor pulls them only when relevant instead of competing with `ace-patterns` on every prompt.
+- **`forceUpdate` guard consistency** — `ace-domain-search` and `ace-continuous-search` writes are now guarded by `forceUpdate || !fs.existsSync(...)` (matches the existing `ace-patterns` guard). User customizations to those rule files are no longer clobbered on every extension activation.
+
+### Fixed
+- **Diagnostic stale path** — `runDiagnosticCommand` now checks the folder-based `.cursor/rules/ace-patterns/RULE.md` (Cursor 2.2+) instead of the legacy single-file `.cursor/rules/ace-patterns.mdc`. Eliminates false "rules not found" warnings on migrated workspaces.
+
+### Tests
+- **+49 unit tests** across 7 new test files: `atomic-write.test.ts`, `diagnostic-path.test.ts`, `rules-write-guard.test.ts`, `hooks-gate.test.ts`, `split-optin.test.ts`, `multi-root.test.ts`, `uninstall-cleanup.test.ts`. Suite: 372/372 pass.
+
 ## [0.2.72] - 2026-05-05
 
 ### Changed
