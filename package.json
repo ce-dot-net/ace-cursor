@@ -85,6 +85,10 @@
       {
         "command": "ace.devices",
         "title": "ACE: Manage Devices"
+      },
+      {
+        "command": "ace.uninstallCleanup",
+        "title": "ACE: Uninstall Cleanup"
       }
     ],
     "configuration": {

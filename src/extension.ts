@@ -14,14 +14,28 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { getAceGlobalConfigPath } from './ace/globalConfigPath';
+import { getDiagnosticRulesPath } from './ace/diagnosticHelpers';
 import { StatusPanel } from './webviews/statusPanel';
 import { ConfigurePanel } from './webviews/configurePanel';
 import { readContext, readWorkspaceVersion, writeWorkspaceVersion, pickWorkspaceFolder, getTargetFolder, isMultiRootWorkspace, type AceContext } from './ace/context';
+import { removeAceHooksFromHooksJson } from './ace/uninstallHelpers';
 import { initWorkspaceMonitor, getCurrentFolder, refreshStatusBar } from './automation/workspaceMonitor';
 import { runLoginCommand, logout, isAuthenticated, getTokenExpiration, handleAuthError, getValidToken, getHardCapInfo } from './commands/login';
 import { AceClient, loadConfig, loadUserAuth, getDefaultOrgId } from '@ace-sdk/core';
 import { showDevicesQuickPick } from './commands/devices';
 import { getAceClient, clearQuotaWarningTracking, getLastUsageInfo, invalidateClient } from './ace/client';
+import {
+	getAcePatternsRuleContent,
+	getDomainSearchRuleContent,
+	getContinuousSearchRuleContent,
+	getMcpTrackScriptContent,
+	getPreToolUseScriptContent,
+	getPreToolUsePsScriptContent,
+} from './ace/hookScripts';
+import {
+	shouldWriteHooksAndRulesWithoutOptin,
+	pickFoldersToInitializeOnAdd,
+} from './ace/optInHelpers';
 
 let statusBarItem: vscode.StatusBarItem;
 let extensionContext: vscode.ExtensionContext;
@@ -277,6 +291,37 @@ export async function activate(context: vscode.ExtensionContext) {
 		const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 		const hasAceSettings = wsRoot && fs.existsSync(path.join(wsRoot, '.cursor', 'ace', 'settings.json'));
 
+		// Split opt-in: if .cursor/ exists in any workspace folder, write hooks+rules
+		// silently regardless of MCP-registration opt-in. The pre_tool_use gate
+		// (commit 1b98ba0) needs hooks present even in /tmp tasks dismissed by user.
+		const wsFolders = vscode.workspace.workspaceFolders ?? [];
+		for (const f of wsFolders) {
+			if (shouldWriteHooksAndRulesWithoutOptin(f.uri.fsPath, fs.existsSync)) {
+				try {
+					await createCursorHooks(f, false);
+					await createCursorRules(f, false);
+				} catch (err) {
+					console.error(`[ACE] split-optin hooks/rules write failed for ${f.uri.fsPath}:`, err);
+				}
+			}
+		}
+
+		// Multi-root: when user adds a folder mid-session, init it if it has .cursor/
+		context.subscriptions.push(
+			vscode.workspace.onDidChangeWorkspaceFolders(async (event) => {
+				const eligible = pickFoldersToInitializeOnAdd(event.added, fs.existsSync);
+				for (const f of eligible) {
+					try {
+						await createCursorHooks(f, false);
+						await createCursorRules(f, false);
+						console.log(`[ACE] Initialized newly added folder ${f.uri.fsPath}`);
+					} catch (err) {
+						console.error(`[ACE] Failed to init added folder ${f.uri.fsPath}:`, err);
+					}
+				}
+			})
+		);
+
 		if (aceExplicitlySet && aceEnabled === false) {
 			// User explicitly disabled ACE for this workspace
 			console.log('[ACE] Disabled for this workspace (ace.enabled=false)');
@@ -528,7 +573,8 @@ export async function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand('ace.autoSearch', () => {
 			vscode.window.showInformationMessage('ACE search is now automatic via MCP. The AI calls ace_search before every task.');
 		}),
-		vscode.commands.registerCommand('ace.devices', showDevicesQuickPick)
+		vscode.commands.registerCommand('ace.devices', showDevicesQuickPick),
+		vscode.commands.registerCommand('ace.uninstallCleanup', runUninstallCleanup)
 	);
 }
 
@@ -1319,32 +1365,12 @@ if ($loopCount -eq 0 -and -not (Test-Path "$aceDir\\ace-review-result.json")) {
 	fs.writeFileSync(stopHookPath, stopHookScript);
 	console.log('[ACE] Updated ace_stop_hook.ps1');
 
-	// Pre-Tool Use Gate
+	// Pre-Tool Use Gate — always overwrite (gate logic must be current to
+	// migrate users away from old {"decision":...} format)
 	const preToolUsePath = path.join(scriptsDir, 'ace_pre_tool_use.ps1');
-	const preToolUseScript = `# ACE Pre-Tool Use Hook - Gates tool execution
-# Input: tool_type, tool_name, tool_input
-
-$inputJson = [Console]::In.ReadToEnd()
-$input = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
-
-$aceDir = ".cursor\\ace"
-if (-not (Test-Path $aceDir)) {
-    New-Item -ItemType Directory -Path $aceDir -Force | Out-Null
-}
-
-$toolType = if ($input.tool_type) { $input.tool_type } else { "unknown" }
-$toolName = if ($input.tool_name) { $input.tool_name } else { "unknown" }
-$toolInput = if ($input.tool_input) { ($input.tool_input | ConvertTo-Json -Compress).Substring(0, [Math]::Min(500, ($input.tool_input | ConvertTo-Json -Compress).Length)) } else { "{}" }
-
-$entry = @{event="pre_tool_use"; tool_type=$toolType; tool_name=$toolName; tool_input=$toolInput; timestamp=(Get-Date -Format "o")} | ConvertTo-Json -Compress
-$entry | Out-File -FilePath "$aceDir\\mcp_trajectory.jsonl" -Encoding utf8 -Append
-
-Write-Output '{"decision": "allow"}'
-`;
-	if (forceUpdate || !fs.existsSync(preToolUsePath)) {
-		fs.writeFileSync(preToolUsePath, preToolUseScript);
-		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_pre_tool_use.ps1`);
-	}
+	const preToolUseScript = getPreToolUsePsScriptContent();
+	fs.writeFileSync(preToolUsePath, preToolUseScript);
+	console.log(`[ACE] Updated ace_pre_tool_use.ps1 (gate logic always-current)`);
 
 	// Post-Tool Use Tracking
 	const postToolUsePath = path.join(scriptsDir, 'ace_post_tool_use.ps1');
@@ -1569,63 +1595,7 @@ $entry | Out-File -FilePath "$aceDir\\edit_trajectory.jsonl" -Encoding utf8 -App
 function createUnixHookScripts(scriptsDir: string, forceUpdate: boolean = false): void {
 	// MCP Execution Tracking (PostToolUse equivalent)
 	const mcpTrackPath = path.join(scriptsDir, 'ace_track_mcp.sh');
-	const mcpTrackScript = `#!/bin/bash
-# ACE MCP Tracking Hook - Captures tool executions for AI-Trail
-# Also detects ace_learn calls and extracts task helpfulness (TIME_SAVED)
-# Input: tool_name, tool_input, result_json, duration
-# Requires: jq (checked at extension activation)
-
-input=$(cat)
-ace_dir=".cursor/ace"
-mkdir -p "$ace_dir"
-
-# Always log to trajectory
-echo "$input" >> "$ace_dir/mcp_trajectory.jsonl"
-
-# Bail if jq is not available
-if ! command -v jq >/dev/null 2>&1; then exit 0; fi
-
-# Detect ace_learn call — extract helpfulness from tool_input.output
-tool_name=$(echo "$input" | jq -r '.tool_name // ""' 2>/dev/null || echo "")
-if echo "$tool_name" | grep -qi "ace_learn"; then
-  # tool_input is a JSON string — parse it to get the output field
-  tool_input_raw=$(echo "$input" | jq -r '.tool_input // ""' 2>/dev/null || echo "")
-  # tool_input may be a string or object; try parsing as JSON
-  output_field=$(echo "$tool_input_raw" | jq -r '.output // ""' 2>/dev/null || echo "")
-  if [ -z "$output_field" ]; then
-    # Fallback: tool_input might be a JSON string that needs double-parse
-    output_field=$(echo "$tool_input_raw" | jq -r '. | fromjson? | .output // ""' 2>/dev/null || echo "")
-  fi
-
-  # Look for TIME_SAVED: Xm | reason on the first line of output
-  if echo "$output_field" | head -1 | grep -q "TIME_SAVED:"; then
-    first_line=$(echo "$output_field" | head -1)
-    # Extract time (e.g., "15m", "2m", "30s")
-    time_saved=$(echo "$first_line" | sed 's/TIME_SAVED:[[:space:]]*//' | sed 's/[[:space:]]*|.*//' | sed 's/[[:space:]]*\$//')
-    # Extract reason (after the first pipe only)
-    reason=""
-    if echo "$first_line" | grep -q '|'; then
-      reason=$(echo "$first_line" | sed 's/^[^|]*|[[:space:]]*//' | head -c 200)
-    fi
-    # Sanitize reason — remove quotes that would break JSON
-    reason=$(echo "$reason" | sed 's/"/\\\\"/g')
-    # Extract numeric minutes for helpful_pct
-    minutes=$(echo "$time_saved" | grep -oE '[0-9]+' | head -1)
-    minutes=\${minutes:-0}
-    # Map time to helpful %: 0m=0%, 1-4m=15%, 5-14m=30%, 15-29m=60%, 30m+=80%
-    if [ "$minutes" -ge 30 ] 2>/dev/null; then helpful_pct=80
-    elif [ "$minutes" -ge 15 ] 2>/dev/null; then helpful_pct=60
-    elif [ "$minutes" -ge 5 ] 2>/dev/null; then helpful_pct=30
-    elif [ "$minutes" -gt 0 ] 2>/dev/null; then helpful_pct=15
-    else helpful_pct=0; fi
-
-    # Write review result (overwrites previous)
-    echo "{\\"helpful_pct\\": $helpful_pct, \\"time_saved\\": \\"$time_saved\\", \\"reason\\": \\"$reason\\", \\"timestamp\\": \\"$(date -Iseconds)\\"}" > "$ace_dir/ace-review-result.json"
-  fi
-fi
-
-exit 0
-`;
+	const mcpTrackScript = getMcpTrackScriptContent();
 	// Always update to get ace_learn helpfulness detection
 	fs.writeFileSync(mcpTrackPath, mcpTrackScript, { mode: 0o755 });
 	console.log(`[ACE] Updated ace_track_mcp.sh with ace_learn helpfulness detection`);
@@ -1944,28 +1914,12 @@ fi
 	fs.writeFileSync(stopHookPath, stopHookScript, { mode: 0o755 });
 	console.log('[ACE] Updated ace_stop_hook.sh');
 
-	// Pre-Tool Use Gate
+	// Pre-Tool Use Gate — always overwrite (gate logic must be current to
+	// migrate users away from old {"decision":...} format)
 	const preToolUsePath = path.join(scriptsDir, 'ace_pre_tool_use.sh');
-	const preToolUseScript = `#!/bin/bash
-# ACE Pre-Tool Use Hook - Gates tool execution
-# Input: tool_type, tool_name, tool_input
-
-input=$(cat)
-ace_dir=".cursor/ace"
-mkdir -p "$ace_dir"
-
-tool_type=$(echo "$input" | jq -r '.tool_type // "unknown"')
-tool_name=$(echo "$input" | jq -r '.tool_name // "unknown"')
-tool_input=$(echo "$input" | jq -r '.tool_input // "{}"' | head -c 500)
-
-echo "{\\"event\\": \\"pre_tool_use\\", \\"tool_type\\": \\"$tool_type\\", \\"tool_name\\": \\"$tool_name\\", \\"tool_input\\": \\"$tool_input\\", \\"timestamp\\": \\"$(date -Iseconds)\\"}" >> "$ace_dir/mcp_trajectory.jsonl"
-
-echo '{"decision": "allow"}'
-`;
-	if (forceUpdate || !fs.existsSync(preToolUsePath)) {
-		fs.writeFileSync(preToolUsePath, preToolUseScript, { mode: 0o755 });
-		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_pre_tool_use.sh`);
-	}
+	const preToolUseScript = getPreToolUseScriptContent();
+	fs.writeFileSync(preToolUsePath, preToolUseScript, { mode: 0o755 });
+	console.log(`[ACE] Updated ace_pre_tool_use.sh (gate logic always-current)`);
 
 	// Post-Tool Use Tracking
 	const postToolUsePath = path.join(scriptsDir, 'ace_post_tool_use.sh');
@@ -2396,112 +2350,7 @@ async function createCursorRules(folder?: vscode.WorkspaceFolder, forceUpdate: b
 		fs.mkdirSync(patternsRuleDir, { recursive: true });
 	}
 	const rulesPath = path.join(patternsRuleDir, 'RULE.md');
-	const rulesContent = `---
-description: ACE Pattern Learning - MANDATORY pattern search EVERY SESSION
-alwaysApply: true
----
-
-# MANDATORY: ACE Pattern Search - EVERY SESSION
-
-**CRITICAL INSTRUCTION - DO NOT SKIP**
-
-## PER-SESSION REQUIREMENT
-
-**On EVERY NEW CHAT SESSION, you MUST call \`ace_search\` FIRST.**
-
-Do NOT assume you "already know" the patterns from a previous session.
-Do NOT skip because patterns seem "familiar" or "unchanged".
-EVERY session is a fresh context - patterns MUST be retrieved again.
-
-## BEFORE ANY Implementation Task
-
-**You MUST call \`ace_search\` MCP tool FIRST** before:
-- Writing ANY code
-- Implementing ANY feature
-- Fixing ANY bug
-- Making ANY architectural decision
-
-## HOW TO USE ace_search
-
-1. **Read the user's task/request**
-2. **Call ace_search with the task as query:**
-   \`\`\`
-   ace_search(query="<user's task description>")
-   \`\`\`
-3. **Review returned patterns** (5-10 relevant ones)
-4. **Apply patterns to implementation**
-
-**Example:**
-- User: "Implement JWT authentication"
-- You call: \`ace_search(query="JWT authentication")\`
-- Returns: 5-10 patterns about JWT, auth, tokens, security
-
-**FAILURE TO CALL ace_search = INCOMPLETE TASK**
-
-## WHY ace_search (NOT ace_get_playbook)?
-
-- \`ace_search\` → Returns 5-10 RELEVANT patterns (semantic search)
-- \`ace_get_playbook\` → Returns ALL 1000+ patterns (context explosion!)
-
-Always prefer ace_search with user's task as query.
-
-## WHY EVERY SESSION?
-
-1. Your context resets between sessions - previous patterns are NOT retained
-2. Playbook may have been updated since your last session
-3. New patterns from other team members may be available
-4. Caching ensures fast retrieval (RAM → SQLite → Server)
-
-## AFTER Completing Substantial Work - SINGLE ace_learn Call
-
-**Call \`ace_learn\` ONCE after completing your task.**
-
-Do NOT call ace_learn immediately after each implementation step.
-Wait until the task is fully complete, then call ace_learn with the full context.
-
-**IMPORTANT: Include TIME_SAVED on the FIRST LINE of the output field.**
-Estimate how much time the ACE patterns saved the developer (vs researching docs, exploring code, trial-and-error).
-
-\`\`\`
-ace_learn(
-  task="<what you accomplished>",
-  trajectory=["<key steps>"],
-  success=true,
-  output="TIME_SAVED: Xm | <one-line reason>\\n<lessons learned>",
-  summary="<your last response — include WHAT you built, WHY you made key decisions, and what you LEARNED>"
-)
-\`\`\`
-
-**summary tips** (the server uses this for better pattern extraction):
-- Include what you built AND why (architectural decisions)
-- Mention what went wrong or what you changed approach on
-- Note which ACE patterns helped and how
-- Example: "Initially tried X but switched to Y because Z. The playbook pattern about W saved time."
-
-**Example:**
-\`\`\`
-ace_learn(
-  task="Implemented JWT authentication",
-  trajectory=["Added auth middleware", "Created login endpoint", "Added token refresh"],
-  success=true,
-  output="TIME_SAVED: 15m | Auth patterns avoided OAuth docs research\\nAlways use httpOnly cookies for refresh tokens.",
-  summary="I implemented JWT auth with HS256 signing. Initially tried RS256 but switched to HS256 because the project has no key rotation infra. Used httpOnly cookies after the playbook warned against localStorage tokens. The /login endpoint validates credentials, /protected verifies with timingSafeEqual."
-)
-\`\`\`
-
-**TIME_SAVED format:** \`TIME_SAVED: Xm | reason\`
-- X = estimated minutes saved (0 if patterns weren't helpful)
-- reason = one-line explanation of what patterns helped with
-- Rest of output = normal lessons learned (after newline)
-
-## Available ACE MCP Tools
-
-1. \`ace_search\` - **CALL FIRST** - Search patterns by query (5-10 relevant)
-2. \`ace_list_domains\` - List available domains for filtering
-3. \`ace_learn\` - **CALL AFTER** - Capture learning
-4. \`ace_status\` - View playbook statistics
-5. \`ace_get_playbook\` - Get ALL patterns (only for export/backup)
-`;
+	const rulesContent = getAcePatternsRuleContent();
 
 	// Create if doesn't exist OR if force update requested (during version upgrade)
 	if (forceUpdate || !fs.existsSync(rulesPath)) {
@@ -2515,70 +2364,13 @@ ace_learn(
 		fs.mkdirSync(domainRuleDir, { recursive: true });
 	}
 	const domainRulePath = path.join(domainRuleDir, 'RULE.md');
-	const domainRuleContent = `---
-description: Domain-aware ACE pattern search - discover and use actual domain names
-alwaysApply: true
----
+	const domainRuleContent = getDomainSearchRuleContent();
 
-# Domain-Aware Pattern Search
-
-## CRITICAL: Discover Domains First
-
-**NEVER guess domain names** like "auth", "api", "test".
-Server domains are SEMANTIC like "typescript-development-practices".
-
-### Step 1: Call ace_list_domains
-
-**BEFORE using domain filtering**, discover available domains:
-
-\`\`\`
-ace_list_domains()
-→ Returns: {
-    "domains": [
-      { "name": "mcp-cli-testing-and-api-resilience", "count": 34 },
-      { "name": "typescript-development-practices", "count": 27 },
-      { "name": "cli-and-package-version-diagnostics", "count": 23 }
-    ],
-    "total_domains": 17,
-    "total_patterns": 206
-  }
-\`\`\`
-
-### Step 2: Match Domain to Task
-
-Read domain names semantically to find the best match:
-
-| Task Context | Look for domains containing |
-|--------------|----------------------------|
-| TypeScript code | "typescript", "development", "practices" |
-| Testing work | "testing", "test", "resilience" |
-| CLI/API work | "cli", "api", "config" |
-| Debugging | "diagnostics", "troubleshooting" |
-
-### Step 3: Use Actual Domain Names
-
-\`\`\`
-# CORRECT - use exact domain name from ace_list_domains
-ace_search("testing patterns", allowed_domains=["mcp-cli-testing-and-api-resilience"])
-
-# WRONG - hardcoded domain that doesn't exist on server
-ace_search("testing patterns", allowed_domains=["test"])
-\`\`\`
-
-## Workflow
-
-1. \`ace_list_domains()\` - See what domains exist
-2. Pick relevant domain(s) based on task context
-3. \`ace_search("query", allowed_domains=["picked-domain"])\`
-
-## Why This Matters
-
-Using non-existent domains returns 0 results. Always verify domain names exist first.
-`;
-
-	// Always update domain rule to get latest patterns
-	fs.writeFileSync(domainRulePath, domainRuleContent);
-	console.log('[ACE] Updated ace-domain-search/RULE.md');
+	// Create if doesn't exist OR if force update requested (during version upgrade)
+	if (forceUpdate || !fs.existsSync(domainRulePath)) {
+		fs.writeFileSync(domainRulePath, domainRuleContent);
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace-domain-search/RULE.md`);
+	}
 
 	// Create continuous search rule (folder-based)
 	const continuousSearchRuleDir = path.join(rulesDir, 'ace-continuous-search');
@@ -2586,44 +2378,13 @@ Using non-existent domains returns 0 results. Always verify domain names exist f
 		fs.mkdirSync(continuousSearchRuleDir, { recursive: true });
 	}
 	const continuousSearchRulePath = path.join(continuousSearchRuleDir, 'RULE.md');
-	const continuousSearchRuleContent = `---
-description: Continuous pattern retrieval during extended work
-alwaysApply: true
----
+	const continuousSearchRuleContent = getContinuousSearchRuleContent();
 
-# Continuous Pattern Retrieval
-
-## When to Re-Search Patterns
-
-Call \`ace_search\` again during extended work sessions when:
-
-1. **Extended work** - 5+ tool calls since last pattern retrieval
-2. **Hitting errors** - Encountering issues not covered by current patterns
-3. **New context** - Switching to different file type or codebase area
-4. **Task shift** - Moving from one feature area to another
-
-## Domain Filtering for Focused Results
-
-For focused results, use domain filtering:
-
-1. **First**: Call \`ace_list_domains()\` to see available domains
-2. **Match**: Pick domain(s) that match your current task context
-3. **Search**: Call \`ace_search("query", allowed_domains=["picked-domain"])\`
-
-**IMPORTANT**: Domain names are semantic (e.g., "typescript-development-practices"),
-not simple paths. Always use \`ace_list_domains\` to discover actual domain names.
-
-## Example Workflow
-
-1. Start task → \`ace_search("your task description")\` to retrieve relevant patterns
-2. 5+ edits later → \`ace_search("error handling")\` for fresh patterns
-3. Need focused results → \`ace_list_domains()\` then \`ace_search(..., allowed_domains=[...])\`
-4. Task complete → \`ace_learn(...)\` to capture lessons
-`;
-
-	// Always update continuous search rule
-	fs.writeFileSync(continuousSearchRulePath, continuousSearchRuleContent);
-	console.log('[ACE] Updated ace-continuous-search/RULE.md');
+	// Create if doesn't exist OR if force update requested (during version upgrade)
+	if (forceUpdate || !fs.existsSync(continuousSearchRulePath)) {
+		fs.writeFileSync(continuousSearchRulePath, continuousSearchRuleContent);
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace-continuous-search/RULE.md`);
+	}
 }
 
 /**
@@ -2690,6 +2451,66 @@ function getAceConfig(folder?: vscode.WorkspaceFolder): { serverUrl?: string; pr
  */
 function updateStatusBar(): void {
 	refreshStatusBar();
+}
+
+/**
+ * Uninstall cleanup - user-triggered command to remove ACE-installed
+ * workspace files BEFORE uninstalling the extension. VS Code/Cursor have
+ * no native uninstall hook, so this must be invoked manually.
+ *
+ * Removes: ace-* rule folders, ace_*.{sh,ps1} scripts, gate sessions dir,
+ * and ACE entries in hooks.json (surgical: preserves user's other hooks).
+ * Logs under .cursor/ace/* are preserved (may have value).
+ */
+async function runUninstallCleanup(): Promise<void> {
+	const folder = await pickWorkspaceFolder('Select folder to remove ACE files from');
+	if (!folder) { return; }
+	const root = folder.uri.fsPath;
+	let removedCount = 0;
+
+	// Remove ace-* rule folders
+	for (const ruleName of ['ace-patterns', 'ace-domain-search', 'ace-continuous-search']) {
+		const ruleDir = path.join(root, '.cursor', 'rules', ruleName);
+		if (fs.existsSync(ruleDir)) {
+			fs.rmSync(ruleDir, { recursive: true, force: true });
+			removedCount++;
+		}
+	}
+
+	// Remove ace_*.sh and ace_*.ps1 in .cursor/scripts/
+	const scriptsDir = path.join(root, '.cursor', 'scripts');
+	if (fs.existsSync(scriptsDir)) {
+		for (const f of fs.readdirSync(scriptsDir)) {
+			if (f.startsWith('ace_') && (f.endsWith('.sh') || f.endsWith('.ps1'))) {
+				fs.unlinkSync(path.join(scriptsDir, f));
+				removedCount++;
+			}
+		}
+	}
+
+	// Remove gate-flag sessions directory
+	const sessionsDir = path.join(root, '.cursor', 'ace', 'sessions');
+	if (fs.existsSync(sessionsDir)) {
+		fs.rmSync(sessionsDir, { recursive: true, force: true });
+		removedCount++;
+	}
+
+	// Surgical hooks.json cleanup — preserve user hooks
+	const hooksPath = path.join(root, '.cursor', 'hooks.json');
+	if (fs.existsSync(hooksPath)) {
+		try {
+			const original = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
+			const cleaned = removeAceHooksFromHooksJson(original);
+			fs.writeFileSync(hooksPath, JSON.stringify(cleaned, null, 2));
+			removedCount++;
+		} catch (err) {
+			console.error('[ACE] hooks.json parse failed during cleanup, leaving untouched:', err);
+		}
+	}
+
+	vscode.window.showInformationMessage(
+		`ACE cleanup complete. Removed ${removedCount} files/directories from "${folder.name}".`
+	);
 }
 
 /**
@@ -2854,7 +2675,7 @@ async function runDiagnosticCommand(): Promise<void> {
 
 	// 3. Check rules file
 	if (targetFolder) {
-		const rulesPath = path.join(targetFolder.uri.fsPath, '.cursor', 'rules', 'ace-patterns.mdc');
+		const rulesPath = getDiagnosticRulesPath(targetFolder.uri.fsPath);
 		if (fs.existsSync(rulesPath)) {
 			diagnostics.push('✅ Cursor Rules: Found');
 			const rulesContent = fs.readFileSync(rulesPath, 'utf-8');
