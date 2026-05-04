@@ -18,6 +18,7 @@ import { getDiagnosticRulesPath } from './ace/diagnosticHelpers';
 import { StatusPanel } from './webviews/statusPanel';
 import { ConfigurePanel } from './webviews/configurePanel';
 import { readContext, readWorkspaceVersion, writeWorkspaceVersion, pickWorkspaceFolder, getTargetFolder, isMultiRootWorkspace, type AceContext } from './ace/context';
+import { removeAceHooksFromHooksJson } from './ace/uninstallHelpers';
 import { initWorkspaceMonitor, getCurrentFolder, refreshStatusBar } from './automation/workspaceMonitor';
 import { runLoginCommand, logout, isAuthenticated, getTokenExpiration, handleAuthError, getValidToken, getHardCapInfo } from './commands/login';
 import { AceClient, loadConfig, loadUserAuth, getDefaultOrgId } from '@ace-sdk/core';
@@ -572,7 +573,8 @@ export async function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand('ace.autoSearch', () => {
 			vscode.window.showInformationMessage('ACE search is now automatic via MCP. The AI calls ace_search before every task.');
 		}),
-		vscode.commands.registerCommand('ace.devices', showDevicesQuickPick)
+		vscode.commands.registerCommand('ace.devices', showDevicesQuickPick),
+		vscode.commands.registerCommand('ace.uninstallCleanup', runUninstallCleanup)
 	);
 }
 
@@ -2449,6 +2451,66 @@ function getAceConfig(folder?: vscode.WorkspaceFolder): { serverUrl?: string; pr
  */
 function updateStatusBar(): void {
 	refreshStatusBar();
+}
+
+/**
+ * Uninstall cleanup - user-triggered command to remove ACE-installed
+ * workspace files BEFORE uninstalling the extension. VS Code/Cursor have
+ * no native uninstall hook, so this must be invoked manually.
+ *
+ * Removes: ace-* rule folders, ace_*.{sh,ps1} scripts, gate sessions dir,
+ * and ACE entries in hooks.json (surgical: preserves user's other hooks).
+ * Logs under .cursor/ace/* are preserved (may have value).
+ */
+async function runUninstallCleanup(): Promise<void> {
+	const folder = await pickWorkspaceFolder('Select folder to remove ACE files from');
+	if (!folder) { return; }
+	const root = folder.uri.fsPath;
+	let removedCount = 0;
+
+	// Remove ace-* rule folders
+	for (const ruleName of ['ace-patterns', 'ace-domain-search', 'ace-continuous-search']) {
+		const ruleDir = path.join(root, '.cursor', 'rules', ruleName);
+		if (fs.existsSync(ruleDir)) {
+			fs.rmSync(ruleDir, { recursive: true, force: true });
+			removedCount++;
+		}
+	}
+
+	// Remove ace_*.sh and ace_*.ps1 in .cursor/scripts/
+	const scriptsDir = path.join(root, '.cursor', 'scripts');
+	if (fs.existsSync(scriptsDir)) {
+		for (const f of fs.readdirSync(scriptsDir)) {
+			if (f.startsWith('ace_') && (f.endsWith('.sh') || f.endsWith('.ps1'))) {
+				fs.unlinkSync(path.join(scriptsDir, f));
+				removedCount++;
+			}
+		}
+	}
+
+	// Remove gate-flag sessions directory
+	const sessionsDir = path.join(root, '.cursor', 'ace', 'sessions');
+	if (fs.existsSync(sessionsDir)) {
+		fs.rmSync(sessionsDir, { recursive: true, force: true });
+		removedCount++;
+	}
+
+	// Surgical hooks.json cleanup — preserve user hooks
+	const hooksPath = path.join(root, '.cursor', 'hooks.json');
+	if (fs.existsSync(hooksPath)) {
+		try {
+			const original = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
+			const cleaned = removeAceHooksFromHooksJson(original);
+			fs.writeFileSync(hooksPath, JSON.stringify(cleaned, null, 2));
+			removedCount++;
+		} catch (err) {
+			console.error('[ACE] hooks.json parse failed during cleanup, leaving untouched:', err);
+		}
+	}
+
+	vscode.window.showInformationMessage(
+		`ACE cleanup complete. Removed ${removedCount} files/directories from "${folder.name}".`
+	);
 }
 
 /**
