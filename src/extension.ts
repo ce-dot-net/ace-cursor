@@ -31,7 +31,10 @@ import {
 	getPreToolUseScriptContent,
 	getPreToolUsePsScriptContent,
 } from './ace/hookScripts';
-import { shouldWriteHooksAndRulesWithoutOptin } from './ace/optInHelpers';
+import {
+	shouldWriteHooksAndRulesWithoutOptin,
+	pickFoldersToInitializeOnAdd,
+} from './ace/optInHelpers';
 
 let statusBarItem: vscode.StatusBarItem;
 let extensionContext: vscode.ExtensionContext;
@@ -301,6 +304,22 @@ export async function activate(context: vscode.ExtensionContext) {
 				}
 			}
 		}
+
+		// Multi-root: when user adds a folder mid-session, init it if it has .cursor/
+		context.subscriptions.push(
+			vscode.workspace.onDidChangeWorkspaceFolders(async (event) => {
+				const eligible = pickFoldersToInitializeOnAdd(event.added, fs.existsSync);
+				for (const f of eligible) {
+					try {
+						await createCursorHooks(f, false);
+						await createCursorRules(f, false);
+						console.log(`[ACE] Initialized newly added folder ${f.uri.fsPath}`);
+					} catch (err) {
+						console.error(`[ACE] Failed to init added folder ${f.uri.fsPath}:`, err);
+					}
+				}
+			})
+		);
 
 		if (aceExplicitlySet && aceEnabled === false) {
 			// User explicitly disabled ACE for this workspace

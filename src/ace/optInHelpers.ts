@@ -21,3 +21,24 @@ export function shouldWriteHooksAndRulesWithoutOptin(
 	if (!wsRoot) return false;
 	return existsSync(path.join(wsRoot, '.cursor'));
 }
+
+/**
+ * From a list of newly added workspace folders, pick those that have
+ * a .cursor/ directory and should therefore receive hooks + rules
+ * (silent split-opt-in pattern, see shouldWriteHooksAndRulesWithoutOptin).
+ *
+ * Pure function — caller (activate's onDidChangeWorkspaceFolders handler)
+ * does the actual createCursorHooks / createCursorRules calls.
+ */
+export function pickFoldersToInitializeOnAdd<T extends { uri: { fsPath: string } }>(
+	addedFolders: readonly T[],
+	existsSync: (p: string) => boolean
+): T[] {
+	const out: T[] = [];
+	for (const f of addedFolders) {
+		if (existsSync(path.join(f.uri.fsPath, '.cursor'))) {
+			out.push(f);
+		}
+	}
+	return out;
+}
