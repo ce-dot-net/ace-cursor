@@ -14,22 +14,22 @@ describe('rule writes guard', () => {
 	it('ace-patterns rule write is guarded by forceUpdate || !fs.existsSync', () => {
 		const src = readFileSync(EXTENSION_TS, 'utf8');
 		// Anchor at the const declaration so the window covers the whole block
-		// from path declaration through the writeFileSync call.
-		const patternBlock = src.match(/const rulesPath\s*=[\s\S]{0,8000}?fs\.writeFileSync\(rulesPath/);
+		// from path declaration through the writeFileAtomic call.
+		const patternBlock = src.match(/const rulesPath\s*=[\s\S]{0,8000}?writeFileAtomic\(rulesPath/);
 		expect(patternBlock, 'ace-patterns rules write block not found').toBeTruthy();
 		expect(patternBlock![0]).toMatch(/forceUpdate\s*\|\|\s*!fs\.existsSync\(rulesPath\)/);
 	});
 
 	it('ace-domain-search rule write is guarded by forceUpdate || !fs.existsSync', () => {
 		const src = readFileSync(EXTENSION_TS, 'utf8');
-		const block = src.match(/const domainRulePath\s*=[\s\S]{0,8000}?fs\.writeFileSync\(domainRulePath/);
+		const block = src.match(/const domainRulePath\s*=[\s\S]{0,8000}?writeFileAtomic\(domainRulePath/);
 		expect(block, 'ace-domain-search rules write block not found').toBeTruthy();
 		expect(block![0]).toMatch(/forceUpdate\s*\|\|\s*!fs\.existsSync\(domainRulePath\)/);
 	});
 
 	it('ace-continuous-search rule write is guarded by forceUpdate || !fs.existsSync', () => {
 		const src = readFileSync(EXTENSION_TS, 'utf8');
-		const block = src.match(/const continuousSearchRulePath\s*=[\s\S]{0,8000}?fs\.writeFileSync\(continuousSearchRulePath/);
+		const block = src.match(/const continuousSearchRulePath\s*=[\s\S]{0,8000}?writeFileAtomic\(continuousSearchRulePath/);
 		expect(block, 'ace-continuous-search rules write block not found').toBeTruthy();
 		expect(block![0]).toMatch(/forceUpdate\s*\|\|\s*!fs\.existsSync\(continuousSearchRulePath\)/);
 	});

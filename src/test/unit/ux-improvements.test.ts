@@ -72,8 +72,8 @@ describe('Task 1: Auto-initialize workspace on extension install/update', () => 
 
 		it('should auto-update on VERSION MISMATCH (workspace version differs from extension)', async () => {
 			// GIVEN: A workspace with older ACE version
-			const extensionVersion = '0.2.48';
-			const workspaceVersion = '0.2.47'; // Older version = update needed
+			const extensionVersion: string = '0.2.48';
+			const workspaceVersion: string = '0.2.47'; // Older version = update needed
 
 			// WHEN: Versions are compared
 			// THEN: Should auto-update and show notification

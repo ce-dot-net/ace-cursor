@@ -19,6 +19,7 @@ import { StatusPanel } from './webviews/statusPanel';
 import { ConfigurePanel } from './webviews/configurePanel';
 import { readContext, readWorkspaceVersion, writeWorkspaceVersion, pickWorkspaceFolder, getTargetFolder, isMultiRootWorkspace, type AceContext } from './ace/context';
 import { removeAceHooksFromHooksJson } from './ace/uninstallHelpers';
+import { writeFileAtomic } from './ace/atomicWrite';
 import { initWorkspaceMonitor, getCurrentFolder, refreshStatusBar } from './automation/workspaceMonitor';
 import { runLoginCommand, logout, isAuthenticated, getTokenExpiration, handleAuthError, getValidToken, getHardCapInfo } from './commands/login';
 import { AceClient, loadConfig, loadUserAuth, getDefaultOrgId } from '@ace-sdk/core';
@@ -908,7 +909,7 @@ async function createCursorHooks(folder?: vscode.WorkspaceFolder, forceUpdate: b
 	}
 
 	if (shouldWriteHooks) {
-		fs.writeFileSync(hooksPath, JSON.stringify(hooksConfig, null, 2));
+		writeFileAtomic(hooksPath, JSON.stringify(hooksConfig, null, 2));
 		console.log('[ACE] hooks.json ready with AI-Trail support');
 	}
 
@@ -993,7 +994,7 @@ if ($toolName -match "ace_learn") {
 }
 `;
 	// Always update to get ace_learn helpfulness detection
-	fs.writeFileSync(mcpTrackPath, mcpTrackScript);
+	writeFileAtomic(mcpTrackPath, mcpTrackScript);
 	console.log(`[ACE] Updated ace_track_mcp.ps1 with ace_learn helpfulness detection`);
 
 	// Shell Execution Tracking
@@ -1009,7 +1010,7 @@ if (-not (Test-Path $aceDir)) {
 $input | Out-File -Append -FilePath "$aceDir\\shell_trajectory.jsonl" -Encoding utf8
 `;
 	if (forceUpdate || !fs.existsSync(shellTrackPath)) {
-		fs.writeFileSync(shellTrackPath, shellTrackScript);
+		writeFileAtomic(shellTrackPath, shellTrackScript);
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_track_shell.ps1`);
 	}
 
@@ -1029,7 +1030,7 @@ if (-not (Test-Path $aceDir)) {
 $inputJson | Out-File -Append -FilePath "$aceDir\\response_trajectory.jsonl" -Encoding utf8
 `;
 	// Always update response tracking
-	fs.writeFileSync(responseTrackPath, responseTrackScript);
+	writeFileAtomic(responseTrackPath, responseTrackScript);
 	console.log('[ACE] Updated ace_track_response.ps1');
 
 	// Session Start Hook - Injects pattern context into new conversations
@@ -1081,7 +1082,7 @@ if ($patternCount -gt 0) {
 Write-Output "{\`"env\`": {\`"ACE_SESSION_ID\`": \`"$sessionId\`"}, \`"additional_context\`": \`"$context\`"}"
 `;
 	if (forceUpdate || !fs.existsSync(sessionStartPath)) {
-		fs.writeFileSync(sessionStartPath, sessionStartScript);
+		writeFileAtomic(sessionStartPath, sessionStartScript);
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_session_start.ps1`);
 	}
 
@@ -1118,7 +1119,7 @@ $logEntry = @{
 $logEntry | Out-File -Append -FilePath "$aceDir\\session_log.jsonl" -Encoding utf8
 `;
 	if (forceUpdate || !fs.existsSync(sessionEndPath)) {
-		fs.writeFileSync(sessionEndPath, sessionEndScript);
+		writeFileAtomic(sessionEndPath, sessionEndScript);
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_session_end.ps1`);
 	}
 
@@ -1158,7 +1159,7 @@ $msg = "Context compacting (\${usagePct}% used). AI-Trail preserved: MCP:\${mcpC
 Write-Output "{\`"user_message\`": \`"$msg\`"}"
 `;
 	if (forceUpdate || !fs.existsSync(preCompactPath)) {
-		fs.writeFileSync(preCompactPath, preCompactScript);
+		writeFileAtomic(preCompactPath, preCompactScript);
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_pre_compact.ps1`);
 	}
 
@@ -1185,7 +1186,7 @@ $entry | Out-File -Append -FilePath "$aceDir\\mcp_trajectory.jsonl" -Encoding ut
 Write-Output "{\`"decision\`": \`"allow\`"}"
 `;
 	if (forceUpdate || !fs.existsSync(subagentStartPath)) {
-		fs.writeFileSync(subagentStartPath, subagentStartScript);
+		writeFileAtomic(subagentStartPath, subagentStartScript);
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_subagent_start.ps1`);
 	}
 
@@ -1219,7 +1220,7 @@ if ($transcript) {
 exit 0
 `;
 	if (forceUpdate || !fs.existsSync(subagentStopPath)) {
-		fs.writeFileSync(subagentStopPath, subagentStopScript);
+		writeFileAtomic(subagentStopPath, subagentStopScript);
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_subagent_stop.ps1`);
 	}
 
@@ -1299,7 +1300,7 @@ try {
 }
 `;
 	// Always update to get domain detection
-	fs.writeFileSync(editTrackPath, editTrackScript);
+	writeFileAtomic(editTrackPath, editTrackScript);
 	console.log('[ACE] Updated ace_track_edit.ps1 with MCP temp file');
 
 	// Stop Hook with Git Context Aggregation
@@ -1362,14 +1363,14 @@ if ($loopCount -eq 0 -and -not (Test-Path "$aceDir\\ace-review-result.json")) {
 }
 `;
 	// Always update stop hook
-	fs.writeFileSync(stopHookPath, stopHookScript);
+	writeFileAtomic(stopHookPath, stopHookScript);
 	console.log('[ACE] Updated ace_stop_hook.ps1');
 
 	// Pre-Tool Use Gate — always overwrite (gate logic must be current to
 	// migrate users away from old {"decision":...} format)
 	const preToolUsePath = path.join(scriptsDir, 'ace_pre_tool_use.ps1');
 	const preToolUseScript = getPreToolUsePsScriptContent();
-	fs.writeFileSync(preToolUsePath, preToolUseScript);
+	writeFileAtomic(preToolUsePath, preToolUseScript);
 	console.log(`[ACE] Updated ace_pre_tool_use.ps1 (gate logic always-current)`);
 
 	// Post-Tool Use Tracking
@@ -1396,7 +1397,7 @@ $entry | Out-File -FilePath "$aceDir\\mcp_trajectory.jsonl" -Encoding utf8 -Appe
 Write-Output '{}'
 `;
 	if (forceUpdate || !fs.existsSync(postToolUsePath)) {
-		fs.writeFileSync(postToolUsePath, postToolUseScript);
+		writeFileAtomic(postToolUsePath, postToolUseScript);
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_post_tool_use.ps1`);
 	}
 
@@ -1424,7 +1425,7 @@ $entry | Out-File -FilePath "$aceDir\\mcp_trajectory.jsonl" -Encoding utf8 -Appe
 Write-Output '{}'
 `;
 	if (forceUpdate || !fs.existsSync(postToolUseFailurePath)) {
-		fs.writeFileSync(postToolUseFailurePath, postToolUseFailureScript);
+		writeFileAtomic(postToolUseFailurePath, postToolUseFailureScript);
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_post_tool_use_failure.ps1`);
 	}
 
@@ -1449,7 +1450,7 @@ $entry | Out-File -FilePath "$aceDir\\shell_trajectory.jsonl" -Encoding utf8 -Ap
 Write-Output '{"decision": "allow"}'
 `;
 	if (forceUpdate || !fs.existsSync(beforeShellPath)) {
-		fs.writeFileSync(beforeShellPath, beforeShellScript);
+		writeFileAtomic(beforeShellPath, beforeShellScript);
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_before_shell.ps1`);
 	}
 
@@ -1475,7 +1476,7 @@ $entry | Out-File -FilePath "$aceDir\\mcp_trajectory.jsonl" -Encoding utf8 -Appe
 Write-Output '{"decision": "allow"}'
 `;
 	if (forceUpdate || !fs.existsSync(beforeMcpPath)) {
-		fs.writeFileSync(beforeMcpPath, beforeMcpScript);
+		writeFileAtomic(beforeMcpPath, beforeMcpScript);
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_before_mcp.ps1`);
 	}
 
@@ -1485,7 +1486,7 @@ Write-Output '{"decision": "allow"}'
 Write-Output '{"decision": "allow"}'
 `;
 	if (forceUpdate || !fs.existsSync(beforeReadFilePath)) {
-		fs.writeFileSync(beforeReadFilePath, beforeReadFileScript);
+		writeFileAtomic(beforeReadFilePath, beforeReadFileScript);
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_before_read_file.ps1`);
 	}
 
@@ -1524,7 +1525,7 @@ if (Test-Path $cacheFile) {
 }
 `;
 	// Always update to get relevance logging
-	fs.writeFileSync(beforeSubmitPromptPath, beforeSubmitPromptScript);
+	writeFileAtomic(beforeSubmitPromptPath, beforeSubmitPromptScript);
 	console.log('[ACE] Updated ace_before_submit_prompt.ps1 with relevance logging');
 
 	// After Agent Thought - Thinking capture
@@ -1549,7 +1550,7 @@ $entry | Out-File -FilePath "$aceDir\\response_trajectory.jsonl" -Encoding utf8 
 Write-Output '{}'
 `;
 	if (forceUpdate || !fs.existsSync(afterAgentThoughtPath)) {
-		fs.writeFileSync(afterAgentThoughtPath, afterAgentThoughtScript);
+		writeFileAtomic(afterAgentThoughtPath, afterAgentThoughtScript);
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_after_agent_thought.ps1`);
 	}
 
@@ -1559,7 +1560,7 @@ Write-Output '{}'
 Write-Output '{"decision": "allow"}'
 `;
 	if (forceUpdate || !fs.existsSync(beforeTabFileReadPath)) {
-		fs.writeFileSync(beforeTabFileReadPath, beforeTabFileReadScript);
+		writeFileAtomic(beforeTabFileReadPath, beforeTabFileReadScript);
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_before_tab_file_read.ps1`);
 	}
 
@@ -1582,7 +1583,7 @@ $entry = @{event="tab_edit"; file_path=$filePath; timestamp=(Get-Date -Format "o
 $entry | Out-File -FilePath "$aceDir\\edit_trajectory.jsonl" -Encoding utf8 -Append
 `;
 	if (forceUpdate || !fs.existsSync(afterTabFileEditPath)) {
-		fs.writeFileSync(afterTabFileEditPath, afterTabFileEditScript);
+		writeFileAtomic(afterTabFileEditPath, afterTabFileEditScript);
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_after_tab_file_edit.ps1`);
 	}
 }
@@ -1597,7 +1598,7 @@ function createUnixHookScripts(scriptsDir: string, forceUpdate: boolean = false)
 	const mcpTrackPath = path.join(scriptsDir, 'ace_track_mcp.sh');
 	const mcpTrackScript = getMcpTrackScriptContent();
 	// Always update to get ace_learn helpfulness detection
-	fs.writeFileSync(mcpTrackPath, mcpTrackScript, { mode: 0o755 });
+	writeFileAtomic(mcpTrackPath, mcpTrackScript, { mode: 0o755 });
 	console.log(`[ACE] Updated ace_track_mcp.sh with ace_learn helpfulness detection`);
 
 	// Shell Execution Tracking
@@ -1612,7 +1613,7 @@ echo "$input" >> .cursor/ace/shell_trajectory.jsonl
 exit 0
 `;
 	if (forceUpdate || !fs.existsSync(shellTrackPath)) {
-		fs.writeFileSync(shellTrackPath, shellTrackScript, { mode: 0o755 });
+		writeFileAtomic(shellTrackPath, shellTrackScript, { mode: 0o755 });
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_track_shell.sh`);
 	}
 
@@ -1632,7 +1633,7 @@ echo "$input" >> "$ace_dir/response_trajectory.jsonl"
 exit 0
 `;
 	// Always update response tracking
-	fs.writeFileSync(responseTrackPath, responseTrackScript, { mode: 0o755 });
+	writeFileAtomic(responseTrackPath, responseTrackScript, { mode: 0o755 });
 	console.log('[ACE] Updated ace_track_response.sh');
 
 	// Session Start Hook - Injects pattern context into new conversations
@@ -1679,7 +1680,7 @@ fi
 echo "{\\"env\\": {\\"ACE_SESSION_ID\\": \\"$session_id\\"}, \\"additional_context\\": \\"$context\\"}"
 `;
 	if (forceUpdate || !fs.existsSync(sessionStartPath)) {
-		fs.writeFileSync(sessionStartPath, sessionStartScript, { mode: 0o755 });
+		writeFileAtomic(sessionStartPath, sessionStartScript, { mode: 0o755 });
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_session_start.sh`);
 	}
 
@@ -1710,7 +1711,7 @@ echo "{\\"session_id\\": \\"$session_id\\", \\"reason\\": \\"$reason\\", \\"dura
 exit 0
 `;
 	if (forceUpdate || !fs.existsSync(sessionEndPath)) {
-		fs.writeFileSync(sessionEndPath, sessionEndScript, { mode: 0o755 });
+		writeFileAtomic(sessionEndPath, sessionEndScript, { mode: 0o755 });
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_session_end.sh`);
 	}
 
@@ -1744,7 +1745,7 @@ msg="Context compacting (\${usage_pct}% used). AI-Trail preserved: MCP:$mcp_coun
 echo "{\\"user_message\\": \\"$msg\\"}"
 `;
 	if (forceUpdate || !fs.existsSync(preCompactPath)) {
-		fs.writeFileSync(preCompactPath, preCompactScript, { mode: 0o755 });
+		writeFileAtomic(preCompactPath, preCompactScript, { mode: 0o755 });
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_pre_compact.sh`);
 	}
 
@@ -1768,7 +1769,7 @@ echo "{\\"event\\": \\"subagent_start\\", \\"type\\": \\"$subagent_type\\", \\"m
 echo "{\\"decision\\": \\"allow\\"}"
 `;
 	if (forceUpdate || !fs.existsSync(subagentStartPath)) {
-		fs.writeFileSync(subagentStartPath, subagentStartScript, { mode: 0o755 });
+		writeFileAtomic(subagentStartPath, subagentStartScript, { mode: 0o755 });
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_subagent_start.sh`);
 	}
 
@@ -1797,7 +1798,7 @@ fi
 exit 0
 `;
 	if (forceUpdate || !fs.existsSync(subagentStopPath)) {
-		fs.writeFileSync(subagentStopPath, subagentStopScript, { mode: 0o755 });
+		writeFileAtomic(subagentStopPath, subagentStopScript, { mode: 0o755 });
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_subagent_stop.sh`);
 	}
 
@@ -1853,7 +1854,7 @@ fi
 exit 0
 `;
 	// Always update to get domain detection
-	fs.writeFileSync(editTrackPath, editTrackScript, { mode: 0o755 });
+	writeFileAtomic(editTrackPath, editTrackScript, { mode: 0o755 });
 	console.log('[ACE] Updated ace_track_edit.sh with domain detection');
 
 	// Stop Hook with Git Context Aggregation
@@ -1911,14 +1912,14 @@ else
 fi
 `;
 	// Always update stop hook
-	fs.writeFileSync(stopHookPath, stopHookScript, { mode: 0o755 });
+	writeFileAtomic(stopHookPath, stopHookScript, { mode: 0o755 });
 	console.log('[ACE] Updated ace_stop_hook.sh');
 
 	// Pre-Tool Use Gate — always overwrite (gate logic must be current to
 	// migrate users away from old {"decision":...} format)
 	const preToolUsePath = path.join(scriptsDir, 'ace_pre_tool_use.sh');
 	const preToolUseScript = getPreToolUseScriptContent();
-	fs.writeFileSync(preToolUsePath, preToolUseScript, { mode: 0o755 });
+	writeFileAtomic(preToolUsePath, preToolUseScript, { mode: 0o755 });
 	console.log(`[ACE] Updated ace_pre_tool_use.sh (gate logic always-current)`);
 
 	// Post-Tool Use Tracking
@@ -1942,7 +1943,7 @@ echo "{\\"event\\": \\"post_tool_use\\", \\"tool_type\\": \\"$tool_type\\", \\"t
 echo '{}'
 `;
 	if (forceUpdate || !fs.existsSync(postToolUsePath)) {
-		fs.writeFileSync(postToolUsePath, postToolUseScript, { mode: 0o755 });
+		writeFileAtomic(postToolUsePath, postToolUseScript, { mode: 0o755 });
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_post_tool_use.sh`);
 	}
 
@@ -1966,7 +1967,7 @@ echo "{\\"event\\": \\"tool_failure\\", \\"tool_type\\": \\"$tool_type\\", \\"to
 echo '{}'
 `;
 	if (forceUpdate || !fs.existsSync(postToolUseFailurePath)) {
-		fs.writeFileSync(postToolUseFailurePath, postToolUseFailureScript, { mode: 0o755 });
+		writeFileAtomic(postToolUseFailurePath, postToolUseFailureScript, { mode: 0o755 });
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_post_tool_use_failure.sh`);
 	}
 
@@ -1987,7 +1988,7 @@ echo "{\\"event\\": \\"before_shell\\", \\"command\\": \\"$command\\", \\"timest
 echo '{"decision": "allow"}'
 `;
 	if (forceUpdate || !fs.existsSync(beforeShellPath)) {
-		fs.writeFileSync(beforeShellPath, beforeShellScript, { mode: 0o755 });
+		writeFileAtomic(beforeShellPath, beforeShellScript, { mode: 0o755 });
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_before_shell.sh`);
 	}
 
@@ -2009,7 +2010,7 @@ echo "{\\"event\\": \\"before_mcp\\", \\"tool_name\\": \\"$tool_name\\", \\"tool
 echo '{"decision": "allow"}'
 `;
 	if (forceUpdate || !fs.existsSync(beforeMcpPath)) {
-		fs.writeFileSync(beforeMcpPath, beforeMcpScript, { mode: 0o755 });
+		writeFileAtomic(beforeMcpPath, beforeMcpScript, { mode: 0o755 });
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_before_mcp.sh`);
 	}
 
@@ -2020,7 +2021,7 @@ echo '{"decision": "allow"}'
 echo '{"decision": "allow"}'
 `;
 	if (forceUpdate || !fs.existsSync(beforeReadFilePath)) {
-		fs.writeFileSync(beforeReadFilePath, beforeReadFileScript, { mode: 0o755 });
+		writeFileAtomic(beforeReadFilePath, beforeReadFileScript, { mode: 0o755 });
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_before_read_file.sh`);
 	}
 
@@ -2050,7 +2051,7 @@ else
 fi
 `;
 	// Always update to get relevance logging
-	fs.writeFileSync(beforeSubmitPromptPath, beforeSubmitPromptScript, { mode: 0o755 });
+	writeFileAtomic(beforeSubmitPromptPath, beforeSubmitPromptScript, { mode: 0o755 });
 	console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_before_submit_prompt.sh`);
 
 	// After Agent Thought - Thinking capture
@@ -2071,7 +2072,7 @@ echo "{\\"event\\": \\"agent_thought\\", \\"text\\": \\"$text\\", \\"duration_ms
 echo '{}'
 `;
 	if (forceUpdate || !fs.existsSync(afterAgentThoughtPath)) {
-		fs.writeFileSync(afterAgentThoughtPath, afterAgentThoughtScript, { mode: 0o755 });
+		writeFileAtomic(afterAgentThoughtPath, afterAgentThoughtScript, { mode: 0o755 });
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_after_agent_thought.sh`);
 	}
 
@@ -2082,7 +2083,7 @@ echo '{}'
 echo '{"decision": "allow"}'
 `;
 	if (forceUpdate || !fs.existsSync(beforeTabFileReadPath)) {
-		fs.writeFileSync(beforeTabFileReadPath, beforeTabFileReadScript, { mode: 0o755 });
+		writeFileAtomic(beforeTabFileReadPath, beforeTabFileReadScript, { mode: 0o755 });
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_before_tab_file_read.sh`);
 	}
 
@@ -2101,7 +2102,7 @@ file_path=$(echo "$input" | jq -r '.file_path // ""')
 echo "{\\"event\\": \\"tab_edit\\", \\"file_path\\": \\"$file_path\\", \\"timestamp\\": \\"$(date -Iseconds)\\"}" >> "$ace_dir/edit_trajectory.jsonl"
 `;
 	if (forceUpdate || !fs.existsSync(afterTabFileEditPath)) {
-		fs.writeFileSync(afterTabFileEditPath, afterTabFileEditScript, { mode: 0o755 });
+		writeFileAtomic(afterTabFileEditPath, afterTabFileEditScript, { mode: 0o755 });
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_after_tab_file_edit.sh`);
 	}
 }
@@ -2308,7 +2309,7 @@ Press \`Cmd/Ctrl+Shift+P\` and type "ACE" to see:
 	for (const [filename, content] of Object.entries(commands)) {
 		const filePath = path.join(commandsDir, filename);
 		if (forceUpdate || !fs.existsSync(filePath)) {
-			fs.writeFileSync(filePath, content);
+			writeFileAtomic(filePath, content);
 			console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} slash command: ${filename}`);
 		}
 	}
@@ -2354,7 +2355,7 @@ async function createCursorRules(folder?: vscode.WorkspaceFolder, forceUpdate: b
 
 	// Create if doesn't exist OR if force update requested (during version upgrade)
 	if (forceUpdate || !fs.existsSync(rulesPath)) {
-		fs.writeFileSync(rulesPath, rulesContent);
+		writeFileAtomic(rulesPath, rulesContent);
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace-patterns/RULE.md`);
 	}
 
@@ -2368,7 +2369,7 @@ async function createCursorRules(folder?: vscode.WorkspaceFolder, forceUpdate: b
 
 	// Create if doesn't exist OR if force update requested (during version upgrade)
 	if (forceUpdate || !fs.existsSync(domainRulePath)) {
-		fs.writeFileSync(domainRulePath, domainRuleContent);
+		writeFileAtomic(domainRulePath, domainRuleContent);
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace-domain-search/RULE.md`);
 	}
 
@@ -2382,7 +2383,7 @@ async function createCursorRules(folder?: vscode.WorkspaceFolder, forceUpdate: b
 
 	// Create if doesn't exist OR if force update requested (during version upgrade)
 	if (forceUpdate || !fs.existsSync(continuousSearchRulePath)) {
-		fs.writeFileSync(continuousSearchRulePath, continuousSearchRuleContent);
+		writeFileAtomic(continuousSearchRulePath, continuousSearchRuleContent);
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace-continuous-search/RULE.md`);
 	}
 }
