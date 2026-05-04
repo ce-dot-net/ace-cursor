@@ -5,6 +5,11 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.72] - 2026-05-05
+
+### Changed
+- **Bumped `@ace-sdk/core` to ^2.18.1** — picks up four minor versions of upstream improvements since the v0.2.69 pin to 2.14.0. Smoke-tested against unit suite (323/323 pass) and production esbuild bundle.
+
 ## [0.2.71] - 2026-05-04
 
 ### Changed
