@@ -28,6 +28,8 @@ import {
 	getDomainSearchRuleContent,
 	getContinuousSearchRuleContent,
 	getMcpTrackScriptContent,
+	getPreToolUseScriptContent,
+	getPreToolUsePsScriptContent,
 } from './ace/hookScripts';
 
 let statusBarItem: vscode.StatusBarItem;
@@ -1326,32 +1328,12 @@ if ($loopCount -eq 0 -and -not (Test-Path "$aceDir\\ace-review-result.json")) {
 	fs.writeFileSync(stopHookPath, stopHookScript);
 	console.log('[ACE] Updated ace_stop_hook.ps1');
 
-	// Pre-Tool Use Gate
+	// Pre-Tool Use Gate — always overwrite (gate logic must be current to
+	// migrate users away from old {"decision":...} format)
 	const preToolUsePath = path.join(scriptsDir, 'ace_pre_tool_use.ps1');
-	const preToolUseScript = `# ACE Pre-Tool Use Hook - Gates tool execution
-# Input: tool_type, tool_name, tool_input
-
-$inputJson = [Console]::In.ReadToEnd()
-$input = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
-
-$aceDir = ".cursor\\ace"
-if (-not (Test-Path $aceDir)) {
-    New-Item -ItemType Directory -Path $aceDir -Force | Out-Null
-}
-
-$toolType = if ($input.tool_type) { $input.tool_type } else { "unknown" }
-$toolName = if ($input.tool_name) { $input.tool_name } else { "unknown" }
-$toolInput = if ($input.tool_input) { ($input.tool_input | ConvertTo-Json -Compress).Substring(0, [Math]::Min(500, ($input.tool_input | ConvertTo-Json -Compress).Length)) } else { "{}" }
-
-$entry = @{event="pre_tool_use"; tool_type=$toolType; tool_name=$toolName; tool_input=$toolInput; timestamp=(Get-Date -Format "o")} | ConvertTo-Json -Compress
-$entry | Out-File -FilePath "$aceDir\\mcp_trajectory.jsonl" -Encoding utf8 -Append
-
-Write-Output '{"decision": "allow"}'
-`;
-	if (forceUpdate || !fs.existsSync(preToolUsePath)) {
-		fs.writeFileSync(preToolUsePath, preToolUseScript);
-		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_pre_tool_use.ps1`);
-	}
+	const preToolUseScript = getPreToolUsePsScriptContent();
+	fs.writeFileSync(preToolUsePath, preToolUseScript);
+	console.log(`[ACE] Updated ace_pre_tool_use.ps1 (gate logic always-current)`);
 
 	// Post-Tool Use Tracking
 	const postToolUsePath = path.join(scriptsDir, 'ace_post_tool_use.ps1');
@@ -1895,28 +1877,12 @@ fi
 	fs.writeFileSync(stopHookPath, stopHookScript, { mode: 0o755 });
 	console.log('[ACE] Updated ace_stop_hook.sh');
 
-	// Pre-Tool Use Gate
+	// Pre-Tool Use Gate — always overwrite (gate logic must be current to
+	// migrate users away from old {"decision":...} format)
 	const preToolUsePath = path.join(scriptsDir, 'ace_pre_tool_use.sh');
-	const preToolUseScript = `#!/bin/bash
-# ACE Pre-Tool Use Hook - Gates tool execution
-# Input: tool_type, tool_name, tool_input
-
-input=$(cat)
-ace_dir=".cursor/ace"
-mkdir -p "$ace_dir"
-
-tool_type=$(echo "$input" | jq -r '.tool_type // "unknown"')
-tool_name=$(echo "$input" | jq -r '.tool_name // "unknown"')
-tool_input=$(echo "$input" | jq -r '.tool_input // "{}"' | head -c 500)
-
-echo "{\\"event\\": \\"pre_tool_use\\", \\"tool_type\\": \\"$tool_type\\", \\"tool_name\\": \\"$tool_name\\", \\"tool_input\\": \\"$tool_input\\", \\"timestamp\\": \\"$(date -Iseconds)\\"}" >> "$ace_dir/mcp_trajectory.jsonl"
-
-echo '{"decision": "allow"}'
-`;
-	if (forceUpdate || !fs.existsSync(preToolUsePath)) {
-		fs.writeFileSync(preToolUsePath, preToolUseScript, { mode: 0o755 });
-		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_pre_tool_use.sh`);
-	}
+	const preToolUseScript = getPreToolUseScriptContent();
+	fs.writeFileSync(preToolUsePath, preToolUseScript, { mode: 0o755 });
+	console.log(`[ACE] Updated ace_pre_tool_use.sh (gate logic always-current)`);
 
 	// Post-Tool Use Tracking
 	const postToolUsePath = path.join(scriptsDir, 'ace_post_tool_use.sh');

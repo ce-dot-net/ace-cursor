@@ -10,6 +10,8 @@ import {
 	getDomainSearchRuleContent,
 	getContinuousSearchRuleContent,
 	getMcpTrackScriptContent,
+	getPreToolUseScriptContent,
+	getPreToolUsePsScriptContent,
 } from '../../ace/hookScripts';
 
 describe('ace-patterns RULE.md content', () => {
@@ -93,5 +95,64 @@ describe('ace_track_mcp.sh content', () => {
 	it('preserves the existing ace_learn detection (does not regress)', () => {
 		const script = getMcpTrackScriptContent();
 		expect(script).toContain('ace_learn');
+	});
+});
+
+describe('ace_pre_tool_use.sh content', () => {
+	it('uses Cursor canonical {"permission":"allow"} format, not {"decision":"allow"}', () => {
+		const script = getPreToolUseScriptContent();
+		expect(script).toContain('"permission":"allow"');
+		expect(script).not.toContain('"decision":"allow"');
+	});
+
+	it('emits {"permission":"deny"} with agent_message when flag is missing', () => {
+		const script = getPreToolUseScriptContent();
+		expect(script).toContain('"permission":"deny"');
+		expect(script).toContain('agent_message');
+	});
+
+	it('allows MCP:ace_ prefixed tools unconditionally (no recursion)', () => {
+		const script = getPreToolUseScriptContent();
+		// Must check for MCP:ace_ prefix and allow before checking the flag
+		expect(script).toMatch(/MCP:ace_/);
+		const aceAllowIdx = script.search(/MCP:ace_/);
+		const flagCheckIdx = script.search(/search-done/);
+		expect(aceAllowIdx).toBeGreaterThan(0);
+		expect(flagCheckIdx).toBeGreaterThan(aceAllowIdx);
+	});
+
+	it('checks flag file using conversation_id and generation_id from input', () => {
+		const script = getPreToolUseScriptContent();
+		expect(script).toContain('conversation_id');
+		expect(script).toContain('generation_id');
+		expect(script).toContain('sessions');
+		expect(script).toContain('.search-done');
+	});
+
+	it('agent_message instructs the AI to call ace_search first', () => {
+		const script = getPreToolUseScriptContent();
+		expect(script).toMatch(/ace_search.*FIRST|FIRST.*ace_search/i);
+	});
+
+	it('uses jq for JSON parsing (consistency with other hook scripts)', () => {
+		const script = getPreToolUseScriptContent();
+		expect(script).toContain('jq');
+	});
+});
+
+describe('ace_pre_tool_use.ps1 content (Windows)', () => {
+	it('uses Cursor canonical permission format', () => {
+		const ps = getPreToolUsePsScriptContent();
+		expect(ps).toContain('permission');
+		expect(ps).toContain('allow');
+		expect(ps).toContain('deny');
+	});
+
+	it('allows MCP:ace_ prefix unconditionally', () => {
+		expect(getPreToolUsePsScriptContent()).toMatch(/MCP:ace_/);
+	});
+
+	it('checks for the search-done flag file', () => {
+		expect(getPreToolUsePsScriptContent()).toContain('search-done');
 	});
 });

@@ -249,6 +249,128 @@ exit 0
 `;
 }
 
+/**
+ * ACE Pre-Tool Use Hook (bash) — per-prompt ace_search gate.
+ *
+ * Cursor canonical output format: {"permission":"allow"|"deny","agent_message":"..."}
+ * NOT {"decision":...} which is Claude Code format and is silently
+ * ignored by Cursor's hook engine.
+ *
+ * Input fields (verified from .cursor/ace/mcp_trajectory.jsonl):
+ *   tool_name       e.g. "MCP:ace_search", "Grep", "Read" (with MCP: prefix for MCP tools)
+ *   conversation_id stable per chat tab
+ *   generation_id   regenerated per user prompt — the gate key
+ *
+ * Behavior:
+ *   - tool_name starts with "MCP:ace_" → always allow (no recursion, lets ace_search itself through)
+ *   - else: check .cursor/ace/sessions/<conv_id>/<gen_id>.search-done
+ *       - flag exists → allow
+ *       - missing     → deny with agent_message instructing the AI to call ace_search first
+ *   - missing IDs    → fail-open allow (don't break workflow on malformed input)
+ */
+export function getPreToolUseScriptContent(): string {
+	return `#!/bin/bash
+# ACE Pre-Tool Use Hook — per-prompt ace_search gate
+# Cursor canonical schema: {"permission":"allow"|"deny","agent_message":"..."}
+# NOT {"decision":...} (Claude Code format, ignored by Cursor)
+
+input=$(cat)
+ace_dir=".cursor/ace"
+mkdir -p "$ace_dir"
+
+tool_name=$(echo "$input" | jq -r '.tool_name // "unknown"')
+conv_id=$(echo "$input" | jq -r '.conversation_id // ""')
+gen_id=$(echo "$input" | jq -r '.generation_id // ""')
+
+# Log (always)
+echo "{\\"event\\": \\"pre_tool_use\\", \\"tool_name\\": \\"$tool_name\\", \\"conv_id\\": \\"$conv_id\\", \\"gen_id\\": \\"$gen_id\\", \\"timestamp\\": \\"$(date -Iseconds)\\"}" >> "$ace_dir/mcp_trajectory.jsonl"
+
+# Allow ace_* MCP tools unconditionally (avoids recursion, permits ace_search itself)
+case "$tool_name" in
+  MCP:ace_*)
+    echo '{"permission":"allow"}'
+    exit 0
+    ;;
+esac
+
+# Fail-open if IDs missing (malformed input — don't break workflow)
+if [ -z "$conv_id" ] || [ -z "$gen_id" ]; then
+  echo '{"permission":"allow"}'
+  exit 0
+fi
+
+# Check per-generation flag
+flag_file="$ace_dir/sessions/$conv_id/$gen_id.search-done"
+if [ -f "$flag_file" ]; then
+  echo '{"permission":"allow"}'
+  exit 0
+fi
+
+# No flag — deny and instruct AI to call ace_search first
+echo '{"permission":"deny","agent_message":"You must call ace_search FIRST for every user prompt before any other tool. Use the user'\\\\''s request (or its core intent) as your search query. After ace_search returns, retry your original tool call."}'
+`;
+}
+
+/**
+ * Windows PowerShell equivalent of ace_pre_tool_use.sh.
+ * Same behavior, same Cursor canonical output format.
+ */
+export function getPreToolUsePsScriptContent(): string {
+	return `# ACE Pre-Tool Use Hook (PowerShell) — per-prompt ace_search gate
+# Cursor canonical schema: {"permission":"allow"|"deny","agent_message":"..."}
+
+$inputJson = [Console]::In.ReadToEnd()
+$aceDir = ".cursor/ace"
+if (-not (Test-Path $aceDir)) { New-Item -ItemType Directory -Path $aceDir -Force | Out-Null }
+
+try {
+    $payload = $inputJson | ConvertFrom-Json
+    $toolName = $payload.tool_name
+    $convId = $payload.conversation_id
+    $genId = $payload.generation_id
+} catch {
+    Write-Output '{"permission":"allow"}'
+    exit 0
+}
+
+# Log
+$logEntry = @{
+    event = "pre_tool_use"
+    tool_name = $toolName
+    conv_id = $convId
+    gen_id = $genId
+    timestamp = (Get-Date -Format "o")
+} | ConvertTo-Json -Compress
+Add-Content -Path "$aceDir/mcp_trajectory.jsonl" -Value $logEntry
+
+# Allow ace_* MCP tools unconditionally
+if ($toolName -like "MCP:ace_*") {
+    Write-Output '{"permission":"allow"}'
+    exit 0
+}
+
+# Fail-open if IDs missing
+if ([string]::IsNullOrEmpty($convId) -or [string]::IsNullOrEmpty($genId)) {
+    Write-Output '{"permission":"allow"}'
+    exit 0
+}
+
+# Check per-generation flag
+$flagFile = "$aceDir/sessions/$convId/$genId.search-done"
+if (Test-Path $flagFile) {
+    Write-Output '{"permission":"allow"}'
+    exit 0
+}
+
+# No flag — deny
+$denyResponse = @{
+    permission = "deny"
+    agent_message = "You must call ace_search FIRST for every user prompt before any other tool. Use the user's request (or its core intent) as your search query. After ace_search returns, retry your original tool call."
+} | ConvertTo-Json -Compress
+Write-Output $denyResponse
+`;
+}
+
 export function getContinuousSearchRuleContent(): string {
 	return `---
 description: Re-call ace_search after 5+ tool calls or when switching file domain during extended work sessions
