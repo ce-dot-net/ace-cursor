@@ -5,6 +5,17 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.79] - 2026-05-05
+
+### Fixed
+- **Mitigations for Cursor's `CallMcpTool` schema-omits-arguments bug** (acknowledged Cursor staff bug, [forum 150043](https://forum.cursor.com/t/callmcptool-schema-omits-arguments-but-runtime-accepts-it/150043) + [154996](https://forum.cursor.com/t/allmcptool-schema-missing-arguments-field-causes-agents-to-call-mcp-tools-without-required-params/154996)). Cursor's agent presents the LLM a tool-call schema where the `arguments` field is sometimes missing, so the agent calls `MCP:ace_search`/`MCP:ace_learn` with empty args and the server rejects 400/422.
+  - **Gate `agent_message` now includes the literal MCP tools/call JSON payload shape** so the agent has explicit guidance about the missing slot and how to populate it. Mirrored in PowerShell.
+  - **ace-patterns rule "Tool Call Shape" section** gains a "Cursor CallMcpTool known bug" subsection with the full payload pattern for both `ace_search` and `ace_learn`.
+  - **`ace_track_mcp.sh` detects empty `tool_input`** for `ace_search`/`ace_learn` and logs a `schema_violation_detected` record to `.cursor/ace/ace-relevance.jsonl` for observability.
+
+### Tests
+- 5 new unit tests in `hooks-gate.test.ts` guard the new agent_message wording, rule subsection, and observability hook content.
+
 ## [0.2.78] - 2026-05-05
 
 ### Fixed
