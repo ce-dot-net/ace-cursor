@@ -22,6 +22,15 @@ Do NOT assume you "already know" the patterns from a previous session.
 Do NOT skip because patterns seem "familiar" or "unchanged".
 EVERY session is a fresh context - patterns MUST be retrieved again.
 
+## Tool Call Shape
+
+ace_search and ace_learn use **named arguments only** (MCP spec — JSON object \`{[key: string]: unknown}\`). Never call positionally:
+
+- ✓ CORRECT: \`ace_search(query="JWT authentication")\` — named \`query=\` argument
+- ✗ WRONG: passing the query string as the first positional argument with no \`query=\` label — \`query\` will arrive as \`undefined\` at the server and the call will fail with HTTP 400
+
+If you cannot determine a query, do **not** call ace_search with empty arguments — call it with the user's most recent message text as the query.
+
 ## BEFORE ANY Implementation Task
 
 **You MUST call \`ace_search\` MCP tool FIRST** before:
@@ -158,17 +167,17 @@ Read domain names semantically to find the best match:
 
 \`\`\`
 # CORRECT - use exact domain name from ace_list_domains
-ace_search("testing patterns", allowed_domains=["mcp-cli-testing-and-api-resilience"])
+ace_search(query="testing patterns", allowed_domains=["mcp-cli-testing-and-api-resilience"])
 
 # WRONG - hardcoded domain that doesn't exist on server
-ace_search("testing patterns", allowed_domains=["test"])
+ace_search(query="testing patterns", allowed_domains=["test"])
 \`\`\`
 
 ## Workflow
 
 1. \`ace_list_domains()\` - See what domains exist
 2. Pick relevant domain(s) based on task context
-3. \`ace_search("query", allowed_domains=["picked-domain"])\`
+3. \`ace_search(query="<your query>", allowed_domains=["picked-domain"])\`
 
 ## Why This Matters
 
@@ -307,7 +316,7 @@ if [ -f "$flag_file" ]; then
 fi
 
 # No flag — deny and instruct AI to call ace_search first
-echo '{"permission":"deny","agent_message":"You must call ace_search FIRST for every user prompt before any other tool. Use the user'\\\\''s request (or its core intent) as your search query. After ace_search returns, retry your original tool call."}'
+echo '{"permission":"deny","agent_message":"You must call ace_search FIRST for every user prompt before any other tool. Required call shape: ace_search with named argument query=\"<user'\\\\''s most recent message text or its core intent>\" (a non-empty string). Do not call ace_search without arguments — query is required. After ace_search returns, retry your original tool call."}'
 `;
 }
 
@@ -365,7 +374,7 @@ if (Test-Path $flagFile) {
 # No flag — deny
 $denyResponse = @{
     permission = "deny"
-    agent_message = "You must call ace_search FIRST for every user prompt before any other tool. Use the user's request (or its core intent) as your search query. After ace_search returns, retry your original tool call."
+    agent_message = "You must call ace_search FIRST for every user prompt before any other tool. Required call shape: ace_search with named argument query=\`"<user's most recent message text or its core intent>\`" (a non-empty string). Do not call ace_search without arguments — query is required. After ace_search returns, retry your original tool call."
 } | ConvertTo-Json -Compress
 Write-Output $denyResponse
 `;
@@ -394,16 +403,16 @@ For focused results, use domain filtering:
 
 1. **First**: Call \`ace_list_domains()\` to see available domains
 2. **Match**: Pick domain(s) that match your current task context
-3. **Search**: Call \`ace_search("query", allowed_domains=["picked-domain"])\`
+3. **Search**: Call \`ace_search(query="<your query>", allowed_domains=["picked-domain"])\`
 
 **IMPORTANT**: Domain names are semantic (e.g., "typescript-development-practices"),
 not simple paths. Always use \`ace_list_domains\` to discover actual domain names.
 
 ## Example Workflow
 
-1. Start task → \`ace_search("your task description")\` to retrieve relevant patterns
-2. 5+ edits later → \`ace_search("error handling")\` for fresh patterns
-3. Need focused results → \`ace_list_domains()\` then \`ace_search(..., allowed_domains=[...])\`
-4. Task complete → \`ace_learn(...)\` to capture lessons
+1. Start task → \`ace_search(query="your task description")\` to retrieve relevant patterns
+2. 5+ edits later → \`ace_search(query="error handling")\` for fresh patterns
+3. Need focused results → \`ace_list_domains()\` then \`ace_search(query="...", allowed_domains=[...])\`
+4. Task complete → \`ace_learn(task="...", trajectory=[...], success=true, output="...", summary="...")\` to capture lessons
 `;
 }

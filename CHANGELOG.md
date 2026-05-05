@@ -5,6 +5,15 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.76] - 2026-05-05
+
+### Fixed
+- **Tool call examples now use named args only** — runtime logs revealed AI was emitting `ace_search` and `ace_learn` calls with required params (`query`, `task`) as undefined, causing server 400/422. Root cause: rule examples mixed Python-style positional + named syntax (`ace_search("query", allowed_domains=[...])`) which MCP-protocol-wise produces an args object without a `query` field. MCP spec (CallToolRequestParams.arguments) is named-only — no positional support. All call examples in `ace-patterns/`, `ace-domain-search/`, and `ace-continuous-search/` rules now use only named args. Added a "Tool Call Shape" section to ace-patterns rule documenting this explicitly.
+- **Pre-tool-use gate `agent_message` strengthened** — now states "Required call shape: ace_search with named argument query=…" and explicitly warns against calling ace_search without arguments. Mirrored in the PowerShell variant.
+
+### Tests
+- Source-grep tests added: zero `ace_search\(\s*['"]` positional patterns survive in rule content; gate message references `query` param and contains a non-empty/never-empty admonition.
+
 ## [0.2.75] - 2026-05-05
 
 ### Added
