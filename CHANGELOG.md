@@ -5,6 +5,15 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.82] - 2026-05-05
+
+### Fixed
+- **VSIX size cut from 25 MB / 9785 files → ~200 KB / 19 files** (~99% reduction). `.vscodeignore` now excludes `node_modules/**` (esbuild bundles everything we need into `dist/extension.js`) plus dev artifacts (`.cursor/`, `.serena/`, `.ace-cache/`, build maps, dev VSIX outputs). v0.2.79 + v0.2.80 silently sat in Open VSX moderation queue ("already published, but currently isn't active and therefore not visible") — strongly suspected silent quarantine due to package size + 9785 files. With the slim package, future publishes should land cleanly.
+- **Publish workflow updated**: `dependencies: false` on the HaaLeo publish action so vsce does not walk the dep tree (esbuild already inlined everything). Node bumped from 20 → 22 LTS for the build runtime. `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` env to silence the Node.js 20 deprecation warnings from action runners.
+
+### Note
+- v0.2.81 was tagged but its commit unintentionally retained `package.json:"0.2.80"` (file-modified-since-read collision in the release-bump step), so the workflow republished as 0.2.80 and Open VSX rejected. v0.2.82 is the proper bumped release containing the same packaging fix.
+
 ## [0.2.80] - 2026-05-05
 
 ### Fixed
