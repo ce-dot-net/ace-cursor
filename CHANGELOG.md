@@ -5,6 +5,15 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.80] - 2026-05-05
+
+### Fixed
+- **Gate now actually enforces ace_search FIRST (not just any ace_* tool)** — previous logic allowed `MCP:ace_*` blanket, so the AI could call `ace_learn` at the start of a session and the gate trivially passed without ever invoking `ace_search`. New logic only blanket-allows search/lookup tools (`ace_search`, `ace_get_playbook`, `ace_top_patterns`, `ace_list_domains`, status/config/projects/devices/usage tools, `traces_list/get`). `ace_learn`, `ace_delta`, `ace_clear`, `ace_batch_get`, `ace_bootstrap`, and all non-MCP tools require the per-generation `search-done` flag — meaning `ace_search` must run first.
+- **agent_message and ace-patterns rule** now state the required 3-step order explicitly: (1) `ace_search` first, (2) your work, (3) `ace_learn` at the end. NEVER call `ace_learn` first.
+
+### Tests
+- 5 new unit tests in `hooks-gate.test.ts` exercise the new allow-list and per-generation flag interaction. Manually verified against extracted gate script with 6 stdin scenarios.
+
 ## [0.2.79] - 2026-05-05
 
 ### Fixed
