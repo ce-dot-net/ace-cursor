@@ -5,6 +5,14 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.78] - 2026-05-05
+
+### Fixed
+- **Cursor canonical permission schema for all 5 gate hooks** — `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeTabFileRead`, and `subagentStart` shipped with `{"decision":"allow"}` (Claude Code legacy format). Cursor's blocking-hook schema is `{"permission":"allow"|"deny"|"ask"}`. Cursor silently ignored the `decision` key, so every one of these hooks fail-opened by accident — no real gate effect — and Cursor surfaced schema-validation warnings in the UI. Migrated all 5 bash + 5 PowerShell sites to the canonical key.
+
+### Tests
+- Source-grep regression guards: zero `"decision":"allow"` or `"decision":"deny"` strings survive in `extension.ts`; ≥5 canonical `"permission":"allow"` sites verified.
+
 ## [0.2.77] - 2026-05-05
 
 ### Fixed
