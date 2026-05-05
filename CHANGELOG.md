@@ -5,6 +5,15 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.77] - 2026-05-05
+
+### Fixed
+- **Pre-tool-use gate script — broken bash syntax (regression from v0.2.76)** — the deny-path `agent_message` was emitted via an `echo` of a JSON string with a single-quoted bash wrapper, but the embedded apostrophe escape (`'\\''` JS-template-literal) collapsed to invalid bash quote runs (`bash: line 39: unexpected EOF while looking for matching '`). Hook script refused to execute, silently failing all tool calls in fresh sessions. Replaced with a single-quoted heredoc (`cat <<'ACE_DENY_EOF'`) that needs no quote-escape gymnastics, and dropped the apostrophe contraction entirely.
+- Fixed JSON-string double-quote escape inside the new heredoc: JS template literal needs `\\"` to produce `\"` at runtime so the heredoc emits valid JSON `\"` for the embedded `query="..."` reference.
+
+### Tests
+- Added 3 regression-guard tests in `hooks-gate.test.ts` that actually invoke `bash -n` on the script and run it with mock stdin via `execFileSync`, parsing the output as JSON. These would have caught v0.2.76 immediately and prevent any future bash-syntax regression in the gate script.
+
 ## [0.2.76] - 2026-05-05
 
 ### Fixed
