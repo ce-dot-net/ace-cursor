@@ -20,11 +20,14 @@ test/**
 # Build artifacts (keep dist/)
 *.map
 
-# Dependencies — esbuild bundles everything from src/ into dist/extension.js.
-# node_modules is NOT needed at runtime (the bundle inlines @ace-sdk/core etc).
-# @ace-sdk/mcp is loaded via npx at activation, also not from node_modules here.
-# Excluding cuts VSIX from ~25 MB / 9785 files to ~500 KB / ~150 files —
-# stays well under Open VSX upload limits.
+# Dependencies — esbuild bundles almost everything from src/ into
+# dist/extension.js (including @ace-sdk/core, linguist-js, skott — see
+# esbuild.js external list). Only better-sqlite3 cannot be bundled
+# because it ships a native .node binary.
+#
+# vsce walks the prod-deps tree by default and adds back the runtime
+# prod deps (better-sqlite3 + bindings). Dev deps + the bundled deps
+# stay excluded by this rule.
 node_modules/**
 
 # Dev / local-tooling artifacts that should NOT ship with the extension

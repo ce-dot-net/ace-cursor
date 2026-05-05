@@ -6,11 +6,10 @@ const production = process.argv.includes('--production');
 const commonOptions = {
   bundle: true,
   external: [
-    'vscode', // vscode is provided by the runtime
-    // Mark SDK dependencies with native/dynamic requires as external
-    'better-sqlite3',
-    'linguist-js',
-    'skott',
+    'vscode',         // provided by the VS Code runtime — must stay external
+    'better-sqlite3', // native Node addon (.node binary) — cannot be bundled
+    // linguist-js + skott previously externalized due to dynamic requires;
+    // now bundled to keep node_modules in the VSIX minimal (better-sqlite3 only).
   ],
   format: 'cjs',
   platform: 'node',

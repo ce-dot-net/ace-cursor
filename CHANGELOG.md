@@ -5,6 +5,15 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.83] - 2026-05-05
+
+### Fixed
+- **v0.2.82 broken (cannot find module 'better-sqlite3' on activate)** — the previous packaging fix excluded all of `node_modules/**` to slim the VSIX, but `better-sqlite3` ships a native `.node` binary that esbuild cannot bundle. Activation failed: `Cannot find module 'better-sqlite3'`.
+  - **esbuild config:** removed `linguist-js` and `skott` from external list — both bundle cleanly. `better-sqlite3` stays external (native binary). `dist/extension.js` grew from 287 KB → 5.6 MB.
+  - **`.vscodeignore`:** blanket `node_modules/**` exclude. vsce walks the prod-deps tree by default and re-adds `better-sqlite3` (~12 MB) + `bindings` (20 KB). Dev deps + bundled prod deps stay excluded.
+  - **Workflow:** dropped `dependencies: false` from the HaaLeo publish action so vsce actually walks the dep tree.
+  - **VSIX:** 6.84 MB / 161 files (was broken @ 425 KB / 107 files in v0.2.82).
+
 ## [0.2.82] - 2026-05-05
 
 ### Fixed

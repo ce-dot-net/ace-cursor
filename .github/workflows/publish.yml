@@ -34,12 +34,13 @@ jobs:
       - name: Run tests
         run: xvfb-run -a npm test
 
-      # No separate vsce package step — the publish action below packages
-      # internally honoring .vscodeignore. dependencies:false tells vsce NOT
-      # to walk the dependency tree (esbuild already bundled everything into
-      # dist/extension.js; node_modules is excluded by .vscodeignore).
+      # vsce walks the prod-deps tree by default (dependencies: true). Combined
+      # with .vscodeignore's blanket node_modules exclude, the result is: ONLY
+      # the actual runtime prod deps (better-sqlite3 native binary + bindings
+      # helper) end up in the VSIX. dev deps stay out. esbuild already bundled
+      # everything else (including @ace-sdk/core, linguist-js, skott) into
+      # dist/extension.js.
       - name: Publish to Open VSX
         uses: HaaLeo/publish-vscode-extension@v2
         with:
           pat: ${{ secrets.OPEN_VSX_TOKEN }}
-          dependencies: false
