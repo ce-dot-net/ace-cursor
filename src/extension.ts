@@ -37,6 +37,7 @@ import {
 	shouldWriteHooksAndRulesWithoutOptin,
 	pickFoldersToInitializeOnAdd,
 } from './ace/optInHelpers';
+import { cleanupOldExtensionDirs } from './lifecycle/cleanupOldVersions';
 
 let statusBarItem: vscode.StatusBarItem;
 let extensionContext: vscode.ExtensionContext;
@@ -473,6 +474,20 @@ export async function activate(context: vscode.ExtensionContext) {
 				aceOutput?.appendLine('[ACE] Warning: jq not found. Install jq for full hook functionality (brew install jq / apt install jq)');
 			}
 		}
+
+		// Clean up older same-publisher extension install dirs (Cursor leaves them behind).
+		// Deferred so it doesn't slow activation.
+		setTimeout(() => {
+			void cleanupOldExtensionDirs(context.extensionPath, context.extension.packageJSON.version)
+				.then(({ removed, errors }) => {
+					if (removed.length > 0) {
+						console.log(`[ACE] Cleaned ${removed.length} old extension dir(s):`, removed);
+					}
+					if (errors.length > 0) {
+						console.warn('[ACE] Old extension dir cleanup partial failures:', errors);
+					}
+				});
+		}, 5000);
 
 		// 10. Check workspace version and prompt for update if needed
 		await checkWorkspaceVersionAndPrompt(context);
