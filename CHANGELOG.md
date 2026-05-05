@@ -5,6 +5,11 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.84] - 2026-05-05
+
+### Fixed
+- **`.vscodeignore` now correctly whitelists better-sqlite3 + bindings** — v0.2.83 stripped node_modules entirely (vsce's dep walker does NOT override `.vscodeignore` exclusions for the deps tree, contrary to my earlier assumption). Result: `better_sqlite3.node` binary missing → extension activation failed (10 tests crashed). Now using a blanket `node_modules/**` exclude PLUS explicit `!node_modules/better-sqlite3/**` and `!node_modules/bindings/**` unignore patterns. Verified locally: VSIX is 6.84 MB / 161 files and contains the native binary.
+
 ## [0.2.83] - 2026-05-05
 
 ### Fixed

@@ -25,10 +25,23 @@ test/**
 # esbuild.js external list). Only better-sqlite3 cannot be bundled
 # because it ships a native .node binary.
 #
-# vsce walks the prod-deps tree by default and adds back the runtime
-# prod deps (better-sqlite3 + bindings). Dev deps + the bundled deps
-# stay excluded by this rule.
+# Blanket-exclude node_modules then re-include exactly the runtime
+# prod deps. The vsce dep walker does NOT override .vscodeignore
+# exclusions for the deps tree, so this whitelist is required.
 node_modules/**
+!node_modules/better-sqlite3/**
+!node_modules/bindings/**
+
+# Inside better-sqlite3, exclude install-time / source / docs to shave
+# ~9 MB of unnecessary C source. The .node binary stays.
+node_modules/better-sqlite3/deps/**
+node_modules/better-sqlite3/src/**
+node_modules/better-sqlite3/docs/**
+node_modules/better-sqlite3/test/**
+node_modules/better-sqlite3/benchmark/**
+node_modules/better-sqlite3/binding.gyp
+node_modules/better-sqlite3/CHANGELOG.md
+node_modules/better-sqlite3/HACKING.md
 
 # Dev / local-tooling artifacts that should NOT ship with the extension
 .cursor/**
