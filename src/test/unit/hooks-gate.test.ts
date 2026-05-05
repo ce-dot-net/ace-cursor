@@ -304,3 +304,38 @@ describe('hook scripts — Cursor canonical permission schema (no Claude-Code "d
 		expect(matches?.length ?? 0, 'expected ≥5 permission:"allow" sites in extension.ts').toBeGreaterThanOrEqual(5);
 	});
 });
+
+describe('Cursor CallMcpTool bug mitigation (v0.2.79)', () => {
+	it('gate agent_message includes explicit tools/call JSON payload shape', () => {
+		const script = getPreToolUseScriptContent();
+		expect(script).toMatch(/tools\/call/);
+		// Runtime script contains \"name\":\"ace_search\" (single backslash before each quote);
+		// regex \\" matches a literal backslash followed by quote.
+		expect(script).toMatch(/\\"name\\":\\"ace_search\\"/);
+		expect(script).toMatch(/\\"arguments\\"/);
+	});
+
+	it('gate agent_message references the Cursor bug forum thread', () => {
+		const script = getPreToolUseScriptContent();
+		expect(script).toMatch(/150043|callmcptool|known bug/i);
+	});
+
+	it('PowerShell gate agent_message also includes JSON payload shape', () => {
+		const ps = getPreToolUsePsScriptContent();
+		expect(ps).toMatch(/tools\/call|name.*ace_search.*arguments/);
+	});
+
+	it('ace-patterns rule mentions Cursor 150043 + workaround', () => {
+		const rule = getAcePatternsRuleContent();
+		expect(rule).toMatch(/150043|CallMcpTool/i);
+		expect(rule).toMatch(/workaround|surface this Cursor bug|DO NOT.*empty/i);
+	});
+
+	it('ace_track_mcp.sh detects empty-args ace_search/ace_learn', () => {
+		const script = getMcpTrackScriptContent();
+		expect(script).toContain('schema_violation_detected');
+		expect(script).toContain('ace_learn');
+		// must check for empty/null tool_input
+		expect(script).toMatch(/tool_input.*empty|is_empty/);
+	});
+});

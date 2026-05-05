@@ -31,6 +31,19 @@ ace_search and ace_learn use **named arguments only** (MCP spec — JSON object 
 
 If you cannot determine a query, do **not** call ace_search with empty arguments — call it with the user's most recent message text as the query.
 
+### Cursor \`CallMcpTool\` known bug (forum thread 150043)
+
+Cursor's agent presents the LLM with an MCP tool-call interface where the \`arguments\` field is sometimes omitted from the visible schema. **Symptom:** the agent calls \`ace_search\` or \`ace_learn\` with no arguments and the server rejects with 400/422 missing required fields.
+
+**Workaround:** When calling any ACE MCP tool, ALWAYS produce the full payload shape:
+
+\`\`\`json
+{ "name": "ace_search", "arguments": { "query": "<your intent>" } }
+{ "name": "ace_learn", "arguments": { "task": "...", "trajectory": [...], "success": true, "output": "..." } }
+\`\`\`
+
+If your tool-call interface does not expose an \`arguments\` field, **DO NOT** call the MCP tool with empty args — surface the Cursor bug to the user instead.
+
 ## BEFORE ANY Implementation Task
 
 **You MUST call \`ace_search\` MCP tool FIRST** before:
@@ -217,6 +230,23 @@ if [ "$tool_name" = "ace_search" ]; then
   touch "$flag_dir/$gen_id.search-done"
 fi
 
+# Cursor known bug 150043: agent sometimes calls MCP tools without arguments.
+# Detect empty/no-args ace_search and ace_learn for observability.
+if [ "$tool_name" = "ace_search" ] || [ "$tool_name" = "ace_learn" ]; then
+  tool_input_str=$(echo "$input" | jq -r '.tool_input // ""')
+  is_empty=0
+  if [ -z "$tool_input_str" ] || [ "$tool_input_str" = "{}" ] || [ "$tool_input_str" = "null" ]; then
+    is_empty=1
+  else
+    # Check object with all empty/null values: jq returns true if every value is null or empty string
+    all_empty=$(echo "$tool_input_str" | jq -r 'try (if type == "object" then ([.[] | (. == null or . == "")] | all) else false end) catch false' 2>/dev/null || echo "false")
+    if [ "$all_empty" = "true" ]; then is_empty=1; fi
+  fi
+  if [ "$is_empty" = "1" ]; then
+    echo "{\\"event\\": \\"schema_violation_detected\\", \\"tool\\": \\"$tool_name\\", \\"reason\\": \\"empty_arguments_likely_cursor_callmcptool_bug_150043\\", \\"timestamp\\": \\"$(date -Iseconds)\\"}" >> "$ace_dir/ace-relevance.jsonl"
+  fi
+fi
+
 if echo "$tool_name" | grep -qi "ace_learn"; then
   # tool_input is a JSON string — parse it to get the output field
   tool_input_raw=$(echo "$input" | jq -r '.tool_input // ""' 2>/dev/null || echo "")
@@ -318,8 +348,10 @@ fi
 # No flag — deny and instruct AI to call ace_search first.
 # Heredoc with single-quoted delimiter: no expansion, no escape gymnastics.
 # JSON body stays a single line so the deny payload is one self-contained record.
+# NOTE: agent_message includes the literal MCP tools/call payload shape to
+# mitigate Cursor's known CallMcpTool schema-omits-arguments bug (forum 150043).
 cat <<'ACE_DENY_EOF'
-{"permission":"deny","agent_message":"You must call ace_search FIRST for every user prompt before any other tool. Required call shape: ace_search with named argument query=\\"<user message text or core intent>\\" (non-empty string). Do not call ace_search without arguments. After ace_search returns, retry your original tool call."}
+{"permission":"deny","agent_message":"You must call ace_search FIRST for every user prompt before any other tool. Required tools/call payload (Cursor known bug 150043 may hide the arguments slot — surface this if you cannot pass arguments): {\\"name\\":\\"ace_search\\",\\"arguments\\":{\\"query\\":\\"<user message text or core intent — non-empty string>\\"}}. After ace_search returns, retry your original tool call. If your client cannot pass an arguments object to MCP tools, surface this Cursor bug to the user instead of calling tools with empty args."}
 ACE_DENY_EOF
 `;
 }
@@ -376,9 +408,11 @@ if (Test-Path $flagFile) {
 }
 
 # No flag — deny
+# NOTE: agent_message includes the literal MCP tools/call payload shape to
+# mitigate Cursor's known CallMcpTool schema-omits-arguments bug (forum 150043).
 $denyResponse = @{
     permission = "deny"
-    agent_message = "You must call ace_search FIRST for every user prompt before any other tool. Required call shape: ace_search with named argument query=\`"<user's most recent message text or its core intent>\`" (a non-empty string). Do not call ace_search without arguments — query is required. After ace_search returns, retry your original tool call."
+    agent_message = "You must call ace_search FIRST for every user prompt before any other tool. Required tools/call payload (Cursor known bug 150043 may hide the arguments slot — surface this if you cannot pass arguments): {\`"name\`":\`"ace_search\`",\`"arguments\`":{\`"query\`":\`"<user message text or core intent — non-empty string>\`"}}. After ace_search returns, retry your original tool call. If your client cannot pass an arguments object to MCP tools, surface this Cursor bug to the user instead of calling tools with empty args."
 } | ConvertTo-Json -Compress
 Write-Output $denyResponse
 `;
