@@ -213,3 +213,66 @@ describe('pre_tool_use gate agent_message — must instruct named args', () => {
 		expect(script).toMatch(/non-empty|never call.*without|do not call.*without|do not invoke.*without/i);
 	});
 });
+
+describe('pre_tool_use script — bash syntax + runtime regression guards', () => {
+	// v0.2.76 shipped a broken script (line 39 unmatched single-quote inside an
+	// echo of a JSON string with embedded apostrophe). Fix uses a single-quoted
+	// heredoc instead of escape-laden echo. These tests guard against ever
+	// shipping a syntactically broken hook script again — they invoke bash -n
+	// and run the script with mock input via execFileSync (no shell pipe).
+	const writeScript = async (content: string) => {
+		const fs = await import('node:fs');
+		const os = await import('node:os');
+		const path = await import('node:path');
+		const tmp = path.join(os.tmpdir(), `ace-gate-${Date.now()}-${Math.random().toString(36).slice(2)}.sh`);
+		fs.writeFileSync(tmp, content, { mode: 0o755 });
+		return { tmp, fs };
+	};
+
+	it('bash -n parses the gate script with no syntax errors', async () => {
+		const { execFileSync } = await import('node:child_process');
+		const script = getPreToolUseScriptContent();
+		const { tmp, fs } = await writeScript(script);
+		try {
+			// bash -n: parse only, no execute. Throws on syntax error.
+			execFileSync('bash', ['-n', tmp], { stdio: 'pipe' });
+		} finally {
+			fs.unlinkSync(tmp);
+		}
+	});
+
+	it('emits valid JSON on the deny path (no flag file)', async () => {
+		const { execFileSync } = await import('node:child_process');
+		const script = getPreToolUseScriptContent();
+		const { tmp, fs } = await writeScript(script);
+		try {
+			const out = execFileSync('bash', [tmp], {
+				input: '{"tool_name":"Grep","conversation_id":"c1","generation_id":"g1"}',
+				encoding: 'utf-8',
+			});
+			const parsed = JSON.parse(out.trim());
+			expect(parsed.permission).toBe('deny');
+			expect(typeof parsed.agent_message).toBe('string');
+			expect(parsed.agent_message.length).toBeGreaterThan(20);
+			expect(parsed.agent_message).toMatch(/query/);
+		} finally {
+			fs.unlinkSync(tmp);
+		}
+	});
+
+	it('emits valid JSON on the allow path (MCP:ace_search)', async () => {
+		const { execFileSync } = await import('node:child_process');
+		const script = getPreToolUseScriptContent();
+		const { tmp, fs } = await writeScript(script);
+		try {
+			const out = execFileSync('bash', [tmp], {
+				input: '{"tool_name":"MCP:ace_search","conversation_id":"c1","generation_id":"g1"}',
+				encoding: 'utf-8',
+			});
+			const parsed = JSON.parse(out.trim());
+			expect(parsed.permission).toBe('allow');
+		} finally {
+			fs.unlinkSync(tmp);
+		}
+	});
+});

@@ -315,8 +315,12 @@ if [ -f "$flag_file" ]; then
   exit 0
 fi
 
-# No flag — deny and instruct AI to call ace_search first
-echo '{"permission":"deny","agent_message":"You must call ace_search FIRST for every user prompt before any other tool. Required call shape: ace_search with named argument query=\"<user'\\\\''s most recent message text or its core intent>\" (a non-empty string). Do not call ace_search without arguments — query is required. After ace_search returns, retry your original tool call."}'
+# No flag — deny and instruct AI to call ace_search first.
+# Heredoc with single-quoted delimiter: no expansion, no escape gymnastics.
+# JSON body stays a single line so the deny payload is one self-contained record.
+cat <<'ACE_DENY_EOF'
+{"permission":"deny","agent_message":"You must call ace_search FIRST for every user prompt before any other tool. Required call shape: ace_search with named argument query=\\"<user message text or core intent>\\" (non-empty string). Do not call ace_search without arguments. After ace_search returns, retry your original tool call."}
+ACE_DENY_EOF
 `;
 }
 
