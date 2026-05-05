@@ -7,6 +7,12 @@ on:
     tags:
       - 'v*'
 
+# Silence Node.js 20 deprecation from action runners until action authors
+# ship Node 24-native versions. Affects how the actions themselves run, not
+# our project's Node runtime (set below to Node 22 LTS).
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -17,21 +23,23 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Build
-        run: npm run build
+      - name: Build (production bundle via esbuild)
+        run: npm run build:prod
 
       - name: Run tests
         run: xvfb-run -a npm test
 
-      - name: Package
-        run: npx vsce package
-
+      # No separate vsce package step — the publish action below packages
+      # internally honoring .vscodeignore. dependencies:false tells vsce NOT
+      # to walk the dependency tree (esbuild already bundled everything into
+      # dist/extension.js; node_modules is excluded by .vscodeignore).
       - name: Publish to Open VSX
         uses: HaaLeo/publish-vscode-extension@v2
         with:
           pat: ${{ secrets.OPEN_VSX_TOKEN }}
+          dependencies: false
