@@ -5,6 +5,11 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.75] - 2026-05-05
+
+### Added
+- **Auto-cleanup of older extension install dirs** — Cursor leaves `~/.cursor/extensions/<publisher>.<name>-<old-version>-universal/` dirs around when newer versions install. The extension now scans its install-dir parent 5s after activation and removes same-publisher dirs with strictly-older versions. Defensive: skips the current dir, skips newer versions (never downgrade-cleans), tolerates per-dir failures.
+
 ## [0.2.74] - 2026-05-05
 
 ### Changed
