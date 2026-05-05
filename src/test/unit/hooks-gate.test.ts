@@ -156,3 +156,60 @@ describe('ace_pre_tool_use.ps1 content (Windows)', () => {
 		expect(getPreToolUsePsScriptContent()).toContain('search-done');
 	});
 });
+
+describe('rule call examples — named args only (MCP spec compliance)', () => {
+	const allRules = () => [
+		getAcePatternsRuleContent(),
+		getDomainSearchRuleContent(),
+		getContinuousSearchRuleContent(),
+	].join('\n\n=====\n\n');
+
+	it('no ace_search call uses positional args (first arg without name=)', () => {
+		// Positional pattern: ace_search("...", ...) or ace_search('...', ...)
+		// Bad:  ace_search("testing patterns", allowed_domains=[...])
+		// Good: ace_search(query="testing patterns", allowed_domains=[...])
+		const rules = allRules();
+		const positional = rules.match(/ace_search\(\s*['"]/g);
+		expect(positional, `found positional ace_search: ${positional?.join(', ')}`).toBeNull();
+	});
+
+	it('no ace_learn call uses positional args', () => {
+		const rules = allRules();
+		const positional = rules.match(/ace_learn\(\s*['"]/g);
+		expect(positional).toBeNull();
+	});
+
+	it('no ace_list_domains, ace_get_playbook, ace_top_patterns positional calls', () => {
+		const rules = allRules();
+		expect(rules.match(/ace_list_domains\(\s*['"]/g)).toBeNull();
+		expect(rules.match(/ace_get_playbook\(\s*['"]/g)).toBeNull();
+		expect(rules.match(/ace_top_patterns\(\s*['"]/g)).toBeNull();
+	});
+
+	it('every ace_search example with arguments uses query=', () => {
+		const rules = allRules();
+		// Find every ace_search( ... ) — the opening paren must be followed by
+		// either ) (no-args, which we forbid in another test if applicable) OR
+		// must contain query=
+		const calls = rules.matchAll(/ace_search\(([^)]*)\)/g);
+		for (const m of calls) {
+			const argstr = m[1].trim();
+			if (argstr === '') continue; // bare ace_search() — different concern
+			expect(argstr, `ace_search call without query=: ${m[0]}`).toMatch(/query\s*=/);
+		}
+	});
+});
+
+describe('pre_tool_use gate agent_message — must instruct named args', () => {
+	it('mentions the query parameter name explicitly', () => {
+		const script = getPreToolUseScriptContent();
+		// agent_message text must reference `query` as the argument name
+		expect(script).toMatch(/query/);
+	});
+
+	it('warns against calling ace_search with no arguments', () => {
+		const script = getPreToolUseScriptContent();
+		// Must include guidance like "non-empty query" or "do not call without arguments"
+		expect(script).toMatch(/non-empty|never call.*without|do not call.*without|do not invoke.*without/i);
+	});
+});
