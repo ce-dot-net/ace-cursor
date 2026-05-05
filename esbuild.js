@@ -8,8 +8,11 @@ const commonOptions = {
   external: [
     'vscode',         // provided by the VS Code runtime — must stay external
     'better-sqlite3', // native Node addon (.node binary) — cannot be bundled
-    // linguist-js + skott previously externalized due to dynamic requires;
-    // now bundled to keep node_modules in the VSIX minimal (better-sqlite3 only).
+    // linguist-js + skott use __dirname / dynamic path resolution that breaks
+    // when bundled (TypeError: 'filename' must be ... Received undefined at
+    // runtime). Keep external; .vscodeignore whitelists them in node_modules.
+    'linguist-js',
+    'skott',
   ],
   format: 'cjs',
   platform: 'node',

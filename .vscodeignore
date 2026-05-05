@@ -31,6 +31,43 @@ test/**
 node_modules/**
 !node_modules/better-sqlite3/**
 !node_modules/bindings/**
+!node_modules/linguist-js/**
+!node_modules/skott/**
+
+# Re-include transitive deps that linguist-js + skott require at runtime.
+# Listed individually instead of `!node_modules/**` because we DO want
+# blanket dev-deps exclude.
+!node_modules/binary-extensions/**
+!node_modules/common-path-prefix/**
+!node_modules/cross-fetch/**
+!node_modules/ignore/**
+!node_modules/isbinaryfile/**
+!node_modules/js-yaml/**
+!node_modules/node-cache/**
+!node_modules/@parcel/**
+!node_modules/@typescript-eslint/**
+!node_modules/commander/**
+!node_modules/compression/**
+!node_modules/depcheck/**
+!node_modules/digraph-js/**
+!node_modules/effect/**
+!node_modules/estree-walker/**
+!node_modules/fp-ts/**
+!node_modules/ignore-walk/**
+!node_modules/io-ts/**
+!node_modules/is-wsl/**
+!node_modules/json5/**
+!node_modules/kleur/**
+!node_modules/lodash-es/**
+!node_modules/meriyah/**
+!node_modules/minimatch/**
+!node_modules/nanospinner/**
+!node_modules/parse-gitignore/**
+!node_modules/polka/**
+!node_modules/sirv/**
+!node_modules/typescript/**
+!node_modules/fs-tree-structure/**
+!node_modules/skott-webapp/**
 
 # Inside better-sqlite3, exclude install-time / source / docs to shave
 # ~9 MB of unnecessary C source. The .node binary stays.

@@ -5,6 +5,12 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.85] - 2026-05-05
+
+### Fixed
+- **v0.2.84 broke activation again** — `linguist-js` and `skott` use `__dirname` and dynamic path resolution that bombs at runtime when bundled by esbuild (`TypeError: 'filename' must be a file URL object, file URL string, or absolute path string. Received undefined.`). Restored both as external in esbuild.js and added their full transitive trees to the `.vscodeignore` whitelist (binary-extensions, ignore, isbinaryfile, js-yaml, etc — see file).
+- **VSIX:** 18.85 MB / 5464 files. Bigger than v0.2.84's broken-but-tiny 6.84 MB, but now actually loads.
+
 ## [0.2.84] - 2026-05-05
 
 ### Fixed
