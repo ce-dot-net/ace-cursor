@@ -276,3 +276,31 @@ describe('pre_tool_use script — bash syntax + runtime regression guards', () =
 		}
 	});
 });
+
+describe('hook scripts — Cursor canonical permission schema (no Claude-Code "decision" key)', () => {
+	const readExt = async () => {
+		const fs = await import('node:fs');
+		const path = await import('node:path');
+		return fs.readFileSync(path.resolve(__dirname, '../../extension.ts'), 'utf-8');
+	};
+
+	it('no hook script in extension.ts emits {"decision":"allow"} (Claude Code legacy format)', async () => {
+		const src = await readExt();
+		// Pattern: literal "decision":"allow" or "decision": "allow" anywhere.
+		// This catches both bash echo single-quoted and JS-template escaped variants.
+		const matches = src.match(/"decision"\s*:\s*"allow"/g);
+		expect(matches, `found ${matches?.length} legacy decision-format strings`).toBeNull();
+	});
+
+	it('no hook script in extension.ts emits {"decision":"deny"}', async () => {
+		const src = await readExt();
+		expect(src.match(/"decision"\s*:\s*"deny"/g)).toBeNull();
+	});
+
+	it('blocking hooks use {"permission":"allow"} canonical format', async () => {
+		const src = await readExt();
+		// At least 5 occurrences (the 5 blocking bash hooks) plus their PS1 twins
+		const matches = src.match(/"permission"\s*:\s*"allow"/g);
+		expect(matches?.length ?? 0, 'expected ≥5 permission:"allow" sites in extension.ts').toBeGreaterThanOrEqual(5);
+	});
+});

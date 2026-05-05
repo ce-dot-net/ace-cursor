@@ -1198,7 +1198,7 @@ $promptPreview = if ($data.prompt) { $data.prompt.Substring(0, [Math]::Min(200, 
 $entry = @{event="subagent_start"; type=$subagentType; model=$model; prompt_preview=$promptPreview; timestamp=(Get-Date -Format "o")} | ConvertTo-Json -Compress
 $entry | Out-File -Append -FilePath "$aceDir\\mcp_trajectory.jsonl" -Encoding utf8
 
-Write-Output "{\`"decision\`": \`"allow\`"}"
+Write-Output '{"permission":"allow"}'
 `;
 	if (forceUpdate || !fs.existsSync(subagentStartPath)) {
 		writeFileAtomic(subagentStartPath, subagentStartScript);
@@ -1462,7 +1462,7 @@ $command = if ($input.command) { $input.command } else { "" }
 $entry = @{event="before_shell"; command=$command; timestamp=(Get-Date -Format "o")} | ConvertTo-Json -Compress
 $entry | Out-File -FilePath "$aceDir\\shell_trajectory.jsonl" -Encoding utf8 -Append
 
-Write-Output '{"decision": "allow"}'
+Write-Output '{"permission":"allow"}'
 `;
 	if (forceUpdate || !fs.existsSync(beforeShellPath)) {
 		writeFileAtomic(beforeShellPath, beforeShellScript);
@@ -1488,7 +1488,7 @@ $toolInput = if ($input.tool_input) { ($input.tool_input | ConvertTo-Json -Compr
 $entry = @{event="before_mcp"; tool_name=$toolName; tool_input=$toolInput; timestamp=(Get-Date -Format "o")} | ConvertTo-Json -Compress
 $entry | Out-File -FilePath "$aceDir\\mcp_trajectory.jsonl" -Encoding utf8 -Append
 
-Write-Output '{"decision": "allow"}'
+Write-Output '{"permission":"allow"}'
 `;
 	if (forceUpdate || !fs.existsSync(beforeMcpPath)) {
 		writeFileAtomic(beforeMcpPath, beforeMcpScript);
@@ -1498,7 +1498,7 @@ Write-Output '{"decision": "allow"}'
 	// Before Read File Gate (minimal - fires frequently)
 	const beforeReadFilePath = path.join(scriptsDir, 'ace_before_read_file.ps1');
 	const beforeReadFileScript = `# ACE Before Read File Hook - Minimal gate (fires frequently)
-Write-Output '{"decision": "allow"}'
+Write-Output '{"permission":"allow"}'
 `;
 	if (forceUpdate || !fs.existsSync(beforeReadFilePath)) {
 		writeFileAtomic(beforeReadFilePath, beforeReadFileScript);
@@ -1572,7 +1572,7 @@ Write-Output '{}'
 	// Before Tab File Read (minimal - fires very frequently)
 	const beforeTabFileReadPath = path.join(scriptsDir, 'ace_before_tab_file_read.ps1');
 	const beforeTabFileReadScript = `# ACE Before Tab File Read Hook - Minimal gate (fires very frequently)
-Write-Output '{"decision": "allow"}'
+Write-Output '{"permission":"allow"}'
 `;
 	if (forceUpdate || !fs.existsSync(beforeTabFileReadPath)) {
 		writeFileAtomic(beforeTabFileReadPath, beforeTabFileReadScript);
@@ -1781,7 +1781,7 @@ prompt_preview=$(echo "$input" | jq -r '.prompt // ""' | head -c 200)
 echo "{\\"event\\": \\"subagent_start\\", \\"type\\": \\"$subagent_type\\", \\"model\\": \\"$model\\", \\"prompt_preview\\": \\"$prompt_preview\\", \\"timestamp\\": \\"$(date -Iseconds)\\"}" >> "$ace_dir/mcp_trajectory.jsonl"
 
 # Allow all subagents (no blocking)
-echo "{\\"decision\\": \\"allow\\"}"
+echo '{"permission":"allow"}'
 `;
 	if (forceUpdate || !fs.existsSync(subagentStartPath)) {
 		writeFileAtomic(subagentStartPath, subagentStartScript, { mode: 0o755 });
@@ -2000,7 +2000,7 @@ command=$(echo "$input" | jq -r '.command // ""')
 
 echo "{\\"event\\": \\"before_shell\\", \\"command\\": \\"$command\\", \\"timestamp\\": \\"$(date -Iseconds)\\"}" >> "$ace_dir/shell_trajectory.jsonl"
 
-echo '{"decision": "allow"}'
+echo '{"permission":"allow"}'
 `;
 	if (forceUpdate || !fs.existsSync(beforeShellPath)) {
 		writeFileAtomic(beforeShellPath, beforeShellScript, { mode: 0o755 });
@@ -2022,7 +2022,7 @@ tool_input=$(echo "$input" | jq -r '.tool_input // "{}"' | head -c 500)
 
 echo "{\\"event\\": \\"before_mcp\\", \\"tool_name\\": \\"$tool_name\\", \\"tool_input\\": \\"$tool_input\\", \\"timestamp\\": \\"$(date -Iseconds)\\"}" >> "$ace_dir/mcp_trajectory.jsonl"
 
-echo '{"decision": "allow"}'
+echo '{"permission":"allow"}'
 `;
 	if (forceUpdate || !fs.existsSync(beforeMcpPath)) {
 		writeFileAtomic(beforeMcpPath, beforeMcpScript, { mode: 0o755 });
@@ -2033,7 +2033,7 @@ echo '{"decision": "allow"}'
 	const beforeReadFilePath = path.join(scriptsDir, 'ace_before_read_file.sh');
 	const beforeReadFileScript = `#!/bin/bash
 # ACE Before Read File Hook - Minimal gate (fires frequently)
-echo '{"decision": "allow"}'
+echo '{"permission":"allow"}'
 `;
 	if (forceUpdate || !fs.existsSync(beforeReadFilePath)) {
 		writeFileAtomic(beforeReadFilePath, beforeReadFileScript, { mode: 0o755 });
@@ -2095,7 +2095,7 @@ echo '{}'
 	const beforeTabFileReadPath = path.join(scriptsDir, 'ace_before_tab_file_read.sh');
 	const beforeTabFileReadScript = `#!/bin/bash
 # ACE Before Tab File Read Hook - Minimal gate (fires very frequently)
-echo '{"decision": "allow"}'
+echo '{"permission":"allow"}'
 `;
 	if (forceUpdate || !fs.existsSync(beforeTabFileReadPath)) {
 		writeFileAtomic(beforeTabFileReadPath, beforeTabFileReadScript, { mode: 0o755 });
