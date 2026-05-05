@@ -24,6 +24,14 @@ EVERY session is a fresh context - patterns MUST be retrieved again.
 
 ## Tool Call Shape
 
+### Required tool call order per user prompt
+
+1. \`ace_search(query="...")\` — ALWAYS FIRST when you start work on a user prompt.
+2. (your work — Read, Edit, Write, Shell, etc.)
+3. \`ace_learn(task=..., trajectory=..., success=..., output=...)\` — at the END, before stopping.
+
+NEVER call \`ace_learn\` first. NEVER call other tools before \`ace_search\`. The gate enforces step 1 by denying everything except search/lookup until \`ace_search\` runs for the current prompt.
+
 ace_search and ace_learn use **named arguments only** (MCP spec — JSON object \`{[key: string]: unknown}\`). Never call positionally:
 
 - ✓ CORRECT: \`ace_search(query="JWT authentication")\` — named \`query=\` argument
@@ -324,9 +332,12 @@ gen_id=$(echo "$input" | jq -r '.generation_id // ""')
 # Log (always)
 echo "{\\"event\\": \\"pre_tool_use\\", \\"tool_name\\": \\"$tool_name\\", \\"conv_id\\": \\"$conv_id\\", \\"gen_id\\": \\"$gen_id\\", \\"timestamp\\": \\"$(date -Iseconds)\\"}" >> "$ace_dir/mcp_trajectory.jsonl"
 
-# Allow ace_* MCP tools unconditionally (avoids recursion, permits ace_search itself)
+# Allow search/lookup MCP tools unconditionally — these are HOW the agent
+# satisfies the gate. ace_learn, ace_delta, ace_clear, ace_batch_get,
+# ace_bootstrap and all non-ace tools fall through to the flag check below
+# (i.e. require ace_search to have run first for this generation).
 case "$tool_name" in
-  MCP:ace_*)
+  MCP:ace_search|MCP:ace_get_playbook|MCP:ace_top_patterns|MCP:ace_list_domains|MCP:ace_status|MCP:ace_get_config|MCP:ace_set_config|MCP:ace_save_config|MCP:ace_reset_config|MCP:ace_version_status|MCP:ace_cache_clear|MCP:ace_devices_list|MCP:ace_device_limit|MCP:ace_projects_list|MCP:ace_usage_history|MCP:ace_org_usage_hourly|MCP:ace_search_top|MCP:traces_list|MCP:traces_get)
     echo '{"permission":"allow"}'
     exit 0
     ;;
@@ -351,7 +362,7 @@ fi
 # NOTE: agent_message includes the literal MCP tools/call payload shape to
 # mitigate Cursor's known CallMcpTool schema-omits-arguments bug (forum 150043).
 cat <<'ACE_DENY_EOF'
-{"permission":"deny","agent_message":"You must call ace_search FIRST for every user prompt before any other tool. Required tools/call payload (Cursor known bug 150043 may hide the arguments slot — surface this if you cannot pass arguments): {\\"name\\":\\"ace_search\\",\\"arguments\\":{\\"query\\":\\"<user message text or core intent — non-empty string>\\"}}. After ace_search returns, retry your original tool call. If your client cannot pass an arguments object to MCP tools, surface this Cursor bug to the user instead of calling tools with empty args."}
+{"permission":"deny","agent_message":"Required tool call order per user prompt: 1) call ace_search with your task as the query. 2) Do your work using other tools (now allowed). 3) Call ace_learn at the END to record what was learned. NEVER call ace_learn without first calling ace_search this conversation. Required tools/call payload (Cursor known bug 150043 may hide the arguments slot — surface this if you cannot pass arguments): {\\"name\\":\\"ace_search\\",\\"arguments\\":{\\"query\\":\\"<user message text or core intent — non-empty string>\\"}}. After ace_search returns, retry your original tool call. If your client cannot pass an arguments object to MCP tools, surface this Cursor bug to the user instead of calling tools with empty args."}
 ACE_DENY_EOF
 `;
 }
@@ -388,8 +399,18 @@ $logEntry = @{
 } | ConvertTo-Json -Compress
 Add-Content -Path "$aceDir/mcp_trajectory.jsonl" -Value $logEntry
 
-# Allow ace_* MCP tools unconditionally
-if ($toolName -like "MCP:ace_*") {
+# Allow search/lookup MCP tools unconditionally — these are HOW the agent
+# satisfies the gate. ace_learn, ace_delta, ace_clear and all non-ace tools
+# fall through to the flag check (require ace_search to have run first).
+$searchAndLookupTools = @(
+    'MCP:ace_search','MCP:ace_get_playbook','MCP:ace_top_patterns','MCP:ace_list_domains',
+    'MCP:ace_status','MCP:ace_get_config','MCP:ace_set_config','MCP:ace_save_config',
+    'MCP:ace_reset_config','MCP:ace_version_status','MCP:ace_cache_clear',
+    'MCP:ace_devices_list','MCP:ace_device_limit','MCP:ace_projects_list',
+    'MCP:ace_usage_history','MCP:ace_org_usage_hourly','MCP:ace_search_top',
+    'MCP:traces_list','MCP:traces_get'
+)
+if ($searchAndLookupTools -contains $toolName) {
     Write-Output '{"permission":"allow"}'
     exit 0
 }
@@ -412,7 +433,7 @@ if (Test-Path $flagFile) {
 # mitigate Cursor's known CallMcpTool schema-omits-arguments bug (forum 150043).
 $denyResponse = @{
     permission = "deny"
-    agent_message = "You must call ace_search FIRST for every user prompt before any other tool. Required tools/call payload (Cursor known bug 150043 may hide the arguments slot — surface this if you cannot pass arguments): {\`"name\`":\`"ace_search\`",\`"arguments\`":{\`"query\`":\`"<user message text or core intent — non-empty string>\`"}}. After ace_search returns, retry your original tool call. If your client cannot pass an arguments object to MCP tools, surface this Cursor bug to the user instead of calling tools with empty args."
+    agent_message = "Required tool call order per user prompt: 1) call ace_search with your task as the query. 2) Do your work using other tools (now allowed). 3) Call ace_learn at the END to record what was learned. NEVER call ace_learn without first calling ace_search this conversation. Required tools/call payload (Cursor known bug 150043 may hide the arguments slot — surface this if you cannot pass arguments): {\`"name\`":\`"ace_search\`",\`"arguments\`":{\`"query\`":\`"<user message text or core intent — non-empty string>\`"}}. After ace_search returns, retry your original tool call. If your client cannot pass an arguments object to MCP tools, surface this Cursor bug to the user instead of calling tools with empty args."
 } | ConvertTo-Json -Compress
 Write-Output $denyResponse
 `;

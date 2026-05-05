@@ -339,3 +339,69 @@ describe('Cursor CallMcpTool bug mitigation (v0.2.79)', () => {
 		expect(script).toMatch(/tool_input.*empty|is_empty/);
 	});
 });
+
+describe('gate enforcement — search-only allow-list (v0.2.80)', () => {
+	const writeScript = async (content: string) => {
+		const fs = await import('node:fs');
+		const os = await import('node:os');
+		const path = await import('node:path');
+		const tmp = path.join(os.tmpdir(), `ace-gate-v80-${Date.now()}-${Math.random().toString(36).slice(2)}.sh`);
+		fs.writeFileSync(tmp, content, { mode: 0o755 });
+		return { tmp, fs };
+	};
+
+	const runGate = async (toolName: string, withFlag = false) => {
+		const { execFileSync } = await import('node:child_process');
+		const fs = await import('node:fs');
+		const os = await import('node:os');
+		const path = await import('node:path');
+		const script = getPreToolUseScriptContent();
+		const { tmp, fs: fsMod } = await writeScript(script);
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-gate-cwd-'));
+		try {
+			if (withFlag) {
+				const flagDir = path.join(cwd, '.cursor', 'ace', 'sessions', 'c1');
+				fs.mkdirSync(flagDir, { recursive: true });
+				fs.writeFileSync(path.join(flagDir, 'g1.search-done'), '');
+			}
+			const out = execFileSync('bash', [tmp], {
+				input: JSON.stringify({ tool_name: toolName, conversation_id: 'c1', generation_id: 'g1' }),
+				encoding: 'utf-8',
+				cwd,
+			});
+			return JSON.parse(out.trim());
+		} finally {
+			fsMod.unlinkSync(tmp);
+			fs.rmSync(cwd, { recursive: true, force: true });
+		}
+	};
+
+	it('DENIES MCP:ace_learn when no search has happened (key bug fix)', async () => {
+		const r = await runGate('MCP:ace_learn', false);
+		expect(r.permission).toBe('deny');
+	});
+
+	it('ALLOWS MCP:ace_learn after ace_search has set the flag', async () => {
+		const r = await runGate('MCP:ace_learn', true);
+		expect(r.permission).toBe('allow');
+	});
+
+	it('ALLOWS MCP:ace_search unconditionally (search is gate-satisfaction tool)', async () => {
+		const r = await runGate('MCP:ace_search', false);
+		expect(r.permission).toBe('allow');
+	});
+
+	it('ALLOWS lookup tools unconditionally', async () => {
+		for (const t of ['MCP:ace_get_playbook', 'MCP:ace_top_patterns', 'MCP:ace_list_domains', 'MCP:ace_status']) {
+			const r = await runGate(t, false);
+			expect(r.permission, `expected allow for ${t}`).toBe('allow');
+		}
+	});
+
+	it('DENIES MCP:ace_delta and MCP:ace_clear without flag (mutation tools)', async () => {
+		for (const t of ['MCP:ace_delta', 'MCP:ace_clear']) {
+			const r = await runGate(t, false);
+			expect(r.permission, `expected deny for ${t}`).toBe('deny');
+		}
+	});
+});
