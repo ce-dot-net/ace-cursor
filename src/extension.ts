@@ -1349,10 +1349,14 @@ function createWindowsHookScripts(scriptsDir: string, forceUpdate: boolean = fal
 	// v0.4.1: TRUSTED extension install dir for helper.js path baking.
 	const aceExtDir = extensionContext ? extensionContext.extensionPath : '';
 	// MCP Execution Tracking (PostToolUse equivalent)
+	// v0.5.1 — per-conversation trajectory rotation. Mirrors bash counterpart
+	// in getMcpTrackScriptContent(): writes go to .cursor/ace/tasks/<conv_id>/
+	// mcp_trajectory.jsonl when conversation_id is present, else fall back to
+	// top-level path. Prior versions appended unbounded to the top-level file.
 	const mcpTrackPath = path.join(scriptsDir, 'ace_track_mcp.ps1');
 	const mcpTrackScript = `# ACE MCP Tracking Hook - Captures tool executions for AI-Trail
 # Also detects ace_learn calls and extracts task helpfulness (TIME_SAVED)
-# Input: tool_name, tool_input, result_json, duration
+# Input: tool_name, tool_input, result_json, duration, conversation_id
 
 $inputJson = [Console]::In.ReadToEnd()
 
@@ -1361,17 +1365,28 @@ if (-not (Test-Path $aceDir)) {
     New-Item -ItemType Directory -Path $aceDir -Force | Out-Null
 }
 
-# Always log to trajectory
-$inputJson | Out-File -Append -FilePath "$aceDir\\mcp_trajectory.jsonl" -Encoding utf8
-
-# Detect ace_learn call — extract helpfulness from tool_input.output
+# Parse input early so we can use conversation_id for per-conv routing.
 try {
     $data = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
     $toolName = if ($data.tool_name) { $data.tool_name } else { "" }
+    $convIdForTraj = if ($data.conversation_id) { $data.conversation_id } elseif ($data.conv_id) { $data.conv_id } else { "" }
 } catch {
     $toolName = ""
+    $convIdForTraj = ""
 }
 
+# v0.5.1 per-conv trajectory rotation. Mirror bash ace_track_mcp.sh logic.
+if ($convIdForTraj -and $convIdForTraj -ne "null") {
+    $perConvDir = "$aceDir\\tasks\\$convIdForTraj"
+    if (-not (Test-Path $perConvDir)) {
+        New-Item -ItemType Directory -Path $perConvDir -Force | Out-Null
+    }
+    $inputJson | Out-File -Append -FilePath "$perConvDir\\mcp_trajectory.jsonl" -Encoding utf8
+} else {
+    $inputJson | Out-File -Append -FilePath "$aceDir\\mcp_trajectory.jsonl" -Encoding utf8
+}
+
+# Detect ace_learn call — extract helpfulness from tool_input.output
 if ($toolName -match "ace_learn") {
     try {
         # tool_input may be string or object
@@ -1414,45 +1429,15 @@ if ($toolName -match "ace_learn") {
     }
 }
 `;
-	// Always update to get ace_learn helpfulness detection
+	// Always update to get ace_learn helpfulness detection + per-conv routing.
 	writeFileAtomic(mcpTrackPath, mcpTrackScript);
-	console.log(`[ACE] Updated ace_track_mcp.ps1 with ace_learn helpfulness detection`);
+	console.log(`[ACE] Updated ace_track_mcp.ps1 (v0.5.1 — per-conv tasks/<conv_id>/ rotation)`);
 
-	// Shell Execution Tracking
-	const shellTrackPath = path.join(scriptsDir, 'ace_track_shell.ps1');
-	const shellTrackScript = `# ACE Shell Tracking Hook - Captures terminal commands for AI-Trail
-# Input: command, output, duration
-
-$aceDir = ".cursor\\ace"
-if (-not (Test-Path $aceDir)) {
-    New-Item -ItemType Directory -Path $aceDir -Force | Out-Null
-}
-
-$input | Out-File -Append -FilePath "$aceDir\\shell_trajectory.jsonl" -Encoding utf8
-`;
-	if (forceUpdate || !fs.existsSync(shellTrackPath)) {
-		writeFileAtomic(shellTrackPath, shellTrackScript);
-		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_track_shell.ps1`);
-	}
-
-	// Agent Response Tracking
-	const responseTrackPath = path.join(scriptsDir, 'ace_track_response.ps1');
-	const responseTrackScript = `# ACE Response Tracking Hook - Captures agent responses for AI-Trail
-# Input: text (assistant final text)
-
-$inputJson = [Console]::In.ReadToEnd()
-
-$aceDir = ".cursor\\ace"
-if (-not (Test-Path $aceDir)) {
-    New-Item -ItemType Directory -Path $aceDir -Force | Out-Null
-}
-
-# Log response to trajectory
-$inputJson | Out-File -Append -FilePath "$aceDir\\response_trajectory.jsonl" -Encoding utf8
-`;
-	// Always update response tracking
-	writeFileAtomic(responseTrackPath, responseTrackScript);
-	console.log('[ACE] Updated ace_track_response.ps1');
+	// v0.5.1 — orphan PS1 generators removed for parity with bash side
+	// (dev.20 Task B). The afterShellExecution / afterAgentResponse hooks were
+	// unhooked from hooks.json in dev.14; the ace_track_edit.ps1 / .sh scripts
+	// were superseded by ace_domain_shift on afterFileEdit. Old PS1 files are
+	// deleted on activation by cleanupOrphanScripts() in workspaceCleanup.ts.
 
 	// Session Start Hook - Injects pattern context into new conversations
 	const sessionStartPath = path.join(scriptsDir, 'ace_session_start.ps1');
@@ -1645,84 +1630,9 @@ exit 0
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_subagent_stop.ps1`);
 	}
 
-	// File Edit Tracking with Domain Detection
-	const editTrackPath = path.join(scriptsDir, 'ace_track_edit.ps1');
-	const editTrackScript = `# ACE Edit Tracking Hook - Captures file edits with domain detection
-# Input: file_path, edits[]
-# Writes domain state to temp file for MCP Resources (Issue #3 fix)
-
-$aceDir = ".cursor\\ace"
-if (-not (Test-Path $aceDir)) {
-    New-Item -ItemType Directory -Path $aceDir -Force | Out-Null
-}
-
-$inputJson = [Console]::In.ReadToEnd()
-$inputJson | Out-File -Append -FilePath "$aceDir\\edit_trajectory.jsonl" -Encoding utf8
-
-# Domain detection function
-function Detect-Domain {
-    param([string]$FilePath)
-    switch -Regex ($FilePath) {
-        '(auth|login|session|jwt)' { return 'auth' }
-        '(api|routes|endpoint|controller)' { return 'api' }
-        '(cache|redis|memo)' { return 'cache' }
-        '(db|migration|model|schema)' { return 'database' }
-        '(component|ui|view|\\.tsx|\\.jsx)' { return 'ui' }
-        '(test|spec|mock)' { return 'test' }
-        default { return 'general' }
-    }
-}
-
-# Extract file path and detect domain
-try {
-    $data = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
-    $filePath = $data.file_path
-    if (-not $filePath) { $filePath = $data.path }
-
-    if ($filePath) {
-        $currentDomain = Detect-Domain -FilePath $filePath
-        $lastDomainFile = "$aceDir\\last_domain.txt"
-        $lastDomain = if (Test-Path $lastDomainFile) { Get-Content $lastDomainFile } else { "" }
-
-        if ($currentDomain -ne $lastDomain -and $lastDomain) {
-            $shift = @{
-                from = $lastDomain
-                to = $currentDomain
-                file = $filePath
-                timestamp = (Get-Date -Format "o")
-            } | ConvertTo-Json -Compress
-            $shift | Out-File -Append -FilePath "$aceDir\\domain_shifts.log" -Encoding utf8
-        }
-
-        $currentDomain | Out-File -FilePath $lastDomainFile -Encoding utf8
-
-        # Write domain state to temp file for MCP Resources
-        # MCP server reads this to expose ace://domain/current resource
-        $settingsPath = "$aceDir\\settings.json"
-        $projectId = "default"
-        if (Test-Path $settingsPath) {
-            try {
-                $settings = Get-Content $settingsPath | ConvertFrom-Json
-                if ($settings.projectId) { $projectId = $settings.projectId }
-            } catch {}
-        }
-        $md5 = [System.Security.Cryptography.MD5]::Create()
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes($projectId)
-        $hash = [BitConverter]::ToString($md5.ComputeHash($bytes)).Replace("-","").Substring(0,8).ToLower()
-        $tempFile = "$env:TEMP\\ace-domain-$hash.json"
-        @{
-            domain = $currentDomain
-            file = $filePath
-            timestamp = (Get-Date -Format "o")
-        } | ConvertTo-Json | Out-File -FilePath $tempFile -Encoding utf8
-    }
-} catch {
-    # Silently continue on parse errors
-}
-`;
-	// Always update to get domain detection
-	writeFileAtomic(editTrackPath, editTrackScript);
-	console.log('[ACE] Updated ace_track_edit.ps1 with MCP temp file');
+	// v0.5.1 — ace_track_edit.ps1 generator removed. The afterFileEdit hook now
+	// uses ace_domain_shift (PS variant pending; bash version exists). The old
+	// PS1 file is removed from disk by cleanupOrphanScripts() on activation.
 
 	// Stop Hook with Git Context Aggregation
 	const stopHookPath = path.join(scriptsDir, 'ace_stop_hook.ps1');

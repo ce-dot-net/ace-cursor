@@ -7,21 +7,15 @@ on:
     tags:
       - 'v*'
 
-# Silence Node.js 20 deprecation from action runners until action authors
-# ship Node 24-native versions. Affects how the actions themselves run, not
-# our project's Node runtime (set below to Node 22 LTS).
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
-
 jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '22'
 

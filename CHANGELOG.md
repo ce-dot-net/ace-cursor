@@ -5,6 +5,25 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-05-10
+
+Maintenance release: dependency security, CI modernization, and Windows hook-script parity.
+
+### Security
+- **Dependencies bumped via `npm audit fix`** — resolves 10 of 12 known CVEs in transitive build/test deps:
+  - `minimatch` (3 high-severity ReDoS advisories), `flatted` (2 high — prototype pollution + DoS), `picomatch` (2 high — method injection + ReDoS), `rollup` (high — path-traversal arbitrary file write), `ajv`, `brace-expansion`, `diff`, `postcss`, `qs`.
+  - Two `serialize-javascript` advisories remain — pulled in only by `mocha@10` (devDependency, used by the VSCode integration test runner). They do not ship to users in the VSIX. `mocha@7` would resolve them but is a breaking downgrade we are not willing to take.
+
+### CI
+- **GitHub Actions modernized to Node 24-native runners.** `actions/checkout@v4 → @v6`, `actions/setup-node@v4 → @v6`. Removed the `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` workaround now that v6 actions run on Node 24 natively. No more "Node.js 20 deprecated" warnings on every release.
+
+### Fixed
+- **Windows hook-script parity (per-task trajectory).** `ace_track_mcp.ps1` now writes to `.cursor/ace/tasks/<conversation_id>/mcp_trajectory.jsonl` when the input includes a `conversation_id`, falling back to the top-level file otherwise — matching the bash counterpart fixed in v0.5.0-dev.19/20. Previously, every Cursor chat tab on Windows shared one growing trajectory file.
+- **Orphan PowerShell scripts cleaned up on activation.** `ace_track_edit.ps1`, `ace_track_response.ps1`, and `ace_track_shell.ps1` were generators for hooks that were unhooked from `hooks.json` back in dev.14 (afterShellExecution / afterAgentResponse / pre-domain-shift afterFileEdit). The bash equivalents were already pruned in dev.20; the PS1 versions had been lingering on Windows installs. The generators are removed and `cleanupOrphanScripts()` deletes any stragglers from disk.
+
+### Tests
+- New `ps-per-conv.test.ts` invokes `pwsh` against a synthesized `ace_track_mcp.ps1` to verify per-conv routing, top-level fallback, `"null"`-string parity with bash, empty-stdin tolerance, and append-on-rerun behavior. Auto-skips if `pwsh` is unavailable.
+
 ## [0.5.0] - 2026-05-10
 
 Major release: rebuilt pattern-learning pipeline for reliability in Cursor IDE, with automatic per-task isolation, server-side trace capture, and live activity feedback.

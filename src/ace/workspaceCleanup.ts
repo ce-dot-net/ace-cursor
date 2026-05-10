@@ -29,6 +29,14 @@ export const ORPHAN_SCRIPTS: readonly string[] = [
 	'ace_track_edit.sh',
 	'ace_track_response.sh',
 	'ace_track_shell.sh',
+	// v0.5.1 — PowerShell parity. The PS1 hook generators in
+	// createWindowsHookScripts() emitted these for hooks that were unhooked
+	// from hooks.json in dev.14 (afterShellExecution / afterAgentResponse /
+	// afterFileEdit-domain-shift). Bash counterparts were already pruned in
+	// dev.20; the PS1 versions had been linguishing on Windows installs.
+	'ace_track_edit.ps1',
+	'ace_track_response.ps1',
+	'ace_track_shell.ps1',
 ];
 
 /**

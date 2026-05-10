@@ -48,11 +48,16 @@ function rmTmp(dir: string): void {
 describe('Task D — cleanupOrphanScripts', () => {
 	it('exposes the canonical orphan list', () => {
 		// Listed by hand in the task spec — keep this canon test in sync.
+		// v0.5.1 — added PS1 parity entries for the Windows hook generators that
+		// emitted scripts for hooks unhooked back in dev.14.
 		expect(ORPHAN_SCRIPTS).toEqual([
 			'ace_stop_hook.sh.bak',
 			'ace_track_edit.sh',
 			'ace_track_response.sh',
 			'ace_track_shell.sh',
+			'ace_track_edit.ps1',
+			'ace_track_response.ps1',
+			'ace_track_shell.ps1',
 		]);
 	});
 
