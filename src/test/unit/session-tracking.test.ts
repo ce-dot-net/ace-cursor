@@ -206,7 +206,7 @@ if ($loopCount -eq 0 -and -not (Test-Path "$aceDir\\ace-review-result.json")) {
 		});
 	});
 
-	describe('Rules File (ace-patterns/RULE.md)', () => {
+	describe('Rules File (ace-patterns/RULE.mdc)', () => {
 		it('should instruct AI to use ace_search before tasks', () => {
 			const rulesContent = `
 ## HOW TO USE ace_search
@@ -397,7 +397,7 @@ ace_learn(
 
 		it('should verify rules file has TIME_SAVED instructions', () => {
 			const projectRoot = path.resolve(__dirname, '../../../..');
-			const rulesPath = path.join(projectRoot, '.cursor', 'rules', 'ace-patterns', 'RULE.md');
+			const rulesPath = path.join(projectRoot, '.cursor', 'rules', 'ace-patterns', 'RULE.mdc');
 
 			if (fs.existsSync(rulesPath)) {
 				const content = fs.readFileSync(rulesPath, 'utf-8');

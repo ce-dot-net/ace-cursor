@@ -5,6 +5,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { readContext, writeContext, pickWorkspaceFolder, getTargetFolder, isMultiRootWorkspace, getWorkspaceRoot, type AceContext } from '../../ace/context';
 import { initWorkspaceMonitor, getCurrentFolder, getCurrentDomain, refreshStatusBar } from '../../automation/workspaceMonitor';
+import { getAceGlobalConfigPath } from '../../ace/globalConfigPath';
 
 suite('ACE Extension Test Suite', () => {
 	vscode.window.showInformationMessage('Start all tests.');
@@ -169,10 +170,11 @@ suite('ACE Extension Test Suite', () => {
 		assert.ok(folder === undefined || folder !== undefined, 'getCurrentFolder should return folder or undefined');
 	});
 
-	test('getCurrentDomain should return a valid domain string', () => {
+	test('getCurrentDomain should return a non-empty string', () => {
+		// v0.4.0: server domains are semantic strings (e.g. "typescript-development-practices"),
+		// not from a fixed set. Just assert shape.
 		const domain = getCurrentDomain();
-		const validDomains = ['auth', 'api', 'cache', 'database', 'ui', 'test', 'general'];
-		assert.ok(validDomains.includes(domain), `getCurrentDomain should return a valid domain, got: ${domain}`);
+		assert.ok(typeof domain === 'string' && domain.length > 0, `getCurrentDomain should return a non-empty string, got: ${JSON.stringify(domain)}`);
 	});
 
 	// ============================================
@@ -455,55 +457,52 @@ suite('ACE Extension Test Suite', () => {
 	test('Cursor rules file should have correct structure if exists', () => {
 		const workspaceFolders = vscode.workspace.workspaceFolders;
 		if (workspaceFolders && workspaceFolders.length > 0) {
-			const rulesPath = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'rules', 'ace-patterns', 'RULE.md');
+			const rulesPath = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'rules', 'ace-patterns', 'RULE.mdc');
 			if (fs.existsSync(rulesPath)) {
 				const content = fs.readFileSync(rulesPath, 'utf-8');
-				// Check frontmatter
+				// v0.5.0-dev.13 — minimal rule. Asserts:
+				//   - frontmatter alwaysApply: true
+				//   - ace_search is named (the only tool the AI must call)
+				//   - rule does NOT name ace_learn / ace_get_playbook (naming
+				//     them as "do not call" gives them salience and triggers
+				//     the AI to explore the filesystem looking for them).
 				assert.ok(content.includes('alwaysApply: true'), 'Rules should have alwaysApply: true');
-				assert.ok(content.includes('ace_search'), 'Rules should mention ace_search tool (v0.2.32)');
-				assert.ok(content.includes('ace_learn'), 'Rules should mention ace_learn tool');
-				// v0.2.32: Rules should prioritize ace_search over ace_get_playbook
-				assert.ok(content.includes('ace_search') || content.includes('ace_get_playbook'), 'Rules should mention pattern retrieval');
+				assert.ok(content.includes('ace_search'), 'Rules should mention ace_search tool');
+				assert.ok(!content.includes('ace_learn'), 'Rules should NOT mention ace_learn (v0.5.0-dev.13 minimal rule)');
+				assert.ok(!content.includes('ace_get_playbook'), 'Rules should NOT mention ace_get_playbook (v0.5.0-dev.13 minimal rule)');
 			}
 		}
 	});
 
-	test('Domain-aware search rule should exist and have correct structure (Issue #3)', () => {
+	test('Domain-aware search rule should exist and have correct structure (v0.4.0 layout)', () => {
 		const workspaceFolders = vscode.workspace.workspaceFolders;
 		if (workspaceFolders && workspaceFolders.length > 0) {
-			const domainRulePath = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'rules', 'ace-domain-search.md');
+			// v0.4.0: rules live in folders (RULE.mdc per Cursor docs), not flat .md files.
+			const domainRulePath = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'rules', 'ace-domain-search', 'RULE.mdc');
 			if (fs.existsSync(domainRulePath)) {
 				const content = fs.readFileSync(domainRulePath, 'utf-8');
-				// Check frontmatter
-				assert.ok(content.includes('alwaysApply: true'), 'Domain rule should have alwaysApply: true');
+				// Domain-search rule is description-pulled, NOT always-on.
+				assert.ok(content.includes('alwaysApply: false'), 'Domain rule should have alwaysApply: false (pulled by description on relevance)');
 				assert.ok(content.includes('allowed_domains'), 'Domain rule should mention allowed_domains parameter');
-				assert.ok(content.includes('blocked_domains'), 'Domain rule should mention blocked_domains parameter');
 				assert.ok(content.includes('ace_search'), 'Domain rule should mention ace_search tool');
-				// Check domain types
-				assert.ok(content.includes('auth'), 'Domain rule should list auth domain');
-				assert.ok(content.includes('api'), 'Domain rule should list api domain');
-				assert.ok(content.includes('database'), 'Domain rule should list database domain');
-				assert.ok(content.includes('ui'), 'Domain rule should list ui domain');
+				assert.ok(content.includes('ace_list_domains'), 'Domain rule should instruct to call ace_list_domains first');
+				// v0.4.0: no hardcoded auth/api/database/ui list — server domains are
+				// semantic strings, not from a fixed taxonomy.
 			}
 		}
 	});
 
-	test('Continuous search rule should exist and have correct structure (v0.2.28)', () => {
+	test('Continuous search rule should exist and have correct structure (v0.4.0 layout)', () => {
 		const workspaceFolders = vscode.workspace.workspaceFolders;
 		if (workspaceFolders && workspaceFolders.length > 0) {
-			const continuousRulePath = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'rules', 'ace-continuous-search.md');
+			const continuousRulePath = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'rules', 'ace-continuous-search', 'RULE.mdc');
 			if (fs.existsSync(continuousRulePath)) {
 				const content = fs.readFileSync(continuousRulePath, 'utf-8');
-				// Check frontmatter
-				assert.ok(content.includes('alwaysApply: true'), 'Continuous search rule should have alwaysApply: true');
-				// Check domain instructions
-				assert.ok(content.includes('domain'), 'Continuous search rule should mention domain');
-				assert.ok(content.includes('hook'), 'Continuous search rule should mention hook output');
+				// v0.4.0: continuous-search rule is description-pulled (alwaysApply: false).
+				assert.ok(content.includes('alwaysApply: false'), 'Continuous search rule should have alwaysApply: false');
 				assert.ok(content.includes('allowed_domains'), 'Continuous search rule should mention allowed_domains');
 				assert.ok(content.includes('ace_search'), 'Continuous search rule should mention ace_search tool');
-				// Check domain reference table
-				assert.ok(content.includes('auth'), 'Continuous search rule should list auth domain');
-				assert.ok(content.includes('api'), 'Continuous search rule should list api domain');
+				// v0.4.0: no hardcoded auth/api list. Domains are semantic strings.
 			}
 		}
 	});
@@ -708,20 +707,19 @@ suite('ACE Extension Test Suite', () => {
 		}
 	});
 
-	test('ace-patterns/RULE.md should show trajectory as array format', () => {
+	test('ace-patterns/RULE.mdc should NOT mention trajectory (v0.5.0-dev.13 minimal rule)', () => {
 		const workspaceFolders = vscode.workspace.workspaceFolders;
 		if (workspaceFolders && workspaceFolders.length > 0) {
-			const rulesPath = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'rules', 'ace-patterns', 'RULE.md');
+			const rulesPath = path.join(workspaceFolders[0].uri.fsPath, '.cursor', 'rules', 'ace-patterns', 'RULE.mdc');
 			if (fs.existsSync(rulesPath)) {
 				const content = fs.readFileSync(rulesPath, 'utf-8');
-				// Rules should also show trajectory as array format
+				// v0.5.0-dev.13: trajectory is part of legacy ace_learn schema.
+				// The minimal rule no longer names ace_learn at all, so trajectory
+				// must also disappear. The Stop hook handles execution traces
+				// server-side regardless of what the rule says.
 				assert.ok(
-					content.includes('trajectory'),
-					'ace-patterns/RULE.md should mention trajectory parameter'
-				);
-				assert.ok(
-					content.includes('trajectory=[') || content.includes('trajectory: ['),
-					'ace-patterns/RULE.md should show trajectory as an array (not a string)'
+					!content.includes('trajectory'),
+					'ace-patterns/RULE.mdc should NOT mention trajectory in v0.5.0-dev.13 minimal rule'
 				);
 			}
 		}
@@ -1378,12 +1376,15 @@ suite('ACE Login & Authentication Tests', () => {
 	});
 
 	test('Extension getAceConfig should check global config path', () => {
-		// getAceConfig checks ~/.config/ace/config.json
-		const globalConfigPath = path.join(os.homedir(), '.config', 'ace', 'config.json');
+		// getAceConfig checks the global config helper path (defaults to /tmp on Unix-like systems)
+		const globalConfigPath = getAceGlobalConfigPath();
 
 		// Verify the expected path format
-		assert.ok(globalConfigPath.includes(os.homedir()), 'Path should start with home directory');
-		assert.ok(globalConfigPath.includes('.config'), 'Path should include .config');
+		if (process.platform !== 'win32') {
+			assert.ok(globalConfigPath.startsWith('/tmp/ace/'), 'Path should be under /tmp/ace on Unix-like systems');
+		} else {
+			assert.ok(globalConfigPath.includes(path.join('ace', 'config.json')), 'Path should include ace/config.json on Windows');
+		}
 		assert.ok(globalConfigPath.includes('ace'), 'Path should include ace');
 		assert.ok(globalConfigPath.endsWith('config.json'), 'Path should end with config.json');
 

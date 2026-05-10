@@ -8,32 +8,82 @@ import { describe, it, expect } from 'vitest';
 import {
 	getAcePatternsRuleContent,
 	getDomainSearchRuleContent,
-	getContinuousSearchRuleContent,
 	getMcpTrackScriptContent,
 	getPreToolUseScriptContent,
 	getPreToolUsePsScriptContent,
 } from '../../ace/hookScripts';
 
-describe('ace-patterns RULE.md content', () => {
-	it('keeps alwaysApply: true (primary always-on rule)', () => {
-		expect(getAcePatternsRuleContent()).toMatch(/^---[\s\S]*?alwaysApply:\s*true[\s\S]*?---/);
+describe('ace-patterns RULE.mdc content', () => {
+	// v0.5.0-dev.19 Task F — Cursor 3.0.16+ silently ignores alwaysApply: true
+	// (forum.cursor.com/t/158551). Glob-based rules are unaffected per docs.
+	// We now use globs: ["**/*"] in the rule frontmatter; the alwaysApply test
+	// is replaced by a globs assertion. We don't forbid alwaysApply outright —
+	// having both keys present remains valid YAML, just leave room.
+	it('uses globs: ["**/*"] frontmatter (Cursor 3.0.16+ alwaysApply bug workaround)', () => {
+		const content = getAcePatternsRuleContent();
+		const fm = content.match(/^---[\s\S]*?---/);
+		expect(fm, 'frontmatter not found').toBeTruthy();
+		const block = fm![0];
+		expect(block).toMatch(/globs\s*:\s*\[\s*"\*\*\/\*"\s*\]/);
 	});
 
 	it('does NOT use the legacy "EVERY NEW CHAT SESSION" trigger phrasing', () => {
 		expect(getAcePatternsRuleContent()).not.toContain('EVERY NEW CHAT SESSION');
 	});
 
-	it('uses the per-prompt "first response in this conversation" trigger', () => {
-		const content = getAcePatternsRuleContent();
-		expect(content).toContain('first response in this conversation');
-	});
-
 	it('still names the ace_search tool explicitly', () => {
 		expect(getAcePatternsRuleContent()).toContain('ace_search');
 	});
+
+	// v0.5.0-dev.13 — minimal rule. The rule used to mention several ACE
+	// tools explicitly (even as "NEVER call X"). Naming a tool gives it
+	// salience to the AI, which then explores the filesystem looking for
+	// it. New rule lists ONLY ace_search.
+	it('does NOT mention ace_get_playbook (forbidden tool naming)', () => {
+		expect(getAcePatternsRuleContent()).not.toContain('ace_get_playbook');
+	});
+
+	it('does NOT mention ace_learn (forbidden tool naming)', () => {
+		expect(getAcePatternsRuleContent()).not.toContain('ace_learn');
+	});
+
+	it('does NOT mention ace_list_domains (forbidden tool naming)', () => {
+		expect(getAcePatternsRuleContent()).not.toContain('ace_list_domains');
+	});
+
+	it('does NOT mention ace_status (forbidden tool naming)', () => {
+		expect(getAcePatternsRuleContent()).not.toContain('ace_status');
+	});
+
+	it('does NOT contain a retry / missing_required_arguments section', () => {
+		const content = getAcePatternsRuleContent();
+		expect(content).not.toMatch(/missing_required_arguments/);
+		expect(content).not.toMatch(/retry/i);
+	});
+
+	it('does NOT mention trajectory (legacy ace_learn schema)', () => {
+		expect(getAcePatternsRuleContent()).not.toMatch(/trajectory/i);
+	});
+
+	it('does NOT mention Cursor 150043 / CallMcpTool bug (rule-layer noise)', () => {
+		const content = getAcePatternsRuleContent();
+		expect(content).not.toMatch(/150043/);
+		expect(content).not.toMatch(/CallMcpTool/);
+	});
+
+	it('rule body is short (<1500 chars) — forces brevity', () => {
+		expect(getAcePatternsRuleContent().length).toBeLessThan(1500);
+	});
+
+	it('contains ace_search at most twice (no repetition)', () => {
+		const content = getAcePatternsRuleContent();
+		const matches = content.match(/ace_search/g) ?? [];
+		expect(matches.length).toBeGreaterThanOrEqual(1);
+		expect(matches.length).toBeLessThanOrEqual(2);
+	});
 });
 
-describe('ace-domain-search RULE.md content', () => {
+describe('ace-domain-search RULE.mdc content', () => {
 	it('has alwaysApply: false (pulled by description on relevance)', () => {
 		expect(getDomainSearchRuleContent()).toMatch(/^---[\s\S]*?alwaysApply:\s*false[\s\S]*?---/);
 	});
@@ -45,23 +95,119 @@ describe('ace-domain-search RULE.md content', () => {
 	});
 });
 
-describe('ace-continuous-search RULE.md content', () => {
-	it('has alwaysApply: false', () => {
-		expect(getContinuousSearchRuleContent()).toMatch(/^---[\s\S]*?alwaysApply:\s*false[\s\S]*?---/);
-	});
+// v0.5.0-dev.4 — ace-continuous-search rule retired (Stop hook + domain-shift
+// inject + auto-injection make it redundant; "call ace_learn at end" instruction
+// contradicted v0.5.0 architecture).
 
-	it('has a non-empty description: in frontmatter', () => {
-		const m = getContinuousSearchRuleContent().match(/^---[\s\S]*?description:\s*(.+?)\s*\n[\s\S]*?---/);
-		expect(m, 'description field not found').toBeTruthy();
-		expect(m![1].trim().length).toBeGreaterThan(10);
+describe('rule getters return non-empty strings', () => {
+	it('both surviving getters return non-empty markdown', () => {
+		expect(getAcePatternsRuleContent().length).toBeGreaterThan(100);
+		expect(getDomainSearchRuleContent().length).toBeGreaterThan(100);
 	});
 });
 
-describe('rule getters return non-empty strings', () => {
-	it('all three getters return non-empty markdown', () => {
-		expect(getAcePatternsRuleContent().length).toBeGreaterThan(100);
-		expect(getDomainSearchRuleContent().length).toBeGreaterThan(100);
-		expect(getContinuousSearchRuleContent().length).toBeGreaterThan(100);
+// ===========================================================================
+// v0.5.0-dev.19 Task A — per-conversation trajectory rotation
+// ===========================================================================
+describe('ace_track_mcp.sh — Task A per-conversation trajectory rotation', () => {
+	const writeScript = async (content: string) => {
+		const fsMod = await import('node:fs');
+		const osMod = await import('node:os');
+		const pathMod = await import('node:path');
+		const tmp = pathMod.join(osMod.tmpdir(), `ace-mcptrack-${Date.now()}-${Math.random().toString(36).slice(2)}.sh`);
+		fsMod.writeFileSync(tmp, content, { mode: 0o755 });
+		return { tmp, fsMod, osMod, pathMod };
+	};
+
+	it('source mentions tasks/<conv_id>/mcp_trajectory.jsonl path', () => {
+		const script = getMcpTrackScriptContent();
+		expect(script).toContain('tasks/$conv_id_for_traj');
+		// The script materializes the per-conv path through $per_conv_dir.
+		expect(script).toMatch(/per_conv_dir="\$ace_dir\/tasks\/\$conv_id_for_traj"/);
+		expect(script).toMatch(/per_conv_dir\/mcp_trajectory\.jsonl/);
+	});
+
+	it('source still falls back to top-level path when conv_id is missing', () => {
+		const script = getMcpTrackScriptContent();
+		// Top-level fallback path is still written for backwards compat.
+		expect(script).toMatch(/echo "\$input" >> "\$ace_dir\/mcp_trajectory\.jsonl"/);
+	});
+
+	it('runtime — writes to per-conv subdir when conversation_id present', async () => {
+		const { execFileSync } = await import('node:child_process');
+		const { tmp, fsMod, osMod, pathMod } = await writeScript(getMcpTrackScriptContent());
+		const cwd = fsMod.mkdtempSync(pathMod.join(osMod.tmpdir(), 'mcptrack-cwd-'));
+		try {
+			execFileSync('bash', [tmp], {
+				input: JSON.stringify({
+					tool_name: 'Bash',
+					tool_input: '{"command":"ls"}',
+					conversation_id: 'conv-A1',
+				}),
+				encoding: 'utf-8',
+				cwd,
+			});
+			const perConvPath = pathMod.join(cwd, '.cursor', 'ace', 'tasks', 'conv-A1', 'mcp_trajectory.jsonl');
+			expect(fsMod.existsSync(perConvPath), `expected per-conv jsonl at ${perConvPath}`).toBe(true);
+			const content = fsMod.readFileSync(perConvPath, 'utf-8');
+			expect(content).toMatch(/conv-A1/);
+			// Top-level should NOT be written when conv_id present.
+			const topLevel = pathMod.join(cwd, '.cursor', 'ace', 'mcp_trajectory.jsonl');
+			expect(fsMod.existsSync(topLevel)).toBe(false);
+		} finally {
+			fsMod.unlinkSync(tmp);
+			fsMod.rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it('runtime — falls back to top-level when conversation_id missing', async () => {
+		const { execFileSync } = await import('node:child_process');
+		const { tmp, fsMod, osMod, pathMod } = await writeScript(getMcpTrackScriptContent());
+		const cwd = fsMod.mkdtempSync(pathMod.join(osMod.tmpdir(), 'mcptrack-fallback-'));
+		try {
+			execFileSync('bash', [tmp], {
+				input: JSON.stringify({
+					tool_name: 'Bash',
+					tool_input: '{"command":"ls"}',
+					// no conversation_id
+				}),
+				encoding: 'utf-8',
+				cwd,
+			});
+			const topLevel = pathMod.join(cwd, '.cursor', 'ace', 'mcp_trajectory.jsonl');
+			expect(fsMod.existsSync(topLevel)).toBe(true);
+		} finally {
+			fsMod.unlinkSync(tmp);
+			fsMod.rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it('runtime — multiple conv_ids produce isolated jsonl files', async () => {
+		const { execFileSync } = await import('node:child_process');
+		const { tmp, fsMod, osMod, pathMod } = await writeScript(getMcpTrackScriptContent());
+		const cwd = fsMod.mkdtempSync(pathMod.join(osMod.tmpdir(), 'mcptrack-multi-'));
+		try {
+			for (const conv of ['conv-X', 'conv-Y', 'conv-X']) {
+				execFileSync('bash', [tmp], {
+					input: JSON.stringify({
+						tool_name: 'Read',
+						tool_input: '{}',
+						conversation_id: conv,
+					}),
+					encoding: 'utf-8',
+					cwd,
+				});
+			}
+			const xPath = pathMod.join(cwd, '.cursor', 'ace', 'tasks', 'conv-X', 'mcp_trajectory.jsonl');
+			const yPath = pathMod.join(cwd, '.cursor', 'ace', 'tasks', 'conv-Y', 'mcp_trajectory.jsonl');
+			expect(fsMod.existsSync(xPath)).toBe(true);
+			expect(fsMod.existsSync(yPath)).toBe(true);
+			expect(fsMod.readFileSync(xPath, 'utf-8').split('\n').filter(Boolean).length).toBe(2);
+			expect(fsMod.readFileSync(yPath, 'utf-8').split('\n').filter(Boolean).length).toBe(1);
+		} finally {
+			fsMod.unlinkSync(tmp);
+			fsMod.rmSync(cwd, { recursive: true, force: true });
+		}
 	});
 });
 
@@ -83,7 +229,7 @@ describe('ace_track_mcp.sh content', () => {
 	it('creates the per-generation flag directory before touching the flag', () => {
 		const script = getMcpTrackScriptContent();
 		expect(script).toContain('mkdir -p');
-		expect(script).toContain('sessions');
+		expect(script).toContain('tasks');
 	});
 
 	it('uses conversation_id and generation_id from input', () => {
@@ -98,62 +244,25 @@ describe('ace_track_mcp.sh content', () => {
 	});
 });
 
-describe('ace_pre_tool_use.sh content', () => {
-	it('uses Cursor canonical {"permission":"allow"} format, not {"decision":"allow"}', () => {
+// v0.3.1+ retired the preToolUse "search-first" gate (deny + agent_message).
+// v0.4.0 retired the helper.js subprocess that replaced it. Pattern injection
+// now lives in postToolUse via additional_context (covered by
+// src/test/unit/v04-security-cli.test.ts). The two getters below survive only
+// to write a fail-open allow stub for any orphan workspace still wired to the
+// retired hook path.
+describe('ace_pre_tool_use.sh content (v0.4.0 fail-open stub)', () => {
+	it('emits canonical {"permission":"allow"} (no decision: format)', () => {
 		const script = getPreToolUseScriptContent();
 		expect(script).toContain('"permission":"allow"');
 		expect(script).not.toContain('"decision":"allow"');
 	});
-
-	it('emits {"permission":"deny"} with agent_message when flag is missing', () => {
-		const script = getPreToolUseScriptContent();
-		expect(script).toContain('"permission":"deny"');
-		expect(script).toContain('agent_message');
-	});
-
-	it('allows MCP:ace_ prefixed tools unconditionally (no recursion)', () => {
-		const script = getPreToolUseScriptContent();
-		// Must check for MCP:ace_ prefix and allow before checking the flag
-		expect(script).toMatch(/MCP:ace_/);
-		const aceAllowIdx = script.search(/MCP:ace_/);
-		const flagCheckIdx = script.search(/search-done/);
-		expect(aceAllowIdx).toBeGreaterThan(0);
-		expect(flagCheckIdx).toBeGreaterThan(aceAllowIdx);
-	});
-
-	it('checks flag file using conversation_id and generation_id from input', () => {
-		const script = getPreToolUseScriptContent();
-		expect(script).toContain('conversation_id');
-		expect(script).toContain('generation_id');
-		expect(script).toContain('sessions');
-		expect(script).toContain('.search-done');
-	});
-
-	it('agent_message instructs the AI to call ace_search first', () => {
-		const script = getPreToolUseScriptContent();
-		expect(script).toMatch(/ace_search.*FIRST|FIRST.*ace_search/i);
-	});
-
-	it('uses jq for JSON parsing (consistency with other hook scripts)', () => {
-		const script = getPreToolUseScriptContent();
-		expect(script).toContain('jq');
-	});
 });
 
-describe('ace_pre_tool_use.ps1 content (Windows)', () => {
-	it('uses Cursor canonical permission format', () => {
+describe('ace_pre_tool_use.ps1 content (v0.4.0 fail-open stub)', () => {
+	it('emits canonical permission format', () => {
 		const ps = getPreToolUsePsScriptContent();
 		expect(ps).toContain('permission');
 		expect(ps).toContain('allow');
-		expect(ps).toContain('deny');
-	});
-
-	it('allows MCP:ace_ prefix unconditionally', () => {
-		expect(getPreToolUsePsScriptContent()).toMatch(/MCP:ace_/);
-	});
-
-	it('checks for the search-done flag file', () => {
-		expect(getPreToolUsePsScriptContent()).toContain('search-done');
 	});
 });
 
@@ -161,7 +270,6 @@ describe('rule call examples — named args only (MCP spec compliance)', () => {
 	const allRules = () => [
 		getAcePatternsRuleContent(),
 		getDomainSearchRuleContent(),
-		getContinuousSearchRuleContent(),
 	].join('\n\n=====\n\n');
 
 	it('no ace_search call uses positional args (first arg without name=)', () => {
@@ -200,19 +308,8 @@ describe('rule call examples — named args only (MCP spec compliance)', () => {
 	});
 });
 
-describe('pre_tool_use gate agent_message — must instruct named args', () => {
-	it('mentions the query parameter name explicitly', () => {
-		const script = getPreToolUseScriptContent();
-		// agent_message text must reference `query` as the argument name
-		expect(script).toMatch(/query/);
-	});
-
-	it('warns against calling ace_search with no arguments', () => {
-		const script = getPreToolUseScriptContent();
-		// Must include guidance like "non-empty query" or "do not call without arguments"
-		expect(script).toMatch(/non-empty|never call.*without|do not call.*without|do not invoke.*without/i);
-	});
-});
+// v0.4.0: gate agent_message tests retired with the gate. Named-args guidance
+// now lives in the rules (covered by 'rule call examples — named args only').
 
 describe('pre_tool_use script — bash syntax + runtime regression guards', () => {
 	// v0.2.76 shipped a broken script (line 39 unmatched single-quote inside an
@@ -241,7 +338,7 @@ describe('pre_tool_use script — bash syntax + runtime regression guards', () =
 		}
 	});
 
-	it('emits valid JSON on the deny path (no flag file)', async () => {
+	it('emits canonical {"permission":"allow"} for any tool input (v0.4.0 fail-open stub)', async () => {
 		const { execFileSync } = await import('node:child_process');
 		const script = getPreToolUseScriptContent();
 		const { tmp, fs } = await writeScript(script);
@@ -251,10 +348,7 @@ describe('pre_tool_use script — bash syntax + runtime regression guards', () =
 				encoding: 'utf-8',
 			});
 			const parsed = JSON.parse(out.trim());
-			expect(parsed.permission).toBe('deny');
-			expect(typeof parsed.agent_message).toBe('string');
-			expect(parsed.agent_message.length).toBeGreaterThan(20);
-			expect(parsed.agent_message).toMatch(/query/);
+			expect(parsed.permission).toBe('allow');
 		} finally {
 			fs.unlinkSync(tmp);
 		}
@@ -305,32 +399,10 @@ describe('hook scripts — Cursor canonical permission schema (no Claude-Code "d
 	});
 });
 
-describe('Cursor CallMcpTool bug mitigation (v0.2.79)', () => {
-	it('gate agent_message includes explicit tools/call JSON payload shape', () => {
-		const script = getPreToolUseScriptContent();
-		expect(script).toMatch(/tools\/call/);
-		// Runtime script contains \"name\":\"ace_search\" (single backslash before each quote);
-		// regex \\" matches a literal backslash followed by quote.
-		expect(script).toMatch(/\\"name\\":\\"ace_search\\"/);
-		expect(script).toMatch(/\\"arguments\\"/);
-	});
-
-	it('gate agent_message references the Cursor bug forum thread', () => {
-		const script = getPreToolUseScriptContent();
-		expect(script).toMatch(/150043|callmcptool|known bug/i);
-	});
-
-	it('PowerShell gate agent_message also includes JSON payload shape', () => {
-		const ps = getPreToolUsePsScriptContent();
-		expect(ps).toMatch(/tools\/call|name.*ace_search.*arguments/);
-	});
-
-	it('ace-patterns rule mentions Cursor 150043 + workaround', () => {
-		const rule = getAcePatternsRuleContent();
-		expect(rule).toMatch(/150043|CallMcpTool/i);
-		expect(rule).toMatch(/workaround|surface this Cursor bug|DO NOT.*empty/i);
-	});
-
+// v0.5.0-dev.13 — Cursor 150043 / CallMcpTool bug mitigation moved entirely
+// out of the rule layer (which is now minimal). The schema_violation_detected
+// log path still lives in ace_track_mcp.sh — covered below.
+describe('Cursor CallMcpTool bug mitigation (script-level)', () => {
 	it('ace_track_mcp.sh detects empty-args ace_search/ace_learn', () => {
 		const script = getMcpTrackScriptContent();
 		expect(script).toContain('schema_violation_detected');
@@ -360,7 +432,7 @@ describe('gate enforcement — search-only allow-list (v0.2.80)', () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-gate-cwd-'));
 		try {
 			if (withFlag) {
-				const flagDir = path.join(cwd, '.cursor', 'ace', 'sessions', 'c1');
+				const flagDir = path.join(cwd, '.cursor', 'ace', 'tasks', 'c1');
 				fs.mkdirSync(flagDir, { recursive: true });
 				fs.writeFileSync(path.join(flagDir, 'g1.search-done'), '');
 			}
@@ -376,32 +448,41 @@ describe('gate enforcement — search-only allow-list (v0.2.80)', () => {
 		}
 	};
 
-	it('DENIES MCP:ace_learn when no search has happened (key bug fix)', async () => {
+	// v0.5.0-dev.4: ace_get_playbook + ace_learn are now SPECIAL-CASED in the
+	// preToolUse gate (silent rewrite + silent deny respectively). All other
+	// ace_* tools still pass through unconditionally.
+	it('ALLOWS most ace_* MCP tools unconditionally', async () => {
+		for (const t of [
+			'MCP:ace_search',
+			'MCP:ace_top_patterns',
+			'MCP:ace_list_domains',
+			'MCP:ace_status',
+			'MCP:ace_delta',
+			'MCP:ace_clear',
+			'MCP:ace_batch_get',
+			'MCP:ace_bootstrap',
+		]) {
+			const r = await runGate(t, false);
+			expect(r.permission, `expected allow for ${t} (no flag)`).toBe('allow');
+			const r2 = await runGate(t, true);
+			expect(r2.permission, `expected allow for ${t} (with flag)`).toBe('allow');
+		}
+	});
+
+	it('REWRITES MCP:ace_get_playbook to ace_search via updated_input (TASK 2)', async () => {
+		const r = await runGate('MCP:ace_get_playbook', false);
+		expect(r.permission).toBe('allow');
+		expect(r.updated_input).toBeDefined();
+		expect(r.updated_input.name).toBe('ace_search');
+		expect(r.updated_input.arguments.query).toBeDefined();
+	});
+
+	it('ALLOWS MCP:ace_learn as fallback (v0.5.0-dev.10+ — Stop hook may fail on Cursor stripped PATH)', async () => {
 		const r = await runGate('MCP:ace_learn', false);
-		expect(r.permission).toBe('deny');
-	});
-
-	it('ALLOWS MCP:ace_learn after ace_search has set the flag', async () => {
-		const r = await runGate('MCP:ace_learn', true);
+		// Was deny in earlier dev builds. Now allow so AI can fall back when
+		// the extension Stop hook can't run the helper (e.g. PATH missing node).
 		expect(r.permission).toBe('allow');
-	});
-
-	it('ALLOWS MCP:ace_search unconditionally (search is gate-satisfaction tool)', async () => {
-		const r = await runGate('MCP:ace_search', false);
-		expect(r.permission).toBe('allow');
-	});
-
-	it('ALLOWS lookup tools unconditionally', async () => {
-		for (const t of ['MCP:ace_get_playbook', 'MCP:ace_top_patterns', 'MCP:ace_list_domains', 'MCP:ace_status']) {
-			const r = await runGate(t, false);
-			expect(r.permission, `expected allow for ${t}`).toBe('allow');
-		}
-	});
-
-	it('DENIES MCP:ace_delta and MCP:ace_clear without flag (mutation tools)', async () => {
-		for (const t of ['MCP:ace_delta', 'MCP:ace_clear']) {
-			const r = await runGate(t, false);
-			expect(r.permission, `expected deny for ${t}`).toBe('deny');
-		}
+		// No agent_message — AI calls ace_learn at its own discretion.
+		expect(r.agent_message).toBeUndefined();
 	});
 });

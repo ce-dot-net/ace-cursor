@@ -5,6 +5,54 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-05-10
+
+Major release: rebuilt pattern-learning pipeline for reliability in Cursor IDE, with automatic per-task isolation, server-side trace capture, and live activity feedback.
+
+### Added
+- **Live activity status bar** — shows `🔍 ACE: searching…` → `✓ 5 patterns` → `📤 learning…` → `✓ trace stored` so you see ACE working in real time.
+- **`ACE Activity` output channel** — chronological log of every pattern search and learning capture (`Cmd+Shift+U` → ACE Activity).
+- **Server-side learning at task completion** — when a task finishes, the extension automatically sends a rich execution trace (your task, the patterns retrieved, the steps taken) to the ACE server. No manual `ace_learn` calls needed.
+- **`AGENTS.md` workspace guidance** — auto-created at workspace root on first install. Tells the AI to call `ace_search` before any work. Never overwritten if you customize it.
+- **Per-task isolation** — every conversation gets its own folder under `.cursor/ace/tasks/<conversation_id>/` with its trajectory and pattern data. No more growing trajectory files.
+- **Workspace upgrade notification** — when you install a new version, a toast shows "ACE workspace upgraded to X.Y.Z" and the migration summary appears in the output channel.
+- **`ACE: Configure Connection`** triggers full workspace re-init after save (rules, scripts, AGENTS.md all stay current).
+
+### Fixed
+- **Pattern search now reliably reaches the AI in Cursor.** Worked around a macOS Cursor stdio bug that silently dropped MCP responses larger than ~8 KB. Pattern responses are now smart-packed inline and the full set is mirrored to disk for reference.
+- **Pattern attribution works end-to-end.** The ACE server's session ID flows from `ace_search` → into the AI's context → into the learning trace, so the server knows which patterns guided which task.
+- **Workspace project ID resolves correctly** for users with multiple ACE projects under the same organization. Previously caused HTTP 400 "Multiple projects found" errors at task completion.
+- **Stop-hook helper finds Node.js** even under Cursor's stripped hook environment (`/usr/bin:/bin` PATH that hides Homebrew/nvm Node installs).
+- **Rule files use `.mdc` extension.** Cursor treats `.md` rule files as `@`-mention only (frontmatter ignored), so the `globs: ["**/*"]` directive never auto-attached. The migration renames existing `.md` rules to `.mdc` automatically.
+- **Multi-channel pattern guidance** — `INSTRUCTIONS.md` (via MCP server-level instructions), `AGENTS.md`, and `.mdc` rules all carry the directive in parallel, so at least one path reaches the AI even when Cursor's `alwaysApply: true` rule injection is broken (a known Cursor 3.0.16+ bug).
+
+### Changed
+- **Trajectory storage:** `.cursor/ace/sessions/` → `.cursor/ace/tasks/`. Each user prompt = one task = one folder. Auto-migrates on first run.
+- **Cursor rules format:** `RULE.md` → `RULE.mdc` with `globs: ["**/*"]` for reliable auto-attach.
+- **Search response truncation is now smart** — packs as many patterns as fit under the safe size budget instead of a fixed top-5 cutoff.
+- **Workspace initializer is now idempotent and version-aware** — runs full migration + cleanup on every install/upgrade, including:
+  - Renames legacy `sessions/` folder to `tasks/` (merges if both exist).
+  - Migrates legacy `RULE.md` to `.mdc`.
+  - Removes orphan tracker scripts (`ace_track_edit.sh`, `ace_track_response.sh`, `ace_track_shell.sh`, stale `.bak` files).
+  - Archives legacy top-level trajectory files into `tasks/_legacy/<timestamp>/`.
+  - Prunes task subdirectories older than 30 days.
+  - Cleans hidden tool cache entries from Cursor's MCP project cache.
+- **Diagnostic visibility:** `.cursor/ace/ace-stop-debug.log` now records labeled breadcrumbs (`STOP_FIRED`, `STOP_SKIP reason=…`, `helper config_resolved`, `helper trace_built`, `helper exit_<code>`) so failure modes are diagnosable instead of silent.
+
+### Removed
+- **Redundant trajectory files:** `shell_trajectory.jsonl`, `edit_trajectory.jsonl`, `response_trajectory.jsonl` — Cursor's own transcript already captures this data; we only keep `mcp_trajectory.jsonl` since it carries the unique tool-result data Cursor's transcript omits.
+- **Manual `ace_learn` requirement from rule guidance** — the extension now handles trace capture server-side via the stop hook.
+
+### Compatibility
+- Requires Cursor IDE 3.0+ (uses Cursor's native MCP API, hooks system, and `.mdc` rule format).
+- Tested on Cursor 3.3.x.
+- macOS / Linux fully supported. Windows: most paths covered, native PowerShell scripts untouched.
+
+## [0.2.86] - 2026-05-05
+
+### Reverted
+- **Packaging slimming experiments (v0.2.79..v0.2.85) → reverted to full-node_modules baseline.** Repeated breakage: bundling linguist-js+skott crashed runtime (`'filename' must be a file URL...'`); selective node_modules whitelist still missed transitive runtime requires. Net learning: this codebase's prod deps cannot be slimmed further without breaking activation. Packaging matches v0.2.78 known-working state. VSIX size ~25 MB / 9785 files — same as v0.2.78. Open VSX may throttle but the VSIX itself works.
+
 ## [0.2.85] - 2026-05-05
 
 ### Fixed

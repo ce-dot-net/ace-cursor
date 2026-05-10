@@ -27,10 +27,11 @@ describe('rule writes guard', () => {
 		expect(block![0]).toMatch(/forceUpdate\s*\|\|\s*!fs\.existsSync\(domainRulePath\)/);
 	});
 
-	it('ace-continuous-search rule write is guarded by forceUpdate || !fs.existsSync', () => {
+	// v0.5.0-dev.4: ace-continuous-search rule retired. Activation now removes
+	// the obsolete folder instead of writing a RULE.md.
+	it('ace-continuous-search rule folder is removed on activation if present', () => {
 		const src = readFileSync(EXTENSION_TS, 'utf8');
-		const block = src.match(/const continuousSearchRulePath\s*=[\s\S]{0,8000}?writeFileAtomic\(continuousSearchRulePath/);
-		expect(block, 'ace-continuous-search rules write block not found').toBeTruthy();
-		expect(block![0]).toMatch(/forceUpdate\s*\|\|\s*!fs\.existsSync\(continuousSearchRulePath\)/);
+		expect(src).toMatch(/ace-continuous-search/);
+		expect(src).toMatch(/obsoleteContSearchDir|Removed obsolete ace-continuous-search/);
 	});
 });

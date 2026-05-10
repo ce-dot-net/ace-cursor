@@ -439,6 +439,29 @@ export class ConfigurePanel {
 				});
 				vscode.window.showInformationMessage(`ACE configuration saved${folderInfo}. MCP server will use these settings.`);
 			}
+
+			// v0.5.0-dev.22 Task A — also run workspace init/migration after a
+			// non-auto save. Covers the case where the user installs a new
+			// vsix and the first thing they do is open ACE Configure: the
+			// version-check path in activate() may have already run with no
+			// changes (since rules/hooks were updated by it), but if a new
+			// extension version writes new rules/hooks/scripts we still want
+			// the configure flow to ensure they are present + migrated.
+			//
+			// Idempotent: forceUpdate=true just rewrites canonical files. If
+			// init fails we surface a non-modal error toast and continue —
+			// the saved config is still valid; the next activation will
+			// migrate again via checkWorkspaceVersionAndPrompt.
+			if (!autoSave && targetFolder) {
+				try {
+					await vscode.commands.executeCommand('ace.initializeWorkspace');
+				} catch (initErr) {
+					console.warn('[ACE] Post-configure init failed:', initErr);
+					vscode.window.showWarningMessage(
+						`ACE configuration saved, but workspace init/migration failed: ${String(initErr)}. Run "ACE: Initialize Workspace" manually to retry.`
+					);
+				}
+			}
 		} catch (error) {
 			this._panel.webview.postMessage({
 				command: 'saveResult',

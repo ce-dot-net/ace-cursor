@@ -28,16 +28,35 @@ import { getAceClient, clearQuotaWarningTracking, getLastUsageInfo, invalidateCl
 import {
 	getAcePatternsRuleContent,
 	getDomainSearchRuleContent,
-	getContinuousSearchRuleContent,
 	getMcpTrackScriptContent,
 	getPreToolUseScriptContent,
 	getPreToolUsePsScriptContent,
+	getSearchHelperContent,
+	// v0.5.0 — server-side learn helper + domain-shift inject
+	getLearnHelperContent,
+	getStopHookScriptContent,
+	getDomainShiftScriptContent,
+	// v0.5.0-dev.19 Task G — workspace AGENTS.md
+	getAgentsMdContent,
 } from './ace/hookScripts';
 import {
 	shouldWriteHooksAndRulesWithoutOptin,
 	pickFoldersToInitializeOnAdd,
 } from './ace/optInHelpers';
 import { cleanupOldExtensionDirs } from './lifecycle/cleanupOldVersions';
+import { getAceMcpProxyContent } from './mcp/ace-mcp-proxy';
+import { trajectoryLineToUiUpdate } from './ace/trajectoryWatcher';
+// v0.5.0-dev.20 — workspace cleanup + initializer overhaul (Tasks C–H).
+// v0.5.0-dev.21 — adds migrateLegacyMdRules (RULE.md → RULE.mdc).
+import {
+	cleanupOrphanScripts,
+	archiveLegacyTrajectoryFiles,
+	cleanupHiddenToolCache,
+	pruneStaleSessions,
+	ensureWorkspaceFolders,
+	migrateLegacyMdRules,
+	migrateLegacySessionsFolder,
+} from './ace/workspaceCleanup';
 
 let statusBarItem: vscode.StatusBarItem;
 let extensionContext: vscode.ExtensionContext;
@@ -387,6 +406,26 @@ export async function activate(context: vscode.ExtensionContext) {
 		// 5. Create Cursor Rules file for AI instructions
 		await createCursorRules();
 
+		// 5b. v0.5.0-dev.19 Task G — write workspace-root AGENTS.md if missing.
+		// Cursor 3.0.16+ silently downgrades alwaysApply rules; AGENTS.md is
+		// auto-loaded per Cursor docs and unaffected by that bug. Belt+suspenders
+		// alongside the globs-based rule.
+		try {
+			const wsRootForAgents = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+			if (wsRootForAgents) {
+				const agentsMdPath = path.join(wsRootForAgents, 'AGENTS.md');
+				if (!fs.existsSync(agentsMdPath)) {
+					fs.writeFileSync(agentsMdPath, getAgentsMdContent(), 'utf-8');
+					aceOutput?.appendLine(`[${new Date().toLocaleTimeString()}] Created AGENTS.md at workspace root`);
+					console.log('[ACE] Created AGENTS.md at workspace root');
+				} else {
+					console.log('[ACE] AGENTS.md already exists — leaving user customization intact');
+				}
+			}
+		} catch (agentsErr) {
+			console.warn('[ACE] AGENTS.md write skipped:', agentsErr instanceof Error ? agentsErr.message : String(agentsErr));
+		}
+
 		// 6. Initialize workspace monitor for real-time folder tracking
 		console.log('[ACE] Initializing workspace monitor with getAceConfig');
 		initWorkspaceMonitor(context, statusBarItem, getAceConfig);
@@ -426,6 +465,60 @@ export async function activate(context: vscode.ExtensionContext) {
 			trajectoryWatcher.onDidChange(showActivity);
 			trajectoryWatcher.onDidCreate(showActivity);
 			context.subscriptions.push(trajectoryWatcher);
+
+			// v0.5.0-dev.18 — RICH watcher: parse mcp_trajectory.jsonl tail and
+			// surface ace_search/ace_learn lifecycle in status bar + output channel.
+			// v0.5.0-dev.19 Task A — trajectories rotated to per-conv subdir:
+			// .cursor/ace/tasks/<conv_id>/mcp_trajectory.jsonl. Watch the glob
+			// and track lastSize per-file (Map keyed by fsPath) since multiple
+			// conv tabs each maintain their own file.
+			// v0.5.0-dev.24 — folder renamed sessions/ → tasks/ (one conv_id = one task).
+			const mcpTrajPattern = new vscode.RelativePattern(workspaceRoot, '.cursor/ace/tasks/*/mcp_trajectory.jsonl');
+			const mcpWatcher = vscode.workspace.createFileSystemWatcher(mcpTrajPattern);
+			const lastMcpSizeByFile = new Map<string, number>();
+			let idleTimer: NodeJS.Timeout | undefined;
+			const scheduleIdleRevert = () => {
+				if (idleTimer) { clearTimeout(idleTimer); }
+				idleTimer = setTimeout(() => {
+					if (statusBarItem) {
+						// Revert to idle. workspaceMonitor / preload owns the
+						// "real" idle text; we drop back to a generic search icon.
+						statusBarItem.text = '$(search) ACE';
+						refreshStatusBar();
+					}
+				}, 5000);
+			};
+			const onMcpChange = async (uri: vscode.Uri) => {
+				try {
+					const buf = await vscode.workspace.fs.readFile(uri);
+					const key = uri.fsPath;
+					const prevSize = lastMcpSizeByFile.get(key) ?? 0;
+					const newSlice = buf.length > prevSize ? buf.slice(prevSize) : buf;
+					lastMcpSizeByFile.set(key, buf.length);
+					const text = Buffer.from(newSlice).toString('utf-8');
+					for (const line of text.split('\n')) {
+						const trimmed = line.trim();
+						if (!trimmed) { continue; }
+						const update = trajectoryLineToUiUpdate(trimmed);
+						if (!update) { continue; }
+						if (statusBarItem) {
+							statusBarItem.text = update.statusBarText;
+							statusBarItem.show();
+						}
+						aceOutput?.appendLine(update.outputLine);
+						// Only revert to idle on terminal updates (check/error icons),
+						// not on spinner ones — those are followed by a result line.
+						if (update.statusBarText.includes('$(check)') || update.statusBarText.includes('$(error)')) {
+							scheduleIdleRevert();
+						}
+					}
+				} catch {
+					// Ignore read errors (file may be transiently locked / removed).
+				}
+			};
+			mcpWatcher.onDidChange(onMcpChange);
+			mcpWatcher.onDidCreate(onMcpChange);
+			context.subscriptions.push(mcpWatcher);
 
 			// Watch ace-review-result.json for task helpfulness display
 			const reviewPattern = new vscode.RelativePattern(workspaceRoot, '.cursor/ace/ace-review-result.json');
@@ -487,6 +580,18 @@ export async function activate(context: vscode.ExtensionContext) {
 						console.warn('[ACE] Old extension dir cleanup partial failures:', errors);
 					}
 				});
+
+			// v0.5.0-dev.20 Task F — purge any hidden MCP tool cache entries
+			// Cursor leaked into ~/.cursor/projects/<proj>/mcps/<srv>/tools/.
+			// Best-effort: missing dirs / permission errors are swallowed.
+			try {
+				const removedTools = cleanupHiddenToolCache(os.homedir());
+				if (removedTools.length > 0) {
+					console.log(`[ACE] Removed ${removedTools.length} hidden MCP tool cache entry/entries`);
+				}
+			} catch (err) {
+				console.warn('[ACE] cleanupHiddenToolCache failed:', err instanceof Error ? err.message : String(err));
+			}
 		}, 5000);
 
 		// 10. Check workspace version and prompt for update if needed
@@ -592,6 +697,95 @@ export async function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand('ace.devices', showDevicesQuickPick),
 		vscode.commands.registerCommand('ace.uninstallCleanup', runUninstallCleanup)
 	);
+
+	// v0.4.0: privacy opt-in marker. Bash hook only injects patterns when this
+	// marker exists. We sync from the VS Code setting on activation + on change.
+	syncShareRawPromptsOptInMarker();
+	context.subscriptions.push(
+		vscode.workspace.onDidChangeConfiguration(e => {
+			if (e.affectsConfiguration('ace.shareRawPromptsForRetrievalAnalysis')) {
+				syncShareRawPromptsOptInMarker();
+			}
+		})
+	);
+
+	// v0.4.0: auth-status watcher. Bash hook writes "auth_expired" to
+	// .cursor/ace/auth-status.txt when ace-cli rejects with token-expired.
+	// Surface ONE warning per status change (not per write — file may rewrite).
+	registerAuthStatusWatcher(context);
+}
+
+/**
+ * v0.5.0 TASK 6 — write `runtime-settings.json` per workspace folder with the
+ * full runtime toggle set (extensible). Replaces v0.4.0 marker-file-existence
+ * scheme. Hooks read this JSON via jq.
+ *
+ * Schema:
+ *   {
+ *     "shareRawPromptsForRetrievalAnalysis": true|false,
+ *     "lastUpdated": "ISO 8601 timestamp"
+ *   }
+ *
+ * Atomic: writeFileAtomic uses tmp+rename. Old marker file is removed on first
+ * sync to keep the workspace clean.
+ */
+function syncShareRawPromptsOptInMarker(): void {
+	const folders = vscode.workspace.workspaceFolders ?? [];
+	for (const f of folders) {
+		const cfg = vscode.workspace.getConfiguration('ace', f.uri);
+		const optedIn = cfg.get<boolean>('shareRawPromptsForRetrievalAnalysis', false);
+		const aceDir = path.join(f.uri.fsPath, '.cursor', 'ace');
+		const settingsFile = path.join(aceDir, 'runtime-settings.json');
+		const legacyMarker = path.join(aceDir, 'share-raw-prompts.optin');
+		try {
+			fs.mkdirSync(aceDir, { recursive: true });
+			// Caveman: write JSON config atomically (tmp+rename via writeFileAtomic).
+			const settings = {
+				shareRawPromptsForRetrievalAnalysis: !!optedIn,
+				lastUpdated: new Date().toISOString(),
+			};
+			writeFileAtomic(settingsFile, JSON.stringify(settings, null, 2) + '\n');
+			// Remove legacy marker file if it still exists (clean transition).
+			if (fs.existsSync(legacyMarker)) {
+				try { fs.unlinkSync(legacyMarker); } catch {}
+			}
+		} catch (e) {
+			console.warn(`[ACE] runtime-settings.json sync failed for ${f.uri.fsPath}:`, (e as Error).message);
+		}
+	}
+}
+
+/**
+ * v0.4.0 — watch .cursor/ace/auth-status.txt across workspaces. The bash hook
+ * writes "auth_expired" when ace-cli reports a token-expired error; we surface
+ * ONE warning, then clear the file so the next failure can re-warn.
+ */
+function registerAuthStatusWatcher(context: vscode.ExtensionContext): void {
+	const watcher = vscode.workspace.createFileSystemWatcher('**/.cursor/ace/auth-status.txt');
+	const handle = async (uri: vscode.Uri) => {
+		try {
+			const content = fs.readFileSync(uri.fsPath, 'utf-8').trim();
+			if (content === 'auth_expired') {
+				const choice = await vscode.window.showWarningMessage(
+					'ACE: your session has expired. Auto pattern injection is paused until you re-authenticate.',
+					'Login',
+					'Dismiss'
+				);
+				if (choice === 'Login') {
+					await vscode.commands.executeCommand('ace.login');
+				}
+				// Caveman: clear so next failure re-warns. Best-effort, ignore unlink races.
+				try { fs.unlinkSync(uri.fsPath); } catch {}
+			}
+		} catch (e) {
+			console.warn('[ACE] auth-status watcher read failed:', (e as Error).message);
+		}
+	};
+	context.subscriptions.push(
+		watcher,
+		watcher.onDidCreate(handle),
+		watcher.onDidChange(handle)
+	);
 }
 
 export function getExtensionContext(): vscode.ExtensionContext | undefined {
@@ -613,6 +807,22 @@ function getExtensionVersion(context: vscode.ExtensionContext): string {
 }
 
 /**
+ * v0.5.0-dev.22 Task C — summary returned by initializeWorkspaceForFolder so
+ * the caller (checkWorkspaceVersionAndPrompt + ConfigurePanel save) can log
+ * what actually changed.
+ */
+export type InitSummary = {
+	migrated: string[];
+	removedOrphans: string[];
+	archivedLegacy: string[];
+	versionFrom: string | undefined;
+	versionTo: string;
+	// v0.5.0-dev.24 — true when `.cursor/ace/sessions/` was renamed/merged into
+	// `.cursor/ace/tasks/` on this activation.
+	sessionsFolderMigrated?: boolean;
+};
+
+/**
  * Initialize workspace files for a specific folder
  * Used by both auto-init and manual initialization
  * @param folder - Target workspace folder
@@ -623,17 +833,139 @@ async function initializeWorkspaceForFolder(
 	folder: vscode.WorkspaceFolder,
 	version: string,
 	forceUpdate: boolean = false
-): Promise<void> {
-	const aceDir = vscode.Uri.joinPath(folder.uri, '.cursor', 'ace');
+): Promise<InitSummary> {
+	// v0.5.0-dev.22 — capture pre-init version so we can report from→to.
+	const versionFrom = readWorkspaceVersion(folder);
+
+	const summary: InitSummary = {
+		migrated: [],
+		removedOrphans: [],
+		archivedLegacy: [],
+		versionFrom,
+		versionTo: version,
+		sessionsFolderMigrated: false,
+	};
+
+	// v0.5.0-dev.24 — rename `.cursor/ace/sessions/` → `.cursor/ace/tasks/` BEFORE
+	// ensureWorkspaceFolders/archiveLegacyTrajectoryFiles run, so:
+	//   1. ensureWorkspaceFolders doesn't recreate empty `sessions/` next to
+	//      the renamed `tasks/`.
+	//   2. archiveLegacyTrajectoryFiles writes to `tasks/_legacy/` (the new
+	//      canonical location).
+	const wsRoot = folder.uri.fsPath;
 	try {
-		await vscode.workspace.fs.createDirectory(aceDir);
-	} catch {
-		// Directory may already exist
+		const aceDir = path.join(wsRoot, '.cursor', 'ace');
+		if (fs.existsSync(aceDir)) {
+			const result = migrateLegacySessionsFolder(aceDir);
+			if (result.migrated) {
+				summary.sessionsFolderMigrated = true;
+				const note = result.mergedFromBoth
+					? 'sessions/ → tasks/ folder merged (both existed, non-conflicting subdirs preserved)'
+					: 'sessions/ → tasks/ folder migrated';
+				console.log(`[ACE] ${note}`);
+				aceOutput?.appendLine(`[${new Date().toLocaleTimeString()}] [ACE] ${note}`);
+			}
+		}
+	} catch (err) {
+		console.warn('[ACE] migrateLegacySessionsFolder failed:', err instanceof Error ? err.message : String(err));
 	}
+
+	// v0.5.0-dev.20 Task C — guarantee every required folder exists in one
+	// pass (tasks, searches, scripts, rules/*, commands). Idempotent.
+	try {
+		const created = ensureWorkspaceFolders(wsRoot);
+		if (created.length > 0) {
+			console.log(`[ACE] Created ${created.length} workspace folder(s):`, created.map(p => path.relative(wsRoot, p)));
+		}
+	} catch (err) {
+		console.warn('[ACE] ensureWorkspaceFolders failed:', err instanceof Error ? err.message : String(err));
+	}
+
 	await createCursorHooks(folder, forceUpdate);
+
+	// v0.5.0-dev.21 — Migrate legacy RULE.md files to RULE.mdc BEFORE
+	// createCursorRules runs. Per Cursor docs (cursor.com/docs/rules):
+	//   - .mdc with frontmatter (description / globs) → auto-attach
+	//   - .md → @-mention only (frontmatter ignored)
+	// createCursorRules then writes the canonical RULE.mdc content.
+	try {
+		const rulesDir = path.join(wsRoot, '.cursor', 'rules');
+		const result = migrateLegacyMdRules(rulesDir);
+		if (result.migrated.length > 0 || result.removed.length > 0) {
+			console.log(`[ACE] Migrated ${result.migrated.length} rule file(s) .md → .mdc; removed ${result.removed.length} stale .md sibling(s)`);
+			if (result.migrated.length > 0) {
+				aceOutput?.appendLine(`[${new Date().toLocaleTimeString()}] Migrated rule files to .mdc: ${result.migrated.join(', ')}`);
+			}
+			if (result.removed.length > 0) {
+				aceOutput?.appendLine(`[${new Date().toLocaleTimeString()}] Removed stale .md (sibling .mdc exists): ${result.removed.join(', ')}`);
+			}
+		}
+		summary.migrated = [...result.migrated, ...result.removed];
+	} catch (err) {
+		console.warn('[ACE] migrateLegacyMdRules failed:', err instanceof Error ? err.message : String(err));
+	}
+
 	await createCursorRules(folder, forceUpdate);
 	await createCursorCommands(folder, forceUpdate);
+
+	// v0.5.0-dev.20 Tasks D + E + H — workspace cleanup. Run AFTER hooks are
+	// regenerated so future writes go to per-conv paths (Task A); archiving
+	// the now-stale top-level files is safe because the new scripts won't
+	// re-create them when conv_id is present.
+	try {
+		const scriptsDir = path.join(wsRoot, '.cursor', 'scripts');
+		const removed = cleanupOrphanScripts(scriptsDir);
+		if (removed.length > 0) {
+			console.log('[ACE] Removed orphan scripts:', removed);
+			aceOutput?.appendLine(`[${new Date().toLocaleTimeString()}] Cleaned ${removed.length} orphan script(s): ${removed.join(', ')}`);
+		}
+		summary.removedOrphans = removed;
+	} catch (err) {
+		console.warn('[ACE] cleanupOrphanScripts failed:', err instanceof Error ? err.message : String(err));
+	}
+
+	try {
+		const aceDir = path.join(wsRoot, '.cursor', 'ace');
+		const archived = archiveLegacyTrajectoryFiles(aceDir);
+		if (archived.length > 0) {
+			console.log('[ACE] Archived legacy top-level trajectory files:', archived);
+			aceOutput?.appendLine(`[${new Date().toLocaleTimeString()}] Archived legacy trajectory files: ${archived.join(', ')}`);
+		}
+		summary.archivedLegacy = archived;
+	} catch (err) {
+		console.warn('[ACE] archiveLegacyTrajectoryFiles failed:', err instanceof Error ? err.message : String(err));
+	}
+
+	try {
+		// v0.5.0-dev.24 — `.cursor/ace/tasks/` (renamed from sessions/).
+		const tasksDir = path.join(wsRoot, '.cursor', 'ace', 'tasks');
+		const pruned = pruneStaleSessions(tasksDir, 30);
+		if (pruned.length > 0) {
+			console.log(`[ACE] Pruned ${pruned.length} stale task subdir(s) (>30d)`);
+		}
+	} catch (err) {
+		console.warn('[ACE] pruneStaleSessions failed:', err instanceof Error ? err.message : String(err));
+	}
+
 	writeWorkspaceVersion(version, folder);
+
+	// v0.4.3: auto-prompt opt-in once per workspace (also fires on version upgrade
+	// since this function is the auto-init/update entry point).
+	await maybePromptOptIn(folder);
+
+	return summary;
+}
+
+// Export for ConfigurePanel save handler (v0.5.0-dev.22 Task A).
+export { initializeWorkspaceForFolder, getExtensionVersion };
+
+/**
+ * v0.4.4: opt-in is now ON by default. No prompt — just sync the marker.
+ * User can disable via Settings → ACE → shareRawPromptsForRetrievalAnalysis.
+ */
+async function maybePromptOptIn(folder: vscode.WorkspaceFolder): Promise<void> {
+	void folder; // marker writing is global, handled by syncShareRawPromptsOptInMarker
+	syncShareRawPromptsOptInMarker();
 }
 
 /**
@@ -678,8 +1010,17 @@ async function checkWorkspaceVersionAndPrompt(context: vscode.ExtensionContext):
 		if (workspaceVersion !== extensionVersion) {
 			// UPDATE: Auto-update and show non-blocking notification
 			console.log(`[ACE] Updating workspace${folderName} from v${workspaceVersion} to v${extensionVersion}`);
-			await initializeWorkspaceForFolder(folder, extensionVersion, true); // forceUpdate=true
-			vscode.window.showInformationMessage(`ACE updated to v${extensionVersion}${folderName}`);
+			const summary = await initializeWorkspaceForFolder(folder, extensionVersion, true); // forceUpdate=true
+
+			// v0.5.0-dev.22 Task B — explicit user-facing notification + activity log
+			vscode.window.showInformationMessage(
+				`ACE workspace upgraded to ${extensionVersion}${folderName}. Rules/hooks/scripts updated.`,
+				{ modal: false }
+			);
+			aceOutput?.appendLine(`[ACE] Workspace upgraded from ${summary.versionFrom || 'fresh'} to ${summary.versionTo}`);
+			aceOutput?.appendLine(`[ACE]   migrated rules: ${summary.migrated.length}`);
+			aceOutput?.appendLine(`[ACE]   cleaned orphans: ${summary.removedOrphans.length}`);
+			aceOutput?.appendLine(`[ACE]   archived legacy trajectory: ${summary.archivedLegacy.length}`);
 		}
 		// MATCH: Do nothing - workspace is up to date
 	}
@@ -731,20 +1072,39 @@ async function registerMcpServer(context: vscode.ExtensionContext): Promise<void
 	if (aceConfig?.orgId) env.ACE_ORG_ID = aceConfig.orgId;
 	if (userAuth?.token) env.ACE_API_TOKEN = userAuth.token;
 
+	// v0.5.0-dev.4 TASK 1 — bake the MCP proxy script into the TRUSTED extension
+	// dir, then register the MCP server pointed at `node <proxyPath>` instead of
+	// `npx @ace-sdk/mcp`. Proxy filters tools/list to hide ace_get_playbook +
+	// ace_learn from the AI's tool list. AI no see, AI no call.
+	let mcpCommand = 'npx';
+	let mcpArgs: string[] = ['-y', '@ace-sdk/mcp'];
 	try {
-		// Register the MCP server using Cursor's API
-		// The @ace-sdk/mcp package is installed globally via npm
+		const helperDir = path.join(context.extensionPath, 'scripts');
+		fs.mkdirSync(helperDir, { recursive: true });
+		const proxyPath = path.join(helperDir, 'ace_mcp_proxy.js');
+		writeFileAtomic(proxyPath, getAceMcpProxyContent(), { mode: 0o755 });
+		mcpCommand = 'node';
+		mcpArgs = [proxyPath];
+		console.log('[ACE] MCP proxy written:', proxyPath);
+	} catch (e) {
+		// Caveman: proxy write failed → fall back to direct npx. AI still sees
+		// hidden tools, but preToolUse updated_input rewrite (TASK 2) catches.
+		console.warn('[ACE] MCP proxy write failed, falling back to direct npx:', (e as Error).message);
+	}
+
+	try {
+		// Register the MCP server using Cursor's API.
 		const disposable = cursorApi.mcp.registerServer({
 			name: 'ace-pattern-learning',
 			server: {
-				command: 'npx',
-				args: ['@ace-sdk/mcp'],
+				command: mcpCommand,
+				args: mcpArgs,
 				env
 			}
 		});
 
 		context.subscriptions.push(disposable);
-		console.log('[ACE] MCP server registered successfully');
+		console.log('[ACE] MCP server registered successfully (command:', mcpCommand, ')');
 
 		// Show success message
 		vscode.window.showInformationMessage(
@@ -788,6 +1148,29 @@ async function createCursorHooks(folder?: vscode.WorkspaceFolder, forceUpdate: b
 	const scriptPrefix = isWindows ? 'powershell -ExecutionPolicy Bypass -File ' : '';
 	const scriptExt = isWindows ? '.ps1' : '.sh';
 
+	// v0.4.1: Resolve TRUSTED extension install dir for helper.js path baking.
+	// Both PS and bash hook templates interpolate this value at write time.
+	// Caveman: extensionContext provided by Cursor — workspace cannot influence.
+	const aceExtDir = extensionContext ? extensionContext.extensionPath : '';
+	if (extensionContext) {
+		const helperDir = path.join(extensionContext.extensionPath, 'scripts');
+		try {
+			fs.mkdirSync(helperDir, { recursive: true });
+			const helperPath = path.join(helperDir, 'ace_search_helper.js');
+			writeFileAtomic(helperPath, getSearchHelperContent(), { mode: 0o755 });
+			// v0.5.0 TASK 1 — write learn helper alongside search helper.
+			const learnHelperPath = path.join(helperDir, 'ace_learn_helper.js');
+			writeFileAtomic(learnHelperPath, getLearnHelperContent(), { mode: 0o755 });
+			// Caveman: kill the v0.4.0 wrapper if it's still around.
+			const orphanWrapper = path.join(helperDir, 'ace-search-wrapper.sh');
+			if (fs.existsSync(orphanWrapper)) {
+				try { fs.unlinkSync(orphanWrapper); console.log('[ACE] Removed obsolete ace-search-wrapper.sh (v0.4.1)'); } catch {}
+			}
+		} catch (e) {
+			console.warn('[ACE] Could not write ace search/learn helpers:', (e as Error).message);
+		}
+	}
+
 	// Create hooks.json with FULL AI-Trail support
 	const hooksPath = path.join(cursorDir, 'hooks.json');
 	const hooksConfig = {
@@ -800,22 +1183,29 @@ async function createCursorHooks(folder?: vscode.WorkspaceFolder, forceUpdate: b
 			sessionEnd: [{
 				command: `${scriptPrefix}.cursor/scripts/ace_session_end${scriptExt}`
 			}],
-			// MCP tool execution tracking (PostToolUse equivalent)
+			// MCP tool execution tracking (PostToolUse equivalent).
+			// v0.5.0-dev.14: this is the ONLY post-* tracker we keep. Cursor's
+			// transcript JSONL already has Shell tool_use, ApplyPatch tool_use,
+			// and role:assistant text — but it does NOT include MCP tool RESULTS
+			// (only the tool_use call). The mcp_trajectory.jsonl produced by
+			// this hook is the only place ace_search response data exists,
+			// which the learn helper needs to extract server-assigned
+			// session_id and pattern IDs. KEEP.
 			afterMCPExecution: [{
 				command: `${scriptPrefix}.cursor/scripts/ace_track_mcp${scriptExt}`
 			}],
-			// Shell command tracking
-			afterShellExecution: [{
-				command: `${scriptPrefix}.cursor/scripts/ace_track_shell${scriptExt}`
-			}],
-			// Agent response tracking
-			afterAgentResponse: [{
-				command: `${scriptPrefix}.cursor/scripts/ace_track_response${scriptExt}`
-			}],
-			// File edit tracking (existing)
-			afterFileEdit: [{
-				command: `${scriptPrefix}.cursor/scripts/ace_track_edit${scriptExt}`
-			}],
+			// v0.5.0-dev.14: REMOVED redundant hooks.
+			//   afterShellExecution → ace_track_shell  (transcript has Shell tool_use)
+			//   afterAgentResponse  → ace_track_response (transcript has assistant text)
+			//   afterFileEdit       → ace_track_edit  (transcript has ApplyPatch tool_use)
+			// Keeping ONLY the domain-shift handler on afterFileEdit because it
+			// needs to react to file-edit events server-fetch-style (it isn't
+			// reading the transcript).
+			afterFileEdit: [
+				// v0.5.0 TASK 3 — fire domain-shift inject on every Read/Edit. Bash
+				// version only on unix; PS counterpart is a no-op stub for Windows.
+				{ command: `${scriptPrefix}.cursor/scripts/ace_domain_shift${scriptExt}` },
+			],
 			// Stop hook with git context aggregation + transcript_path
 			stop: [{
 				command: `${scriptPrefix}.cursor/scripts/ace_stop_hook${scriptExt}`,
@@ -833,11 +1223,12 @@ async function createCursorHooks(folder?: vscode.WorkspaceFolder, forceUpdate: b
 			subagentStop: [{
 				command: `${scriptPrefix}.cursor/scripts/ace_subagent_stop${scriptExt}`
 			}],
-			// Pre/Post tool use tracking
+			// v0.5.0: preToolUse restored — wraps patterns as <ace-patterns> XML JSON
+			// via deny+agent_message. Plus ROI feedback from prior task.
 			preToolUse: [{
-				command: `${scriptPrefix}.cursor/scripts/ace_pre_tool_use${scriptExt}`,
-				matcher: ".*"
+				command: `${scriptPrefix}.cursor/scripts/ace_pre_tool_use${scriptExt}`
 			}],
+			// postToolUse path stays for additional_context inject (legacy + helpful).
 			postToolUse: [{
 				command: `${scriptPrefix}.cursor/scripts/ace_post_tool_use${scriptExt}`
 			}],
@@ -884,10 +1275,10 @@ async function createCursorHooks(folder?: vscode.WorkspaceFolder, forceUpdate: b
 	} else {
 		try {
 			const existingHooks = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
-			// Check if AI-Trail hooks are missing
+			// Check if AI-Trail hooks are missing.
+			// v0.5.0-dev.14: do NOT check for afterShellExecution/afterAgentResponse
+			// any more (those are intentionally REMOVED; transcript covers them).
 			const hasAllHooks = existingHooks?.hooks?.afterMCPExecution &&
-			                    existingHooks?.hooks?.afterShellExecution &&
-			                    existingHooks?.hooks?.afterAgentResponse &&
 			                    existingHooks?.hooks?.sessionStart &&
 			                    existingHooks?.hooks?.sessionEnd &&
 			                    existingHooks?.hooks?.preCompact &&
@@ -906,6 +1297,19 @@ async function createCursorHooks(folder?: vscode.WorkspaceFolder, forceUpdate: b
 			if (!hasAllHooks) {
 				shouldWriteHooks = true;
 				console.log('[ACE] Updating hooks.json with AI-Trail hooks');
+			}
+			// v0.5.0-dev.14: prune removed hooks from existing installs.
+			// If user upgrades from <=0.5.0-dev.13 they still have the redundant
+			// afterShellExecution / afterAgentResponse / ace_track_edit handlers
+			// firing — those waste process spawns and produce duplicate data.
+			const hasRemovedHooks =
+				existingHooks?.hooks?.afterShellExecution ||
+				existingHooks?.hooks?.afterAgentResponse ||
+				(Array.isArray(existingHooks?.hooks?.afterFileEdit) &&
+				 existingHooks.hooks.afterFileEdit.some((h: any) => /ace_track_edit/.test(String(h?.command || ''))));
+			if (hasRemovedHooks) {
+				shouldWriteHooks = true;
+				console.log('[ACE] Pruning redundant tracker hooks from hooks.json');
 			}
 			// Also check platform compatibility
 			const stopCmd = existingHooks?.hooks?.stop?.[0]?.command || '';
@@ -942,6 +1346,8 @@ async function createCursorHooks(folder?: vscode.WorkspaceFolder, forceUpdate: b
  * @param forceUpdate - If true, overwrite existing files (used during version upgrade)
  */
 function createWindowsHookScripts(scriptsDir: string, forceUpdate: boolean = false): void {
+	// v0.4.1: TRUSTED extension install dir for helper.js path baking.
+	const aceExtDir = extensionContext ? extensionContext.extensionPath : '';
 	// MCP Execution Tracking (PostToolUse equivalent)
 	const mcpTrackPath = path.join(scriptsDir, 'ace_track_mcp.ps1');
 	const mcpTrackScript = `# ACE MCP Tracking Hook - Captures tool executions for AI-Trail
@@ -1330,6 +1736,7 @@ $data = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
 $status = $data.status
 $loopCount = if ($data.loop_count) { $data.loop_count } else { 0 }
 $transcriptPath = $data.transcript_path
+$convId = $data.conversation_id
 
 $aceDir = ".cursor\\ace"
 if (-not (Test-Path $aceDir)) { New-Item -ItemType Directory -Path $aceDir -Force | Out-Null }
@@ -1340,24 +1747,29 @@ if ($status -ne "completed") {
     exit 0
 }
 
-# Aggregate trajectory
+# Aggregate trajectory — v0.2.91: count ONLY entries from current conversation.
+# See bash counterpart for rationale (cross-session contamination fix).
 $gitBranch = git rev-parse --abbrev-ref HEAD 2>$null
 if (-not $gitBranch) { $gitBranch = "unknown" }
 $gitHash = git rev-parse --short HEAD 2>$null
 if (-not $gitHash) { $gitHash = "unknown" }
 
 $mcpCount = 0; $shellCount = 0; $editCount = 0; $responseCount = 0
-if (Test-Path "$aceDir\\mcp_trajectory.jsonl") {
-    $mcpCount = (Get-Content "$aceDir\\mcp_trajectory.jsonl" | Measure-Object -Line).Lines
-}
-if (Test-Path "$aceDir\\shell_trajectory.jsonl") {
-    $shellCount = (Get-Content "$aceDir\\shell_trajectory.jsonl" | Measure-Object -Line).Lines
-}
-if (Test-Path "$aceDir\\edit_trajectory.jsonl") {
-    $editCount = (Get-Content "$aceDir\\edit_trajectory.jsonl" | Measure-Object -Line).Lines
-}
-if (Test-Path "$aceDir\\response_trajectory.jsonl") {
-    $responseCount = (Get-Content "$aceDir\\response_trajectory.jsonl" | Measure-Object -Line).Lines
+if ($convId) {
+    $q = [char]34
+    $convPattern = $q + 'conversation_id' + $q + ':' + $q + $convId + $q
+    if (Test-Path "$aceDir\\mcp_trajectory.jsonl") {
+        $mcpCount = (Select-String -Path "$aceDir\\mcp_trajectory.jsonl" -Pattern $convPattern -SimpleMatch).Count
+    }
+    if (Test-Path "$aceDir\\shell_trajectory.jsonl") {
+        $shellCount = (Select-String -Path "$aceDir\\shell_trajectory.jsonl" -Pattern $convPattern -SimpleMatch).Count
+    }
+    if (Test-Path "$aceDir\\edit_trajectory.jsonl") {
+        $editCount = (Select-String -Path "$aceDir\\edit_trajectory.jsonl" -Pattern $convPattern -SimpleMatch).Count
+    }
+    if (Test-Path "$aceDir\\response_trajectory.jsonl") {
+        $responseCount = (Select-String -Path "$aceDir\\response_trajectory.jsonl" -Pattern $convPattern -SimpleMatch).Count
+    }
 }
 
 if ($transcriptPath) {
@@ -1368,12 +1780,17 @@ $summary = "MCP:$mcpCount Shell:$shellCount Edits:$editCount Responses:$response
 $entry = @{event="stop"; summary=$summary; git_branch=$gitBranch; git_hash=$gitHash; timestamp=(Get-Date -Format "o")} | ConvertTo-Json -Compress
 $entry | Out-File -Append -FilePath "$aceDir\\ace-relevance.jsonl" -Encoding utf8
 
-# Hybrid: check if ace_learn was already called (review file exists)
-if ($loopCount -eq 0 -and -not (Test-Path "$aceDir\\ace-review-result.json")) {
-    # ace_learn was NOT called — nudge the AI
+# v0.2.89: edits-only gate. Shell alone (ls /path) is exploration, not
+# implementation. AI ran shell to check path missing then asked user, hook
+# nudged ace_learn prematurely with success=false. See bash counterpart.
+$didRealWork = $editCount -gt 0
+
+if ($loopCount -eq 0 -and -not (Test-Path "$aceDir\\ace-review-result.json") -and $didRealWork) {
+    # ace_learn was NOT called and AI did productive work — nudge.
     $msg = "Now call ace_learn to capture what you learned. Start the output field with TIME_SAVED: Xm | reason (estimate minutes saved by ACE patterns, 0 if none helped)."
     Write-Output "{\`"followup_message\`": \`"$msg\`"}"
 } else {
+    # Either ace_learn already ran, retry loop, OR AI did nothing — stay quiet.
     Write-Output '{}'
 }
 `;
@@ -1381,17 +1798,22 @@ if ($loopCount -eq 0 -and -not (Test-Path "$aceDir\\ace-review-result.json")) {
 	writeFileAtomic(stopHookPath, stopHookScript);
 	console.log('[ACE] Updated ace_stop_hook.ps1');
 
-	// Pre-Tool Use Gate — always overwrite (gate logic must be current to
-	// migrate users away from old {"decision":...} format)
-	const preToolUsePath = path.join(scriptsDir, 'ace_pre_tool_use.ps1');
-	const preToolUseScript = getPreToolUsePsScriptContent();
-	writeFileAtomic(preToolUsePath, preToolUseScript);
-	console.log(`[ACE] Updated ace_pre_tool_use.ps1 (gate logic always-current)`);
+	// v0.5.0: pre-tool-use gate restored on Windows as well. PS variant is a fail-open
+	// stub for now (see hookScripts.getPreToolUsePsScriptContent); bash variant does
+	// the real <ace-patterns> wrapper + ROI inject work.
+	const preToolUsePsPath = path.join(scriptsDir, 'ace_pre_tool_use.ps1');
+	writeFileAtomic(preToolUsePsPath, getPreToolUsePsScriptContent());
+	console.log('[ACE] Updated ace_pre_tool_use.ps1 (v0.5.0 fail-open stub)');
 
-	// Post-Tool Use Tracking
+	// Post-Tool Use Tracking + helper.js pattern injection (v0.4.1, PowerShell).
+	// Mirrors the bash hook. $helper is BAKED at write time from
+	// extensionContext.extensionPath — workspace cannot influence it.
 	const postToolUsePath = path.join(scriptsDir, 'ace_post_tool_use.ps1');
-	const postToolUseScript = `# ACE Post-Tool Use Hook - Generic post-tool tracking
-# Input: tool_type, tool_name, tool_input, tool_output, duration
+	// Caveman: $helper baked here as a literal. PS forward-slash works fine for node.
+	const postToolUseScript = `# ACE Post-Tool Use Hook (v0.4.1) - tracking + helper.js pattern injection
+# Input: tool_type, tool_name, tool_input, tool_output, duration, transcript_path, conversation_id, generation_id
+
+$helper = "${aceExtDir}/scripts/ace_search_helper.js"
 
 $inputJson = [Console]::In.ReadToEnd()
 $input = $inputJson | ConvertFrom-Json -ErrorAction SilentlyContinue
@@ -1405,11 +1827,124 @@ $toolType = if ($input.tool_type) { $input.tool_type } else { "unknown" }
 $toolName = if ($input.tool_name) { $input.tool_name } else { "unknown" }
 $toolOutput = if ($input.tool_output) { $input.tool_output.Substring(0, [Math]::Min(500, $input.tool_output.Length)) } else { "" }
 $duration = if ($input.duration) { $input.duration } else { 0 }
+$convId = if ($input.conversation_id) { $input.conversation_id } else { "" }
+$genId = if ($input.generation_id) { $input.generation_id } else { "" }
+$transcript = if ($input.transcript_path) { $input.transcript_path } else { "" }
 
 $entry = @{event="post_tool_use"; tool_type=$toolType; tool_name=$toolName; tool_output=$toolOutput; duration=$duration; timestamp=(Get-Date -Format "o")} | ConvertTo-Json -Compress
 $entry | Out-File -FilePath "$aceDir\\mcp_trajectory.jsonl" -Encoding utf8 -Append
 
-Write-Output '{}'
+# v0.3.1 injection: only on first non-search tool of generation
+if ([string]::IsNullOrEmpty($convId) -or [string]::IsNullOrEmpty($genId)) { Write-Output '{}'; exit 0 }
+$flagDir = "$aceDir\\sessions\\$convId"
+if (-not (Test-Path $flagDir)) { New-Item -ItemType Directory -Path $flagDir -Force | Out-Null }
+$flagFile = "$flagDir\\$genId.patterns-injected"
+if (Test-Path $flagFile) { Write-Output '{}'; exit 0 }
+
+# v0.5.0-dev.4 TASK 6 — privacy opt-in via runtime-settings.json. Legacy
+# marker file removed in v0.5.0-dev.4 cleanup.
+$optIn = $false
+$settingsFile = "$aceDir\\runtime-settings.json"
+if (Test-Path $settingsFile) {
+    try {
+        $settings = Get-Content $settingsFile -Raw | ConvertFrom-Json
+        if ($settings.shareRawPromptsForRetrievalAnalysis -eq $true) { $optIn = $true }
+    } catch {}
+}
+if (-not $optIn) { Write-Output '{}'; exit 0 }
+
+# If AI already called search-style tool, mark flag and skip
+if ($toolName -eq "MCP:ace_search" -or $toolName -eq "ace_search") {
+    New-Item -ItemType File -Path $flagFile -Force | Out-Null
+    Write-Output '{}'; exit 0
+}
+
+# Read user prompt from transcript (last user message, char-truncated to 500).
+$prompt = ""
+if ((-not [string]::IsNullOrEmpty($transcript)) -and (Test-Path $transcript)) {
+    try {
+        $userLines = Get-Content -Path $transcript -ErrorAction SilentlyContinue | Where-Object { $_ -match '"role":"user"' }
+        if ($userLines -and $userLines.Count -gt 0) {
+            $last = $userLines[-1]
+            $obj = $last | ConvertFrom-Json -ErrorAction SilentlyContinue
+            if ($obj.message -and $obj.message.content) {
+                $textParts = @()
+                foreach ($c in $obj.message.content) {
+                    if ($c.type -eq "text" -and $c.text) { $textParts += $c.text }
+                }
+                $prompt = ($textParts -join " ")
+            } elseif ($obj.content) {
+                $prompt = [string]$obj.content
+            }
+            if ($prompt.Length -gt 500) { $prompt = $prompt.Substring(0, 500) }
+        }
+    } catch {}
+}
+if ([string]::IsNullOrEmpty($prompt)) { Write-Output '{}'; exit 0 }
+
+# Helper file must exist; node must be on PATH. Otherwise fail-open.
+if (-not (Test-Path $helper)) { Write-Output '{}'; exit 0 }
+$nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+if (-not $nodeCmd) { Write-Output '{}'; exit 0 }
+
+# Spawn node with timeout. PS lacks alarm; use Wait-Process with TimeoutSec.
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = "node"
+$psi.ArgumentList.Add($helper)
+$psi.ArgumentList.Add($prompt)
+$psi.RedirectStandardOutput = $true
+$psi.RedirectStandardError = $true
+$psi.UseShellExecute = $false
+$proc = [System.Diagnostics.Process]::Start($psi)
+$patternsJson = ""
+$rc = 5
+if ($proc.WaitForExit(8000)) {
+    $patternsJson = $proc.StandardOutput.ReadToEnd()
+    $rc = $proc.ExitCode
+} else {
+    try { $proc.Kill() } catch {}
+    $rc = 4
+}
+
+# v0.4.1 — helper exit code taxonomy (SDK team contract).
+if ($rc -eq 2) {
+    "auth_expired" | Out-File -FilePath "$aceDir\\auth-status.txt" -Encoding utf8
+    $warn = "ACE: session expired. Run /ace-login. Pattern injection paused until you re-authenticate."
+    $payload = @{additional_context=$warn} | ConvertTo-Json -Compress
+    Write-Output $payload
+    # Caveman: do NOT touch flag — let next tool call retry once user re-logs in.
+    exit 0
+}
+
+# Network/server/unknown — silently fail-open, no flag.
+if ($rc -ne 0 -or [string]::IsNullOrEmpty($patternsJson) -or $patternsJson.Trim() -eq "{}") {
+    Write-Output '{}'; exit 0
+}
+
+# Parse similar_patterns array.
+try {
+    $parsed = $patternsJson | ConvertFrom-Json -ErrorAction SilentlyContinue
+} catch {
+    Write-Output '{}'; exit 0
+}
+if (-not $parsed -or -not $parsed.similar_patterns) { Write-Output '{}'; exit 0 }
+
+$lines = @()
+foreach ($p in $parsed.similar_patterns) {
+    $section = if ($p.section) { $p.section } else { "?" }
+    $domain = if ($p.domain) { $p.domain } else { "?" }
+    $content = if ($p.content) { $p.content } else { "?" }
+    if ($content.Length -gt 200) { $content = $content.Substring(0, 200) }
+    $lines += "- [$section/$domain] $content"
+}
+if ($lines.Count -eq 0) { Write-Output '{}'; exit 0 }
+
+$ctxMsg = "📚 ACE patterns retrieved for: $prompt\`n\`n" + ($lines -join "\`n") + "\`n\`n(Patterns auto-fetched by ACE extension. Do NOT call ace_search unless you need fresh patterns mid-task.)"
+$payload = @{additional_context=$ctxMsg} | ConvertTo-Json -Compress
+Write-Output $payload
+
+# v0.4.0 plan §5.3 — flag-after-success.
+New-Item -ItemType File -Path $flagFile -Force | Out-Null
 `;
 	if (forceUpdate || !fs.existsSync(postToolUsePath)) {
 		writeFileAtomic(postToolUsePath, postToolUseScript);
@@ -1601,6 +2136,16 @@ $entry | Out-File -FilePath "$aceDir\\edit_trajectory.jsonl" -Encoding utf8 -App
 		writeFileAtomic(afterTabFileEditPath, afterTabFileEditScript);
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_after_tab_file_edit.ps1`);
 	}
+
+	// v0.5.0 TASK 3 — domain-shift inject (PowerShell stub: no-op).
+	// Bash variant does the real work; Windows users skip until ported.
+	const domainShiftPsPath = path.join(scriptsDir, 'ace_domain_shift.ps1');
+	const domainShiftPsScript = `# ACE Domain-Shift Inject (PowerShell stub) — v0.5.0
+# Bash counterpart implements the real logic. PS variant is a no-op until ported.
+Write-Output '{}'
+exit 0
+`;
+	writeFileAtomic(domainShiftPsPath, domainShiftPsScript);
 }
 
 /**
@@ -1609,6 +2154,8 @@ $entry | Out-File -FilePath "$aceDir\\edit_trajectory.jsonl" -Encoding utf8 -App
  * @param forceUpdate - If true, overwrite existing files (used during version upgrade)
  */
 function createUnixHookScripts(scriptsDir: string, forceUpdate: boolean = false): void {
+	// v0.4.1: TRUSTED extension install dir for helper.js path baking.
+	const aceExtDir = extensionContext ? extensionContext.extensionPath : '';
 	// MCP Execution Tracking (PostToolUse equivalent)
 	const mcpTrackPath = path.join(scriptsDir, 'ace_track_mcp.sh');
 	const mcpTrackScript = getMcpTrackScriptContent();
@@ -1616,40 +2163,12 @@ function createUnixHookScripts(scriptsDir: string, forceUpdate: boolean = false)
 	writeFileAtomic(mcpTrackPath, mcpTrackScript, { mode: 0o755 });
 	console.log(`[ACE] Updated ace_track_mcp.sh with ace_learn helpfulness detection`);
 
-	// Shell Execution Tracking
-	const shellTrackPath = path.join(scriptsDir, 'ace_track_shell.sh');
-	const shellTrackScript = `#!/bin/bash
-# ACE Shell Tracking Hook - Captures terminal commands for AI-Trail
-# Input: command, output, duration
-
-input=$(cat)
-mkdir -p .cursor/ace
-echo "$input" >> .cursor/ace/shell_trajectory.jsonl
-exit 0
-`;
-	if (forceUpdate || !fs.existsSync(shellTrackPath)) {
-		writeFileAtomic(shellTrackPath, shellTrackScript, { mode: 0o755 });
-		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_track_shell.sh`);
-	}
-
-	// Agent Response Tracking
-	const responseTrackPath = path.join(scriptsDir, 'ace_track_response.sh');
-	const responseTrackScript = `#!/bin/bash
-# ACE Response Tracking Hook - Captures agent responses for AI-Trail
-# Input: text (assistant final text)
-
-input=$(cat)
-ace_dir=".cursor/ace"
-mkdir -p "$ace_dir"
-
-# Log response to trajectory
-echo "$input" >> "$ace_dir/response_trajectory.jsonl"
-
-exit 0
-`;
-	// Always update response tracking
-	writeFileAtomic(responseTrackPath, responseTrackScript, { mode: 0o755 });
-	console.log('[ACE] Updated ace_track_response.sh');
+	// v0.5.0-dev.20 Task B — orphan track-script generation removed.
+	// dev.14 unhooked afterShellExecution / afterAgentResponse / ace_track_edit
+	// from hooks.json (transcript already carries that data). Continuing to
+	// write the now-orphan scripts confused users + wasted disk. The scripts
+	// (and their .bak buddies) are deleted on activation by
+	// cleanupOrphanScripts() — see workspaceCleanup.ts.
 
 	// Session Start Hook - Injects pattern context into new conversations
 	const sessionStartPath = path.join(scriptsDir, 'ace_session_start.sh');
@@ -1817,131 +2336,63 @@ exit 0
 		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace_subagent_stop.sh`);
 	}
 
-	// File Edit Tracking with Domain Detection
-	const editTrackPath = path.join(scriptsDir, 'ace_track_edit.sh');
-	const editTrackScript = `#!/bin/bash
-# ACE Edit Tracking Hook - Captures file edits with domain detection
-# Input: file_path, edits[]
-# Writes domain state to temp file for MCP Resources (Issue #3 fix)
+	// v0.5.0-dev.20 Task B — ace_track_edit.sh generation removed (orphan since
+	// dev.14, the afterFileEdit hook is now ace_domain_shift.sh). Old file is
+	// deleted on activation by cleanupOrphanScripts().
 
-input=$(cat)
-mkdir -p .cursor/ace
-echo "$input" >> .cursor/ace/edit_trajectory.jsonl
-
-# Domain detection function
-detect_domain() {
-  local file_path="$1"
-  case "$file_path" in
-    */auth/*|*login*|*session*|*jwt*) echo "auth" ;;
-    */api/*|*routes*|*endpoint*|*controller*) echo "api" ;;
-    */cache/*|*redis*|*memo*) echo "cache" ;;
-    */db/*|*migration*|*model*|*schema*) echo "database" ;;
-    */component*|*/ui/*|*/view*|*.tsx|*.jsx) echo "ui" ;;
-    */test*|*spec*|*mock*) echo "test" ;;
-    *) echo "general" ;;
-  esac
-}
-
-# Extract file path from input JSON
-file_path=$(echo "$input" | jq -r '.file_path // .path // empty' 2>/dev/null)
-
-if [ -n "$file_path" ]; then
-  current_domain=$(detect_domain "$file_path")
-  last_domain=$(cat .cursor/ace/last_domain.txt 2>/dev/null || echo "")
-
-  # Log domain transition if changed
-  if [ "$current_domain" != "$last_domain" ] && [ -n "$last_domain" ]; then
-    echo "{\\"from\\": \\"$last_domain\\", \\"to\\": \\"$current_domain\\", \\"file\\": \\"$file_path\\", \\"timestamp\\": \\"$(date -Iseconds)\\"}" >> .cursor/ace/domain_shifts.log
-  fi
-
-  echo "$current_domain" > .cursor/ace/last_domain.txt
-
-  # Write domain state to temp file for MCP Resources
-  # MCP server reads this to expose ace://domain/current resource
-  # Uses $TMPDIR (macOS) with fallback to /tmp (Linux)
-  project_id=$(jq -r '.projectId // "default"' .cursor/ace/settings.json 2>/dev/null || echo "default")
-  hash=$(echo -n "$project_id" | md5sum | cut -c1-8)
-  temp_dir="\${TMPDIR:-/tmp}"
-  temp_file="\${temp_dir%/}/ace-domain-\${hash}.json"
-  echo "{\\"domain\\": \\"$current_domain\\", \\"file\\": \\"$file_path\\", \\"timestamp\\": \\"$(date -Iseconds)\\"}" > "$temp_file"
-fi
-
-exit 0
-`;
-	// Always update to get domain detection
-	writeFileAtomic(editTrackPath, editTrackScript, { mode: 0o755 });
-	console.log('[ACE] Updated ace_track_edit.sh with domain detection');
-
-	// Stop Hook with Git Context Aggregation
+	// v0.5.0 TASK 1 — Stop hook delegates ace_learn to a node helper instead of
+	// nudging the AI via followup_message. Helper writes ace-review-result.json
+	// for next-prompt ROI inject.
 	const stopHookPath = path.join(scriptsDir, 'ace_stop_hook.sh');
-	const stopHookScript = `#!/bin/bash
-# ACE Stop Hook - Hybrid: trajectory summary + ace_learn fallback nudge
-# Primary: afterMCPExecution detects ace_learn (via rules instruction)
-# Fallback: if ace_learn wasn't called, nudge the AI via followup_message
-# Input: status, loop_count, transcript_path, conversation_id
-
-input=$(cat)
-
-# Extract fields — works with or without jq
-if command -v jq >/dev/null 2>&1; then
-  status=$(echo "$input" | jq -r '.status // empty')
-  loop_count=$(echo "$input" | jq -r '.loop_count // 0')
-  transcript_path=$(echo "$input" | jq -r '.transcript_path // empty')
-else
-  status=$(echo "$input" | grep -oE '"status"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*: *"//' | sed 's/"$//')
-  loop_count=$(echo "$input" | grep -oE '"loop_count"[[:space:]]*:[[:space:]]*[0-9]*' | head -1 | grep -oE '[0-9]+$' || echo "0")
-  transcript_path=$(echo "$input" | grep -oE '"transcript_path"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*: *"//' | sed 's/"$//')
-fi
-
-ace_dir=".cursor/ace"
-mkdir -p "$ace_dir"
-
-# Only process completed tasks
-if [ "$status" != "completed" ]; then
-  echo '{}'
-  exit 0
-fi
-
-# Aggregate trajectory
-git_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
-git_hash=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-mcp_count=$(wc -l < "$ace_dir/mcp_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
-shell_count=$(wc -l < "$ace_dir/shell_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
-edit_count=$(wc -l < "$ace_dir/edit_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
-response_count=$(wc -l < "$ace_dir/response_trajectory.jsonl" 2>/dev/null | tr -d ' ' || echo "0")
-
-if [ -n "$transcript_path" ]; then
-  echo "{\\"transcript_path\\": \\"$transcript_path\\", \\"saved_at\\": \\"$(date -Iseconds)\\"}" > "$ace_dir/last_transcript.json"
-fi
-
-summary="MCP:$mcp_count Shell:$shell_count Edits:$edit_count Responses:$response_count"
-echo "{\\"event\\": \\"stop\\", \\"summary\\": \\"$summary\\", \\"git_branch\\": \\"$git_branch\\", \\"git_hash\\": \\"$git_hash\\", \\"timestamp\\": \\"$(date -Iseconds)\\"}" >> "$ace_dir/ace-relevance.jsonl"
-
-# Hybrid: check if ace_learn was already called (review file exists)
-if [ "$loop_count" = "0" ] && [ ! -f "$ace_dir/ace-review-result.json" ]; then
-  # ace_learn was NOT called — nudge the AI
-  msg="Now call ace_learn to capture what you learned. Start the output field with TIME_SAVED: Xm | reason (estimate minutes saved by ACE patterns, 0 if none helped)."
-  echo "{\\"followup_message\\": \\"$msg\\"}"
-else
-  echo '{}'
-fi
-`;
-	// Always update stop hook
+	const learnHelperAbs = aceExtDir
+		? path.join(aceExtDir, 'scripts', 'ace_learn_helper.js')
+		: '';
+	const stopHookScript = getStopHookScriptContent(learnHelperAbs);
 	writeFileAtomic(stopHookPath, stopHookScript, { mode: 0o755 });
-	console.log('[ACE] Updated ace_stop_hook.sh');
+	console.log('[ACE] Updated ace_stop_hook.sh (v0.5.0 — delegates to learn helper)');
 
-	// Pre-Tool Use Gate — always overwrite (gate logic must be current to
-	// migrate users away from old {"decision":...} format)
+	// v0.5.0 TASK 3 — domain-shift inject hook on Read/Edit.
+	const domainShiftPath = path.join(scriptsDir, 'ace_domain_shift.sh');
+	const searchHelperAbs = aceExtDir
+		? path.join(aceExtDir, 'scripts', 'ace_search_helper.js')
+		: '';
+	writeFileAtomic(domainShiftPath, getDomainShiftScriptContent(searchHelperAbs), { mode: 0o755 });
+	console.log('[ACE] Updated ace_domain_shift.sh (v0.5.0 — domain-shift pattern inject)');
+
+	// v0.5.0: pre-tool-use gate restored — wraps patterns as <ace-patterns> XML JSON
+	// + injects <ace-roi/> from prior task's ace-review-result.json (TASK 4).
 	const preToolUsePath = path.join(scriptsDir, 'ace_pre_tool_use.sh');
-	const preToolUseScript = getPreToolUseScriptContent();
-	writeFileAtomic(preToolUsePath, preToolUseScript, { mode: 0o755 });
-	console.log(`[ACE] Updated ace_pre_tool_use.sh (gate logic always-current)`);
+	writeFileAtomic(preToolUsePath, getPreToolUseScriptContent(), { mode: 0o755 });
+	console.log('[ACE] Updated ace_pre_tool_use.sh (v0.5.0 — wrapped pattern injection + ROI)');
 
-	// Post-Tool Use Tracking
+	// v0.4.1: legacy workspace-resident helper.js + extension-path.txt cleanup.
+	// Old approach (pre-v0.4.0) wrote helper.js INTO the workspace .cursor/scripts
+	// dir and read a workspace-controlled extension-path.txt — workspace-trust
+	// escape RCE. v0.4.1 writes helper.js to <extensionPath>/scripts (TRUSTED),
+	// so any helper.js still sitting in the workspace scriptsDir is an orphan.
+	const orphanHelperJs = path.join(scriptsDir, 'ace_search_helper.js');
+	if (fs.existsSync(orphanHelperJs)) {
+		try { fs.unlinkSync(orphanHelperJs); console.log('[ACE] Removed obsolete workspace-resident ace_search_helper.js (v0.4.1)'); } catch {}
+	}
+	const orphanExtPathTxt = path.join(scriptsDir, '..', 'ace', 'extension-path.txt');
+	if (fs.existsSync(orphanExtPathTxt)) {
+		try { fs.unlinkSync(orphanExtPathTxt); console.log('[ACE] Removed obsolete extension-path.txt (v0.4.0 RCE fix)'); } catch {}
+	}
+
+	// Post-Tool Use Tracking + helper.js pattern injection (v0.4.1).
+	// SDK team correction: drop ace-cli subprocess; use node + helper.js with
+	// @ace-sdk/core in-process. HELPER path is BAKED at write time using
+	// extensionContext.extensionPath — workspace cannot influence it.
+	// §3: helper exit code 2 → auth-status.txt + warning; §4: opt-in marker
+	// gates injection; §5: jq char-truncation, sync timeout, flag-after-success.
 	const postToolUsePath = path.join(scriptsDir, 'ace_post_tool_use.sh');
 	const postToolUseScript = `#!/bin/bash
-# ACE Post-Tool Use Hook - Generic post-tool tracking
-# Input: tool_type, tool_name, tool_input, tool_output, duration
+# ACE Post-Tool Use Hook - Tracking + v0.4.1 helper.js pattern injection.
+# Spawns node "$HELPER" "<prompt>" with HELPER baked at extension-activation
+# time from context.extensionPath (TRUSTED — not workspace-controlled).
+
+# Caveman: helper path baked here as a literal. No workspace input on this line.
+HELPER="${aceExtDir}/scripts/ace_search_helper.js"
 
 input=$(cat)
 ace_dir=".cursor/ace"
@@ -1949,13 +2400,123 @@ mkdir -p "$ace_dir"
 
 tool_type=$(echo "$input" | jq -r '.tool_type // "unknown"')
 tool_name=$(echo "$input" | jq -r '.tool_name // "unknown"')
-tool_input=$(echo "$input" | jq -r '.tool_input // "{}"' | head -c 500)
-tool_output=$(echo "$input" | jq -r '.tool_output // ""' | head -c 500)
+# v0.4.0: jq char-based slice (UTF-8 safe). Old \`head -c 500\` chopped multibyte chars.
+tool_input=$(echo "$input" | jq -r '.tool_input // "{}" | tostring | .[0:500]')
+tool_output=$(echo "$input" | jq -r '.tool_output // "" | tostring | .[0:500]')
 duration=$(echo "$input" | jq -r '.duration // 0')
+conv_id=$(echo "$input" | jq -r '.conversation_id // ""')
+gen_id=$(echo "$input" | jq -r '.generation_id // ""')
+transcript=$(echo "$input" | jq -r '.transcript_path // ""')
 
-echo "{\\"event\\": \\"post_tool_use\\", \\"tool_type\\": \\"$tool_type\\", \\"tool_name\\": \\"$tool_name\\", \\"tool_input\\": \\"$tool_input\\", \\"tool_output\\": \\"$tool_output\\", \\"duration\\": $duration, \\"timestamp\\": \\"$(date -Iseconds)\\"}" >> "$ace_dir/mcp_trajectory.jsonl"
+# v0.5.0-dev.20 Task A — per-conv trajectory rotation. Mirror ace_track_mcp.sh.
+post_event_line="{\\"event\\": \\"post_tool_use\\", \\"tool_type\\": \\"$tool_type\\", \\"tool_name\\": \\"$tool_name\\", \\"tool_input\\": \\"$tool_input\\", \\"tool_output\\": \\"$tool_output\\", \\"duration\\": $duration, \\"timestamp\\": \\"$(date -Iseconds)\\"}"
+if [ -n "$conv_id" ] && [ "$conv_id" != "null" ]; then
+  per_conv_dir="$ace_dir/tasks/$conv_id"
+  mkdir -p "$per_conv_dir"
+  echo "$post_event_line" >> "$per_conv_dir/mcp_trajectory.jsonl"
+else
+  echo "$post_event_line" >> "$ace_dir/mcp_trajectory.jsonl"
+fi
 
-echo '{}'
+# v0.3.1 injection: only on first non-search tool of generation
+[ -z "$conv_id" ] || [ -z "$gen_id" ] && echo '{}' && exit 0
+flag_file="$ace_dir/tasks/$conv_id/$gen_id.patterns-injected"
+mkdir -p "$ace_dir/tasks/$conv_id"
+[ -f "$flag_file" ] && echo '{}' && exit 0
+
+# v0.5.0-dev.4 TASK 6 — privacy opt-in via runtime-settings.json. Legacy
+# marker file (share-raw-prompts.optin) was removed in v0.5.0-dev.4 cleanup.
+opt_in=0
+settings_file="$ace_dir/runtime-settings.json"
+if [ -f "$settings_file" ]; then
+  raw=$(jq -r '.shareRawPromptsForRetrievalAnalysis // false' "$settings_file" 2>/dev/null || echo "false")
+  if [ "$raw" = "true" ]; then opt_in=1; fi
+fi
+if [ "$opt_in" = "0" ]; then
+  echo '{}'
+  exit 0
+fi
+
+# If AI already called ace_search, mark flag and skip (don't double-inject).
+# ace_get_playbook is hidden by the MCP proxy (v0.5.0-dev.4) so we no longer
+# need to handle it here.
+case "$tool_name" in
+  MCP:ace_search|ace_search)
+    touch "$flag_file"; echo '{}'; exit 0;;
+esac
+
+# Read user prompt from transcript. v0.4.0: jq char-based truncation (UTF-8 safe).
+prompt=""
+if [ -n "$transcript" ] && [ -f "$transcript" ]; then
+  prompt=$(grep '"role":"user"' "$transcript" 2>/dev/null | tail -1 | jq -r '
+    (if .message.content and (.message.content | type == "array") then
+      [.message.content[] | select(.type=="text") | .text] | join(" ")
+    elif .content then .content
+    else empty end) | .[0:500]
+  ' 2>/dev/null)
+fi
+[ -z "$prompt" ] && echo '{}' && exit 0
+
+# Helper file must exist (extension writes it at activation). Otherwise fail-open.
+[ ! -f "$HELPER" ] && echo '{}' && exit 0
+command -v node >/dev/null 2>&1 || { echo '{}'; exit 0; }
+
+# v0.4.0 plan §5 — synchronous timeout. macOS lacks GNU timeout; use perl alarm.
+# Capture stdout (JSON), stderr separately (debug only — exit code drives logic).
+stderr_file=$(mktemp -t ace-helper-stderr.XXXXXX 2>/dev/null || echo "/tmp/ace-helper-stderr.$$")
+patterns_json=""
+rc=0
+if command -v gtimeout >/dev/null 2>&1; then
+  patterns_json=$(gtimeout 8 node "$HELPER" "$prompt" 2>"$stderr_file"); rc=$?
+elif command -v timeout >/dev/null 2>&1; then
+  patterns_json=$(timeout 8 node "$HELPER" "$prompt" 2>"$stderr_file"); rc=$?
+else
+  patterns_json=$(perl -e 'alarm 8; exec @ARGV' -- node "$HELPER" "$prompt" 2>"$stderr_file"); rc=$?
+fi
+rm -f "$stderr_file" 2>/dev/null
+
+# v0.4.1 — helper exit code taxonomy (SDK team contract).
+#   2 = TokenExpiredError, 3 = AceApiError 5xx, 4 = network/timeout, 5 = unknown.
+if [ "$rc" = "2" ]; then
+  # Caveman: write marker for the extension's watcher → showWarningMessage.
+  echo "auth_expired" > "$ace_dir/auth-status.txt"
+  warn_msg=$(echo "ACE: session expired. Run /ace-login. Pattern injection paused until you re-authenticate." | jq -Rs .)
+  cat <<EOF
+{"additional_context":$warn_msg}
+EOF
+  # Caveman: do NOT touch flag — let next tool call retry once user re-logs in.
+  exit 0
+fi
+
+# Network/server/unknown (rc 3/4/5 or any non-0): silently fail-open, no flag.
+if [ "$rc" != "0" ] || [ -z "$patterns_json" ] || [ "$patterns_json" = "{}" ]; then
+  echo '{}'
+  exit 0
+fi
+
+# Parse similar_patterns array. Helper emits SearchResponseWithMetadata JSON.
+patterns_text=$(echo "$patterns_json" | jq -r '
+  (.similar_patterns // []) |
+  map("- [" + (.section // "?") + "/" + (.domain // "?") + "] " + ((.content // "?") | .[0:200])) |
+  .[]
+' 2>/dev/null)
+[ -z "$patterns_text" ] && echo '{}' && exit 0
+
+context_msg="📚 ACE patterns retrieved for: $prompt
+
+$patterns_text
+
+(Patterns auto-fetched by ACE extension. Do NOT call ace_search unless you need fresh patterns mid-task.)"
+context_json=$(echo "$context_msg" | jq -Rs .)
+
+cat <<EOF
+{"additional_context":$context_json}
+EOF
+
+# v0.4.0 plan §5.3 — flag-after-success. Old code touched the flag before the
+# helper ran, so a transient failure would suppress retries. Only mark when the
+# additional_context payload was actually emitted.
+touch "$flag_file"
 `;
 	if (forceUpdate || !fs.existsSync(postToolUsePath)) {
 		writeFileAtomic(postToolUsePath, postToolUseScript, { mode: 0o755 });
@@ -2335,6 +2896,13 @@ Press \`Cmd/Ctrl+Shift+P\` and type "ACE" to see:
  * This is the "belt + suspenders" approach - rules ensure AI calls ACE tools
  * @param folder - Target workspace folder
  * @param forceUpdate - If true, overwrite existing files (used during version upgrade)
+ *
+ * Cursor rule injection: .mdc with `globs: ["**\/*"]` is one of three
+ * orthogonal paths we use:
+ *   1. .mdc rule (this file)
+ *   2. AGENTS.md at workspace root (written by createAgentsMdIfMissing)
+ *   3. MCP server `instructions` field (proxy injects in initialize response)
+ * Rules with .md extension are @-mention-only per Cursor docs — must be .mdc.
  */
 async function createCursorRules(folder?: vscode.WorkspaceFolder, forceUpdate: boolean = false): Promise<void> {
 	const targetFolder = folder || await getTargetFolder('Select folder for ACE rules');
@@ -2350,7 +2918,7 @@ async function createCursorRules(folder?: vscode.WorkspaceFolder, forceUpdate: b
 		fs.mkdirSync(rulesDir, { recursive: true });
 	}
 
-	// Migrate from legacy .mdc files to folder-based RULE.md format (Cursor 2.2+)
+	// Migrate from legacy .mdc files to folder-based RULE.mdc format (Cursor 2.2+)
 	const legacyFiles = ['ace-patterns.mdc', 'ace-domain-search.md', 'ace-continuous-search.md'];
 	for (const legacy of legacyFiles) {
 		const legacyPath = path.join(rulesDir, legacy);
@@ -2360,46 +2928,49 @@ async function createCursorRules(folder?: vscode.WorkspaceFolder, forceUpdate: b
 		}
 	}
 
-	// Create folder-based rules: .cursor/rules/<name>/RULE.md
+	// v0.5.0-dev.21 — RULE.md → RULE.mdc migration (per Cursor docs:
+	// .md files are @-mention-only; .mdc with frontmatter triggers auto-attach
+	// via globs). migrateLegacyMdRules runs in initializeWorkspaceForFolder
+	// before this function so legacy RULE.md files are renamed to .mdc.
+	// createCursorRules then overwrites .mdc with current content.
+
+	// Create folder-based rules: .cursor/rules/<name>/RULE.mdc
 	const patternsRuleDir = path.join(rulesDir, 'ace-patterns');
 	if (!fs.existsSync(patternsRuleDir)) {
 		fs.mkdirSync(patternsRuleDir, { recursive: true });
 	}
-	const rulesPath = path.join(patternsRuleDir, 'RULE.md');
+	const rulesPath = path.join(patternsRuleDir, 'RULE.mdc');
 	const rulesContent = getAcePatternsRuleContent();
 
 	// Create if doesn't exist OR if force update requested (during version upgrade)
 	if (forceUpdate || !fs.existsSync(rulesPath)) {
 		writeFileAtomic(rulesPath, rulesContent);
-		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace-patterns/RULE.md`);
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace-patterns/RULE.mdc`);
 	}
 
-	// Create domain-aware search rule (folder-based)
+	// v0.3.3: domain-search + continuous-search rules restored. They enable
+	// AI to RE-SEARCH (targeted) on domain shifts mid-task — NOT a 700-pattern
+	// dump. Initial patterns come from the postToolUse hook on first tool call;
+	// these rules cover the "domain shift → fresh targeted search" case.
 	const domainRuleDir = path.join(rulesDir, 'ace-domain-search');
 	if (!fs.existsSync(domainRuleDir)) {
 		fs.mkdirSync(domainRuleDir, { recursive: true });
 	}
-	const domainRulePath = path.join(domainRuleDir, 'RULE.md');
-	const domainRuleContent = getDomainSearchRuleContent();
-
-	// Create if doesn't exist OR if force update requested (during version upgrade)
+	const domainRulePath = path.join(domainRuleDir, 'RULE.mdc');
 	if (forceUpdate || !fs.existsSync(domainRulePath)) {
-		writeFileAtomic(domainRulePath, domainRuleContent);
-		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace-domain-search/RULE.md`);
+		writeFileAtomic(domainRulePath, getDomainSearchRuleContent());
+		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace-domain-search/RULE.mdc`);
 	}
 
-	// Create continuous search rule (folder-based)
-	const continuousSearchRuleDir = path.join(rulesDir, 'ace-continuous-search');
-	if (!fs.existsSync(continuousSearchRuleDir)) {
-		fs.mkdirSync(continuousSearchRuleDir, { recursive: true });
-	}
-	const continuousSearchRulePath = path.join(continuousSearchRuleDir, 'RULE.md');
-	const continuousSearchRuleContent = getContinuousSearchRuleContent();
-
-	// Create if doesn't exist OR if force update requested (during version upgrade)
-	if (forceUpdate || !fs.existsSync(continuousSearchRulePath)) {
-		writeFileAtomic(continuousSearchRulePath, continuousSearchRuleContent);
-		console.log(`[ACE] ${forceUpdate ? 'Updated' : 'Created'} ace-continuous-search/RULE.md`);
+	// v0.5.0-dev.4 — ace-continuous-search rule retired. Auto-injection +
+	// domain-shift hook + Stop-hook learn replace it. Remove obsolete folder
+	// from existing workspaces.
+	const obsoleteContSearchDir = path.join(rulesDir, 'ace-continuous-search');
+	if (fs.existsSync(obsoleteContSearchDir)) {
+		try {
+			fs.rmSync(obsoleteContSearchDir, { recursive: true, force: true });
+			console.log('[ACE] Removed obsolete ace-continuous-search/ rule folder (v0.5.0-dev.4)');
+		} catch {}
 	}
 }
 
@@ -2563,10 +3134,15 @@ async function initializeWorkspace(): Promise<void> {
 	vscode.window.showInformationMessage(
 		`ACE workspace initialized${folderInfo} (v${extensionVersion})! Created: hooks, rules, slash commands (/ace-help, /ace-status, etc.)`
 	);
+
+	// v0.4.3: opt-in dialog (auto-skip if already asked / opted in)
+	await maybePromptOptIn(folder);
 }
 
 // Export for use from configure panel
 export { initializeWorkspace };
+// Note: initializeWorkspaceForFolder + getExtensionVersion already exported
+// alongside the function definition (v0.5.0-dev.22 Task A).
 
 /**
  * Manual search command - redirects to MCP tool

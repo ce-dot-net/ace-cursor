@@ -2,14 +2,14 @@
   "name": "cursor-ace-extension",
   "displayName": "ACE for Cursor",
   "description": "Native Cursor extension for ACE pattern learning. Automatically retrieves patterns before tasks and captures learning after via MCP.",
-  "version": "0.2.85",
+  "version": "0.5.0",
   "publisher": "ce-dot-net",
   "author": "Code Engine GmbH",
   "license": "MIT",
   "icon": "icon.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ce-dot-net/ace-cursor"
+    "url": "git+https://github.com/ce-dot-net/ace-cursor.git"
   },
   "bugs": {
     "url": "https://github.com/ce-dot-net/ace-cursor/issues"
@@ -113,6 +113,11 @@
           "type": "boolean",
           "scope": "resource",
           "description": "Enable ACE pattern learning for this workspace. Set to true to enable, false to disable permanently."
+        },
+        "ace.shareRawPromptsForRetrievalAnalysis": {
+          "type": "boolean",
+          "default": true,
+          "description": "Send raw user prompts to ACE server for retrieval-quality analysis. Default ON. Set to false to disable auto-pattern injection (you can still call ace_search manually). Prompts may contain secrets — disable if working with sensitive data."
         }
       }
     }
@@ -151,5 +156,8 @@
     "@ace-sdk/core": "^2.18.1",
     "better-sqlite3": "^12.6.2",
     "fs-extra": "^11.2.0"
+  },
+  "directories": {
+    "doc": "docs"
   }
 }
