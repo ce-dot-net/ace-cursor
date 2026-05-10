@@ -5,6 +5,11 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-05-10
+
+### Security
+- **Zero known vulnerabilities** (`npm audit` → `found 0 vulnerabilities`). Forced `serialize-javascript: ^7.0.5` via `package.json` `overrides` field — the last 2 high-severity CVEs (RCE via `RegExp.flags` + DoS via crafted array-likes) were pulled in transitively by `mocha@10` which pins `serialize-javascript@^6.0.2`. The override satisfies the security advisory without downgrading mocha.
+
 ## [0.5.1] - 2026-05-10
 
 Maintenance release: dependency security, CI modernization, and Windows hook-script parity.
