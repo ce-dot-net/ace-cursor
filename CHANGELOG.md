@@ -5,6 +5,31 @@ All notable changes to the "ACE for Cursor" extension will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — ACE 1.5 Native Migration
+
+The extension now emits and uses ACE 1.5 on the emit/use path, but still accepts
+ACE 1.0 syntax on the receive path. Backward compatibility is maintained via
+presence-based discriminators (`field !== undefined`) so 1.0 servers degrade
+gracefully to no-op behavior.
+
+### New features
+- F-080 feedback loop: `retrieval_id` + `applied_log_ids` now flow from search to learn
+- Status panel shows reward model aggregates (`cumulative_reward_total`, `at_risk_count`, hot/warm/cold totals)
+- `expanded` 2-hop graph neighbors surfaced in MCP search responses
+- Trajectory steps carry real `start_ms`/`end_ms` timing when available
+- `task_intent` bandit routing hint inferred from Cursor task context
+
+### Fixes
+- `/top` query uses `min_reward` instead of deprecated `min_helpful`
+- MCP proxy pinned to `@ace-sdk/mcp@^3.1.1`
+- `better-sqlite3` version aligned to `^12.8.0`
+- All `fetch()` calls in status panel include `X-ACE-Project` header
+
+### Dependencies
+- `@ace-sdk/core` bumped from `^2.18.1` to `^3.2.0`
+- `@ace-sdk/mcp` (runtime via `npx`) pinned to `@ace-sdk/mcp@^3.1.1`
+- Note: the extension accepts ACE 1.0 responses on the receive path — no hard 1.0 break for server operators running ACE server < 1.5
+
 ## [0.5.2] - 2026-05-10
 
 ### Security

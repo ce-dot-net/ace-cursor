@@ -16,7 +16,7 @@
  *  8. Bash hardening preserved (jq char-truncation, sync timeout, flag-after-success).
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -564,5 +564,46 @@ describe('v0.4.1 rule getters still produce non-empty content (no regression)', 
 	it('ace_track_mcp.sh still writes search-done flag for ace_search', () => {
 		const script = getMcpTrackScriptContent();
 		expect(script).toContain('search-done');
+	});
+});
+
+// ============================================================================
+// u12-release: version + dep lock regression guards
+// ============================================================================
+
+describe('u12-release: package.json version + dep lock guards', () => {
+	const pkgPath = path.resolve(__dirname, '../../../package.json');
+	let pkg: any;
+	beforeAll(() => { pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8')); });
+
+	it('package.json version is exactly 0.6.0 (ACE 1.5 release)', () => {
+		// This is the unique assertion for u12-release: version was 0.5.2 before this commit.
+		expect(pkg.version).toBe('0.6.0');
+	});
+
+	// NOTE: @ace-sdk/core ^3.2.0 and better-sqlite3 ^12.8.0 were already at these
+	// values in HEAD~1 (pinned by prior migration units). Asserting their exact values
+	// here would be a tautology — those tests are omitted; they are covered by the
+	// dep-lock unit that set them.
+
+	it('CHANGELOG.md contains the 0.6.0 entry header', () => {
+		const changelogPath = path.resolve(__dirname, '../../../CHANGELOG.md');
+		const changelog = fs.readFileSync(changelogPath, 'utf-8');
+		expect(changelog).toContain('## [0.6.0]');
+	});
+
+	it('CHANGELOG.md 0.6.0 section mentions ACE 1.5 native migration and backward-compat receive path', () => {
+		const changelogPath = path.resolve(__dirname, '../../../CHANGELOG.md');
+		const changelog = fs.readFileSync(changelogPath, 'utf-8');
+		// Extract only the 0.6.0 section (text between '## [0.6.0]' and the next '## [').
+		const sectionMatch = changelog.match(/## \[0\.6\.0\]([\s\S]*?)(?=\n## \[)/);
+		expect(sectionMatch, '## [0.6.0] section not found in CHANGELOG').not.toBeNull();
+		const section060 = sectionMatch![1];
+		// Must state ACE 1.5 migration within the 0.6.0 section.
+		expect(section060).toMatch(/ACE 1\.5.*[Mm]igration|[Mm]igration.*ACE 1\.5/);
+		// Must explicitly mention the receive/accept path for 1.0 backward compat — anchored
+		// to the 0.6.0 section so older entries (e.g. "All hooks receive Cursor's common schema")
+		// cannot produce a false pass.
+		expect(section060).toMatch(/receive path.*1\.0|1\.0.*receive path|accept.*1\.0.*receive|receive.*accept.*1\.0/i);
 	});
 });
