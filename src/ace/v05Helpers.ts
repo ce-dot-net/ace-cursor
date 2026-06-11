@@ -285,6 +285,18 @@ function unwrapAceSearchResultJson(rawResultJson) {
       mcpByTool.get(tk).push({ result: resultStr, duration_ms: durMs, entry_start_ms: entryStartMs });
     }
 
+    // Cursor's afterMCPExecution hook delivers the per-call duration as
+    // \`duration\` (a float in ms; verified against real mcp_trajectory.jsonl,
+    // e.g. 902.27). Forward-compat shapes may use \`duration_ms\`. Presence-not-
+    // truthiness: duration:0 is a valid value and is still emitted.
+    function durMsFromEntry(entry) {
+      let d;
+      if (typeof entry.duration === 'number' && Number.isFinite(entry.duration)) d = entry.duration;
+      else if (typeof entry.duration_ms === 'number' && Number.isFinite(entry.duration_ms)) d = entry.duration_ms;
+      else return undefined;
+      return Math.round(d);
+    }
+
     if (fs.existsSync(jsonlPath)) {
       const raw = fs.readFileSync(jsonlPath, 'utf-8');
       const lines = raw.split('\\n').filter(l => l.trim().length > 0);
@@ -304,9 +316,9 @@ function unwrapAceSearchResultJson(rawResultJson) {
             resultStr = entry.tool_output;
           }
           if (resultStr.length > 2000) resultStr = resultStr.slice(0, 2000) + '…';
-          // Also carry duration_ms from the JSONL entry for timing enrichment.
-          const entryDurMs = typeof entry.duration_ms === 'number' && Number.isFinite(entry.duration_ms)
-            ? entry.duration_ms : undefined;
+          // Carry the per-call duration (ms) from the JSONL entry. Cursor's
+          // afterMCPExecution hook writes it as \`duration\` (float ms).
+          const entryDurMs = durMsFromEntry(entry);
           // Also carry the JSONL-entry start timestamp for MCP steps.
           // Use presence check (not truthiness) — timestamp:0 is a valid Unix epoch.
           const entryStartMsForMcp = (() => {
@@ -497,9 +509,9 @@ function unwrapAceSearchResultJson(rawResultJson) {
           const t = new Date(entry.timestamp).getTime();
           if (Number.isFinite(t)) stepStartMs = t;
         }
-        // Derive duration_ms from entry field independently of timestamp.
-        const stepDurMs = typeof entry.duration_ms === 'number' && Number.isFinite(entry.duration_ms)
-          ? entry.duration_ms : undefined;
+        // Derive duration_ms from the entry's \`duration\` (float ms) field,
+        // independently of timestamp.
+        const stepDurMs = durMsFromEntry(entry);
         trajectory.push({
           step: stepNum,
           action: String(entry.tool_name).slice(0, 200),

@@ -1503,6 +1503,88 @@ describe('u04-timing — F-080: trajectory timing fields', () => {
 		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
 	});
 
+	// --- real Cursor `duration` field (float ms) — production shape (#8 fix) ---
+	// Cursor's afterMCPExecution hook delivers `duration` (a float in ms), NOT
+	// `duration_ms`. Verified against real .cursor/ace/.../mcp_trajectory.jsonl
+	// (sample values 902.27, 339.171, 70.608). Reading only duration_ms left
+	// production traces timing-less; these guard the real field name.
+
+	it('JSONL-fallback derives duration_ms from the real Cursor `duration` float (rounded)', () => {
+		const ctx = writeHelperWithStub();
+		const aceDir = path.join(ctx.tmpDir, '.cursor', 'ace');
+		fs.mkdirSync(aceDir, { recursive: true });
+		const jsonl = path.join(aceDir, 'mcp_trajectory.jsonl');
+		// Production shape: `duration` float, no duration_ms key.
+		fs.writeFileSync(jsonl, JSON.stringify({
+			conversation_id: 'CONV-TM-DURREAL',
+			tool_name: 'ace_search',
+			tool_input: '{"query":"auth"}',
+			timestamp: TS_ISO,
+			duration: 350.6,
+		}) + '\n');
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM-DURREAL', jsonlPath: jsonl });
+		expect(r.status, `exit (stderr: ${r.stderr})`).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'ace_search');
+		expect(step).toBeTruthy();
+		expect(step.duration_ms).toBe(351); // Math.round(350.6)
+		expect(step.end_ms).toBe(TS_MS + 351);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('transcript MCP step derives duration_ms from the JSONL `duration` float', () => {
+		const ctx = writeHelperWithStub();
+		const aceDir = path.join(ctx.tmpDir, '.cursor', 'ace');
+		fs.mkdirSync(aceDir, { recursive: true });
+		const jsonl = path.join(aceDir, 'mcp_trajectory.jsonl');
+		const inner = { results: [{ id: 'p1', content: 'x', confidence: 0.9 }], session_id: 'SID-D' };
+		const outer = { content: [{ type: 'text', text: JSON.stringify(inner) }], isError: false };
+		fs.writeFileSync(jsonl, JSON.stringify({
+			conversation_id: 'CONV-TM-MCPDUR',
+			tool_name: 'ace_search',
+			tool_input: '{"query":"jwt"}',
+			result_json: JSON.stringify(outer),
+			timestamp: TS_ISO,
+			duration: 200.4,
+		}) + '\n');
+		const transcript = writeCursorTranscript(ctx.tmpDir, [
+			{ role: 'user', message: { role: 'user', content: [{ type: 'text', text: 'help' }] }, timestamp: TS_ISO },
+			{ role: 'assistant', message: { role: 'assistant', content: [
+				{ type: 'tool_use', name: 'ace_search', input: { query: 'jwt' } },
+			] }, timestamp: TS_ISO },
+		]);
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM-MCPDUR', jsonlPath: jsonl, transcriptPath: transcript });
+		expect(r.status, `exit (stderr: ${r.stderr})`).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'ace_search');
+		expect(step).toBeTruthy();
+		expect(step.duration_ms).toBe(200); // Math.round(200.4)
+		expect(step.end_ms).toBe(TS_MS + 200);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('emits duration_ms:0 for a real `duration` of 0 (presence-not-truthiness)', () => {
+		const ctx = writeHelperWithStub();
+		const aceDir = path.join(ctx.tmpDir, '.cursor', 'ace');
+		fs.mkdirSync(aceDir, { recursive: true });
+		const jsonl = path.join(aceDir, 'mcp_trajectory.jsonl');
+		fs.writeFileSync(jsonl, JSON.stringify({
+			conversation_id: 'CONV-TM-DUR0',
+			tool_name: 'ace_search',
+			tool_input: '{"query":"auth"}',
+			timestamp: TS_ISO,
+			duration: 0,
+		}) + '\n');
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM-DUR0', jsonlPath: jsonl });
+		expect(r.status).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'ace_search');
+		expect(step).toBeTruthy();
+		expect(step.duration_ms).toBe(0);
+		expect(step.end_ms).toBe(TS_MS);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
 	// --- timestamp: 0 (Unix epoch) — presence-not-truthiness (finding 1) ---
 
 	it('transcript step treats timestamp:0 as a valid timestamp (Unix epoch → start_ms=0)', () => {
