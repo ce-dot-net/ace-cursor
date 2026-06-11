@@ -37,7 +37,7 @@ vi.mock('../../ace/client', () => ({
 	getAceClient: vi.fn(),
 }));
 
-import { formatCount, normalizeStats, renderQualityCards } from '../../webviews/statusPanel';
+import { formatCount, normalizeStats, renderQualityCards, buildTopPatternsUrl, sortTopPatternsByReward, renderPatternRewardBadge } from '../../webviews/statusPanel';
 
 describe('formatCount', () => {
 	it('rounds noisy floats to 1 decimal place', () => {
@@ -139,5 +139,138 @@ describe('renderQualityCards', () => {
 		const html = renderQualityCards(normalizeStats(raw));
 		// toFixed(1) on 5.0 → "5.0", formatCount(5.0) → "5"
 		expect(html).toContain('5.0');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// u07-toppatterns: buildTopPatternsUrl
+// ---------------------------------------------------------------------------
+describe('buildTopPatternsUrl', () => {
+	it('includes limit param and path /top', () => {
+		const url = buildTopPatternsUrl('https://ace.example.com', 10);
+		expect(url).toContain('/top');
+		expect(url).toContain('limit=10');
+	});
+
+	it('does NOT contain min_helpful', () => {
+		const url = buildTopPatternsUrl('https://ace.example.com', 10);
+		expect(url).not.toContain('min_helpful');
+	});
+
+	it('does NOT contain min_reward (server does not accept that param)', () => {
+		const url = buildTopPatternsUrl('https://ace.example.com', 10);
+		expect(url).not.toContain('min_reward');
+	});
+
+	it('keeps the /top path (not /patterns/top)', () => {
+		const url = buildTopPatternsUrl('https://ace.example.com', 5);
+		expect(url).toMatch(/\/top\?/);
+		expect(url).not.toContain('/patterns/top');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// u07-toppatterns: sortTopPatternsByReward
+// ---------------------------------------------------------------------------
+describe('sortTopPatternsByReward', () => {
+	it('sorts 1.5 patterns descending by cumulative_v15_reward', () => {
+		const patterns = [
+			{ cumulative_v15_reward: 1.0, helpful: 100 },
+			{ cumulative_v15_reward: 5.5, helpful: 2 },
+			{ cumulative_v15_reward: 3.0, helpful: 50 },
+		];
+		const sorted = sortTopPatternsByReward(patterns);
+		expect(sorted[0].cumulative_v15_reward).toBe(5.5);
+		expect(sorted[1].cumulative_v15_reward).toBe(3.0);
+		expect(sorted[2].cumulative_v15_reward).toBe(1.0);
+	});
+
+	it('falls back to helpful for 1.0 patterns (no cumulative_v15_reward)', () => {
+		const patterns = [
+			{ helpful: 3 },
+			{ helpful: 10 },
+			{ helpful: 7 },
+		];
+		const sorted = sortTopPatternsByReward(patterns);
+		expect((sorted[0] as any).helpful).toBe(10);
+		expect((sorted[1] as any).helpful).toBe(7);
+		expect((sorted[2] as any).helpful).toBe(3);
+	});
+
+	it('sorts mixed patterns: 1.5 reward beats 1.0 helpful-only', () => {
+		const patterns = [
+			{ helpful: 200 },                         // 1.0 pattern, no reward
+			{ cumulative_v15_reward: 4.0, helpful: 1 }, // 1.5 pattern
+			{ helpful: 50 },                          // 1.0 pattern
+		];
+		const sorted = sortTopPatternsByReward(patterns);
+		// 1.5 pattern wins (reward=4.0 > helpful=200 in sort key? No — 200 > 4. But
+		// the sort key is: cumulative_v15_reward ?? helpful ?? 0.
+		// So: 200, 4.0, 50 → order should be 200, 50, 4.0
+		expect((sorted[0] as any).helpful).toBe(200);
+		expect((sorted[1] as any).helpful).toBe(50);
+		expect((sorted[2] as any).cumulative_v15_reward).toBe(4.0);
+	});
+
+	it('EDGE: cumulative_v15_reward: 0 takes 1.5 path (not helpful fallback)', () => {
+		// 0 is a valid 1.5 value; must use 0 as sort key, not fall back to helpful
+		const patterns = [
+			{ cumulative_v15_reward: 0, helpful: 999 },
+			{ helpful: 5 },
+		];
+		const sorted = sortTopPatternsByReward(patterns);
+		// helpful=5 > cumulative_v15_reward=0, so helpful-only pattern sorts first
+		expect((sorted[0] as any).helpful).toBe(5);
+		expect((sorted[1] as any).cumulative_v15_reward).toBe(0);
+	});
+
+	it('patterns with no reward and no helpful get sort key 0', () => {
+		const patterns = [{ content: 'a' }, { helpful: 2 }];
+		const sorted = sortTopPatternsByReward(patterns);
+		expect((sorted[0] as any).helpful).toBe(2);
+	});
+
+	it('does not mutate the input array', () => {
+		const patterns = [
+			{ cumulative_v15_reward: 1 },
+			{ cumulative_v15_reward: 3 },
+		];
+		const original = [...patterns];
+		sortTopPatternsByReward(patterns);
+		expect(patterns[0]).toBe(original[0]);
+		expect(patterns[1]).toBe(original[1]);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// u07-toppatterns: renderPatternRewardBadge
+// ---------------------------------------------------------------------------
+describe('renderPatternRewardBadge', () => {
+	it('renders Reward badge when cumulative_v15_reward is present', () => {
+		const html = renderPatternRewardBadge({ cumulative_v15_reward: 4.2, helpful: 100 });
+		expect(html).toContain('Reward: 4.20');
+		expect(html).not.toContain('Helpful:');
+		expect(html).not.toContain('👍');
+	});
+
+	it('renders Helpful legacy badge when cumulative_v15_reward is absent', () => {
+		const html = renderPatternRewardBadge({ helpful: 42 });
+		expect(html).toContain('Helpful:');
+		expect(html).toContain('42');
+		expect(html).not.toContain('Reward:');
+	});
+
+	it('EDGE: cumulative_v15_reward: 0 renders reward path with "0.00"', () => {
+		// 0 !== undefined → 1.5 path
+		const html = renderPatternRewardBadge({ cumulative_v15_reward: 0, helpful: 99 });
+		expect(html).toContain('Reward: 0.00');
+		expect(html).not.toContain('Helpful:');
+	});
+
+	it('legacy fallback: no crash when helpful is also absent', () => {
+		const html = renderPatternRewardBadge({});
+		// Should degrade gracefully
+		expect(html).toContain('Helpful:');
+		expect(html).toContain('0');
 	});
 });

@@ -107,6 +107,52 @@ export function renderQualityCards(ns: NormalizedStats): string {
 </div>`;
 }
 
+// ---------------------------------------------------------------------------
+// ACE 1.5 — top-patterns vocab helpers (u07-toppatterns)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the URL for fetching top patterns from the ACE server.
+ *
+ * ACE 1.5 change: drop the legacy `min_helpful=1` filter (it excludes cold-tier
+ * 1.5 patterns) and fetch more items so client-side reward-sort can pick the
+ * best. The server `/top` path is unchanged (not /patterns/top — see issue #11).
+ * NOTE: `min_reward` is a CLI UX alias only; the server does NOT accept it.
+ */
+export function buildTopPatternsUrl(serverUrl: string, limit: number): string {
+	return `${serverUrl}/top?limit=${limit}`;
+}
+
+/**
+ * Sort an array of patterns by reward descending.
+ *
+ * 1.5 patterns carry `cumulative_v15_reward`; 1.0 patterns do not.
+ * Discriminator: PRESENCE (not truthiness) — `cumulative_v15_reward !== undefined`.
+ * Sort key: `cumulative_v15_reward ?? helpful ?? 0`.
+ * Returns a new array (does not mutate the input).
+ */
+export function sortTopPatternsByReward(patterns: Record<string, any>[]): Record<string, any>[] {
+	return [...patterns].sort((a, b) => {
+		const ra = a.cumulative_v15_reward !== undefined ? a.cumulative_v15_reward : (a.helpful ?? 0);
+		const rb = b.cumulative_v15_reward !== undefined ? b.cumulative_v15_reward : (b.helpful ?? 0);
+		return rb - ra;
+	});
+}
+
+/**
+ * Render the per-pattern reward/helpful badge.
+ *
+ * 1.5 path (cumulative_v15_reward present): "Reward: 4.20"
+ * 1.0 fallback (absent):                    "Helpful: N"
+ * Discriminator: `p.cumulative_v15_reward !== undefined` (0 is a valid 1.5 value).
+ */
+export function renderPatternRewardBadge(p: Record<string, any>): string {
+	if (p.cumulative_v15_reward !== undefined) {
+		return `<span>Reward: ${(p.cumulative_v15_reward as number).toFixed(2)}</span>`;
+	}
+	return `<span>Helpful: ${formatCount(p.helpful || 0)}</span>`;
+}
+
 export class StatusPanel {
 	public static currentPanel: StatusPanel | undefined;
 	private readonly _panel: vscode.WebviewPanel;
@@ -269,9 +315,10 @@ export class StatusPanel {
 		}
 
 		// Fetch top patterns for display
+		// ACE 1.5: drop min_helpful filter; fetch more and sort client-side by reward
 		let topPatterns: any[] = [];
 		try {
-			const topUrl = `${config.serverUrl}/top?limit=5&min_helpful=1`;
+			const topUrl = buildTopPatternsUrl(config.serverUrl, 10);
 			const topResponse = await fetch(topUrl, {
 				headers: {
 					'Authorization': `Bearer ${token}`,
@@ -282,7 +329,8 @@ export class StatusPanel {
 			});
 			if (topResponse.ok) {
 				const topData = await topResponse.json() as Record<string, any>;
-				topPatterns = topData.bullets || topData.patterns || [];
+				const raw: any[] = topData.bullets || topData.patterns || [];
+				topPatterns = sortTopPatternsByReward(raw).slice(0, 5);
 			}
 		} catch {
 			// Ignore top patterns errors - optional display
@@ -1143,7 +1191,7 @@ export class StatusPanel {
 				${p.content?.substring(0, 200)}${p.content?.length > 200 ? '...' : ''}
 				<div class="pattern-meta">
 					<span class="pattern-badge">${p.section?.replace(/_/g, ' ') || 'general'}</span>
-					<span>👍 ${formatCount(p.helpful || 0)}</span>
+					${renderPatternRewardBadge(p)}
 					<span>📊 ${Math.round((p.confidence || 0) * 100)}% confidence</span>
 					${p.domain ? `<span>🏷️ ${p.domain}</span>` : ''}
 				</div>
