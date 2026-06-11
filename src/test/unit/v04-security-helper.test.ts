@@ -25,6 +25,8 @@ import {
 	getMcpTrackScriptContent,
 	getAcePatternsRuleContent,
 	getDomainSearchRuleContent,
+	getPreToolUseScriptContent,
+	getSearchHelperContent,
 } from '../../ace/hookScripts';
 
 /** Read the bash postToolUse hook script content out of extension.ts.
@@ -452,6 +454,96 @@ describe('v0.4.1 postToolUse hook script — syntax + smoke', () => {
 			if (r.status !== 0) {
 				throw new Error(`pwsh AST parse errors: ${r.stderr}`);
 			}
+		} finally {
+			fs.unlinkSync(tmp);
+		}
+	});
+});
+
+// ============================================================================
+// F-080: --task-intent passed from bash heuristic into searchPatterns()
+// ============================================================================
+
+describe('F-080 search helper: VALID_INTENTS allowlist + conditional spread', () => {
+	it('getSearchHelperContent reads process.argv[3] as rawIntent', () => {
+		const helper = getSearchHelperContent();
+		expect(helper).toMatch(/process\.argv\[3\]/);
+	});
+
+	it('getSearchHelperContent defines VALID_INTENTS allowlist containing the four union literals', () => {
+		const helper = getSearchHelperContent();
+		expect(helper).toMatch(/VALID_INTENTS/);
+		expect(helper).toMatch(/refactor/);
+		expect(helper).toMatch(/routine/);
+		expect(helper).toMatch(/explore/);
+		expect(helper).toMatch(/spec_strict/);
+	});
+
+	it('getSearchHelperContent validates rawIntent against VALID_INTENTS (includes check)', () => {
+		const helper = getSearchHelperContent();
+		// Must use .includes() to gate the raw value
+		expect(helper).toMatch(/VALID_INTENTS\.includes/);
+	});
+
+	it('getSearchHelperContent conditionally spreads task_intent (omits when absent)', () => {
+		const helper = getSearchHelperContent();
+		// Conditional spread pattern: ...(taskIntent ? { task_intent: taskIntent } : {})
+		expect(helper).toMatch(/task_intent.*taskIntent|taskIntent.*task_intent/);
+		// Must NOT have a bare `task_intent: undefined` or always-present assignment
+		expect(helper).not.toMatch(/task_intent\s*:\s*undefined/);
+	});
+
+	it('getSearchHelperContent passes task_intent to searchPatterns call site', () => {
+		const helper = getSearchHelperContent();
+		// The searchPatterns call must reference task_intent (via spread)
+		const searchBlock = helper.slice(helper.indexOf('searchPatterns('));
+		expect(searchBlock).toMatch(/task_intent/);
+	});
+});
+
+describe('F-080 bash heuristic: intent bucket derivation in getPreToolUseScriptContent', () => {
+	it('bash hook contains a task_intent variable assignment', () => {
+		const script = getPreToolUseScriptContent();
+		expect(script).toMatch(/task_intent=/);
+	});
+
+	it('bash hook heuristic matches refactor keywords (refactor|rename|extract|restructure|move|reorganize)', () => {
+		const script = getPreToolUseScriptContent();
+		expect(script).toMatch(/refactor.*rename.*extract|refactor|rename|extract|restructure|move|reorganize/);
+		// The bucket assigned for those keywords must be "refactor"
+		expect(script).toMatch(/task_intent="refactor"/);
+	});
+
+	it('bash hook heuristic matches spec_strict keywords (test|spec|coverage|assert|verify)', () => {
+		const script = getPreToolUseScriptContent();
+		expect(script).toMatch(/spec_strict/);
+		expect(script).toMatch(/task_intent="spec_strict"/);
+	});
+
+	it('bash hook heuristic matches explore keywords (explore|understand|explain|what does|how does|summarize)', () => {
+		const script = getPreToolUseScriptContent();
+		expect(script).toMatch(/explore/);
+		expect(script).toMatch(/task_intent="explore"/);
+	});
+
+	it('bash hook passes task_intent as second arg to node helper when non-empty', () => {
+		const script = getPreToolUseScriptContent();
+		// Must pass "$task_intent" as second positional arg to node "$helper"
+		expect(script).toMatch(/node\s+"?\$helper"?\s+"?\$prompt"?[\s\S]{0,100}\$task_intent/);
+	});
+
+	it('bash hook omits task_intent arg when variable is empty (conditional invocation)', () => {
+		const script = getPreToolUseScriptContent();
+		// Must have an if/else or [ -n "$task_intent" ] guard before node call
+		expect(script).toMatch(/\[\s*-n\s+"?\$task_intent"?\s*\]|\[\s*-z\s+"?\$task_intent"?\s*\]/);
+	});
+
+	it('bash hook passes bash -n syntax check after heuristic addition', () => {
+		const script = getPreToolUseScriptContent();
+		const tmp = path.join(os.tmpdir(), `ace-ptu-intent-${Date.now()}.sh`);
+		fs.writeFileSync(tmp, script, { mode: 0o755 });
+		try {
+			execFileSync('bash', ['-n', tmp], { stdio: 'pipe' });
 		} finally {
 			fs.unlinkSync(tmp);
 		}
