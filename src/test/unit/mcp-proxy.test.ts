@@ -715,6 +715,94 @@ describe('ACE MCP proxy — v0.5.0-dev.16 initialize.instructions injection', ()
 	});
 });
 
+describe('ACE MCP proxy — u11-mcpinstructions (ACE 1.5 vocab audit)', () => {
+	it('HIDDEN_MCP_TOOLS is exactly [ace_get_playbook] and every ACE 1.5 tool (ace_top_patterns, ace_batch_get, ace_delta, traces_list, traces_get) is NOT hidden', () => {
+		// REGRESSION GUARD: HIDDEN_MCP_TOOLS was already ['ace_get_playbook'] before
+		// commit 1f36aa0. This test CANNOT be a change-detection (TDD red-green) test
+		// because the audited value was pre-existing — #14 confirmed it correct and
+		// no change was required. The test's purpose is to prevent future regressions
+		// where a new SDK tool gets accidentally added to HIDDEN_MCP_TOOLS.
+		// (Not a TDD change-detection test — see FIX-PASS u11 blocking-1 resolution.)
+		expect(Array.from(HIDDEN_MCP_TOOLS)).toEqual(['ace_get_playbook']);
+		expect(HIDDEN_MCP_TOOLS).toHaveLength(1);
+		// ACE 1.5-new tools that were NOT on the pre-1.5 surface — must stay visible.
+		const hidden = Array.from(HIDDEN_MCP_TOOLS);
+		for (const tool of ['ace_top_patterns', 'ace_batch_get', 'ace_delta', 'traces_list', 'traces_get']) {
+			expect(hidden, `${tool} must NOT be hidden`).not.toContain(tool);
+		}
+		// Verify the baked proxy HIDDEN constant JSON matches HIDDEN_MCP_TOOLS exactly.
+		// This exercises the getAceMcpProxyContent() integration path. The baked
+		// constant must contain exactly "ace_get_playbook" and none of the ACE 1.5
+		// tools that must stay visible. Pre-commit ACE 1.5 tools were not in the
+		// baked HIDDEN set — this assertion is a regression guard for that contract.
+		const src = getAceMcpProxyContent();
+		expect(src).toContain('"ace_get_playbook"');
+		for (const tool of ['ace_top_patterns', 'ace_batch_get', 'ace_delta', 'traces_list', 'traces_get']) {
+			// Verify these tools are NOT in the HIDDEN Set literal in the baked script.
+			// The only JSON string containing them should not exist in the HIDDEN set.
+			const hiddenSetMatch = src.match(/const HIDDEN = new Set\((\[.*?\])\)/);
+			if (hiddenSetMatch) {
+				expect(hiddenSetMatch[1], `${tool} must NOT appear in baked HIDDEN set literal`).not.toContain(tool);
+			}
+		}
+	});
+
+	it('MCP_SERVER_INSTRUCTIONS contains session_id (ACE 1.5 F-080 feedback path)', () => {
+		// ACE 1.5 adds session_id to ace_search responses. The AI must capture it
+		// and pass it to the feedback tool to close the LinUCB reward loop.
+		expect(MCP_SERVER_INSTRUCTIONS).toContain('session_id');
+	});
+
+	it('MCP_SERVER_INSTRUCTIONS contains task_intent (ACE 1.5 bandit routing hint)', () => {
+		// ACE 1.5 adds task_intent param to ace_search for server-side bandit routing.
+		// Instructions should encourage the AI to set it when intent is clear.
+		expect(MCP_SERVER_INSTRUCTIONS).toContain('task_intent');
+	});
+
+	it('MCP_SERVER_INSTRUCTIONS describes feedback closure step with specific ACE 1.5 step-4 language', () => {
+		// The instructions must tell the AI to close the reward feedback loop after
+		// completing the task — but MUST NOT name ace_learn or ace_get_playbook
+		// literally (Cursor 3.7 tool-reliability workaround: naming hidden/feedback
+		// tools in instructions causes filesystem exploration instead of tool calls).
+		expect(MCP_SERVER_INSTRUCTIONS).not.toContain('ace_learn');
+		expect(MCP_SERVER_INSTRUCTIONS).not.toContain('ace_get_playbook');
+		// The NEW step-4 sentence added by u11 must be present.
+		// These phrases were NOT in the old instructions and would fail on pre-commit code.
+		expect(MCP_SERVER_INSTRUCTIONS).toContain('session feedback tool');
+		expect(MCP_SERVER_INSTRUCTIONS).toContain('ACE feedback reward loop');
+	});
+
+	it('MCP_SERVER_INSTRUCTIONS instructs AI to save session_id from ace_search response (new ACE 1.5 directive)', () => {
+		// The ACE 1.5 workflow requires capturing session_id from the ace_search
+		// result and passing it back to the feedback tool. The instructions must
+		// explicitly direct the AI to save it — this phrase was NOT in the old
+		// instructions and would fail on pre-commit code.
+		expect(MCP_SERVER_INSTRUCTIONS).toContain('Save the session_id');
+		// Core directive must remain unchanged: call ace_search before responding.
+		expect(MCP_SERVER_INSTRUCTIONS).toContain('ace_search');
+		expect(MCP_SERVER_INSTRUCTIONS).toMatch(/call ace_search.*query/is);
+	});
+
+	it('baked proxy script contains ACE 1.5 instruction phrases in MCP_INSTRUCTIONS constant', () => {
+		const src = getAceMcpProxyContent();
+		// The baked script's MCP_INSTRUCTIONS (JSON-stringified MCP_SERVER_INSTRUCTIONS)
+		// must propagate ACE 1.5-specific phrases to the initialize response.
+		//
+		// CHANGE-DETECTION: these phrases were NOT present in pre-commit baked output.
+		//   - 'Save the session_id': added by u11 (old instructions had no session_id
+		//     capture directive; the pre-commit baked script contained 'session_id' only
+		//     as a JS variable name, not as an instruction phrase).
+		//   - 'task_intent': wholly new ACE 1.5 bandit-routing param; absent pre-commit.
+		//
+		// Note: asserting just 'session_id' is insufficient — pre-commit baked output
+		// already contained that string as the JS variable `inner.session_id`. We must
+		// assert the instruction-specific phrase 'Save the session_id' to prove the
+		// MCP_INSTRUCTIONS constant (not the JS variable) was updated.
+		expect(src).toContain('Save the session_id');
+		expect(src).toContain('task_intent');
+	});
+});
+
 describe('ACE MCP proxy — Node syntax sanity', () => {
 	it('proxy script parses with `node --check` (no syntax errors)', () => {
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-mcp-proxy-syntax-'));

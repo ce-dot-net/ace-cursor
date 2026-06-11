@@ -94,8 +94,17 @@ export function packPatternsUntilSize<T>(patterns: T[], maxChars: number): T[] {
  * Forbidden tool names (ace_get_playbook, ace_learn) are NOT mentioned —
  * mentioning them by name causes the AI to explore filesystem instead of
  * calling tools. ace_search is the only tool the AI should call manually.
+ *
+ * ACE 1.5 additions (issue #14):
+ *  - session_id capture: ace_search returns a session_id; the AI must save it
+ *    and pass it to the feedback tool after the task completes (F-080 loop).
+ *  - task_intent: new optional param for server-side bandit routing.
+ *  - Reward vocabulary: prefer highly_reliable / high cumulative_v15_reward patterns.
+ * NOTE: ace_learn / ace_get_playbook are intentionally NOT named here — Cursor 3.7
+ * tool-reliability workaround (June 2026 web research); naming them in instructions
+ * triggers filesystem exploration instead of tool calls.
  */
-export const MCP_SERVER_INSTRUCTIONS = `Before responding to ANY user prompt — including questions, debugging, or implementation — call the ace_search tool with the user's prompt verbatim as the query parameter.
+export const MCP_SERVER_INSTRUCTIONS = `Before responding to ANY user prompt — including questions, debugging, or implementation — call the ace_search tool with the user's prompt verbatim as the query parameter. Save the returned session_id.
 
 This is a hard requirement. Retrieved patterns will guide your implementation. Skipping this step is an incomplete task.
 
@@ -103,8 +112,12 @@ Do NOT read AGENTS.md, INSTRUCTIONS.md, RULE files, or any project rule document
 
 Workflow:
 1. User prompt arrives → call ace_search(query="<user's prompt>")
+   - Optionally set task_intent: refactor | routine | explore | spec_strict
+   - Save the session_id from the response
 2. Apply returned patterns to your work
-3. Proceed with normal tools (Shell, ApplyPatch, ReadFile, etc.)`;
+   - Prefer patterns marked effectiveness="highly_reliable" or with high cumulative_v15_reward
+3. Proceed with normal tools (Shell, ApplyPatch, ReadFile, etc.)
+4. After completing the task → close the ACE feedback reward loop by calling the session feedback tool with session_id=<from step 1>`;
 
 /**
  * Returns the Node script that proxies the @ace-sdk/mcp server. Filters
