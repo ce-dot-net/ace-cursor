@@ -266,13 +266,13 @@ function unwrapAceSearchResultJson(rawResultJson) {
       } catch (_) { return ''; }
     }
 
-    function pushMcpEntry(toolName, argsObj, resultStr) {
+    function pushMcpEntry(toolName, argsObj, resultStr, durMs, entryStartMs) {
       const fp = String(toolName) + '\\u0001' + canonicalArgs(argsObj);
       if (!mcpByFingerprint.has(fp)) mcpByFingerprint.set(fp, []);
-      mcpByFingerprint.get(fp).push({ result: resultStr });
+      mcpByFingerprint.get(fp).push({ result: resultStr, duration_ms: durMs, entry_start_ms: entryStartMs });
       const tk = String(toolName);
       if (!mcpByTool.has(tk)) mcpByTool.set(tk, []);
-      mcpByTool.get(tk).push({ result: resultStr });
+      mcpByTool.get(tk).push({ result: resultStr, duration_ms: durMs, entry_start_ms: entryStartMs });
     }
 
     if (fs.existsSync(jsonlPath)) {
@@ -294,7 +294,17 @@ function unwrapAceSearchResultJson(rawResultJson) {
             resultStr = entry.tool_output;
           }
           if (resultStr.length > 2000) resultStr = resultStr.slice(0, 2000) + '…';
-          pushMcpEntry(entry.tool_name, argsObj, resultStr);
+          // Also carry duration_ms from the JSONL entry for timing enrichment.
+          const entryDurMs = typeof entry.duration_ms === 'number' && Number.isFinite(entry.duration_ms)
+            ? entry.duration_ms : undefined;
+          // Also carry the JSONL-entry start timestamp for MCP steps.
+          // Use presence check (not truthiness) — timestamp:0 is a valid Unix epoch.
+          const entryStartMsForMcp = (() => {
+            if (entry.timestamp === undefined || entry.timestamp === null) return undefined;
+            const t = new Date(entry.timestamp).getTime();
+            return Number.isFinite(t) ? t : undefined;
+          })();
+          pushMcpEntry(entry.tool_name, argsObj, resultStr, entryDurMs, entryStartMsForMcp);
         }
 
         // Detect ace_search calls — extract returned pattern IDs + server
@@ -327,14 +337,14 @@ function unwrapAceSearchResultJson(rawResultJson) {
     function popMcpResult(toolName, argsObj) {
       const fp = String(toolName) + '\\u0001' + canonicalArgs(argsObj);
       const arr = mcpByFingerprint.get(fp);
-      if (arr && arr.length > 0) return arr.shift().result;
+      if (arr && arr.length > 0) return arr.shift();
       // Fallback: same tool name, args may differ slightly between transcript
       // and mcp_trajectory (e.g. Cursor reformats nested objects). Take the
       // next un-matched call for that tool.
       const tk = String(toolName);
       const byTool = mcpByTool.get(tk);
-      if (byTool && byTool.length > 0) return byTool.shift().result;
-      return '';
+      if (byTool && byTool.length > 0) return byTool.shift();
+      return { result: '', duration_ms: undefined, entry_start_ms: undefined };
     }
 
     function isMcpToolName(name) {
@@ -350,7 +360,6 @@ function unwrapAceSearchResultJson(rawResultJson) {
         const lines = raw.split('\\n').filter(l => l.trim().length > 0);
         let firstUser = '';
         let stepNum = 0;
-        const nowMs = Date.now();
         for (const line of lines) {
           let entry;
           try { entry = JSON.parse(line); } catch (_) { continue; }
@@ -371,6 +380,26 @@ function unwrapAceSearchResultJson(rawResultJson) {
           }
           if (role === 'user' && !firstUser) firstUser = textContent;
           if (role === 'assistant' && textContent) lastAssistant = textContent;
+
+          // Derive per-entry start_ms from ISO timestamp field (multi-key fallback).
+          // OMIT entirely when no timestamp is present — Date.now() would make
+          // all steps appear instantaneous and is not a valid substitute.
+          // Use presence checks (not truthiness) — 0 is a valid Unix epoch value.
+          let entryStartMs;
+          if (entry) {
+            const entryTsRaw = ('timestamp' in entry && entry.timestamp !== undefined && entry.timestamp !== null)
+              ? entry.timestamp
+              : ('created_at' in entry && entry.created_at !== undefined && entry.created_at !== null)
+              ? entry.created_at
+              : ('ts' in entry && entry.ts !== undefined && entry.ts !== null)
+              ? entry.ts
+              : undefined;
+            if (entryTsRaw !== undefined) {
+              const t = new Date(entryTsRaw).getTime();
+              if (Number.isFinite(t)) entryStartMs = t;
+            }
+          }
+          const stepTiming = entryStartMs !== undefined ? { start_ms: entryStartMs } : {};
 
           // Walk every content block — multiple tool_use per message allowed.
           if (Array.isArray(content)) {
@@ -394,14 +423,26 @@ function unwrapAceSearchResultJson(rawResultJson) {
                   }
                 }
               } catch (_) {}
-              const result = isMcpToolName(tname) ? popMcpResult(tname, argsObj) : '';
+              const mcpEntry = isMcpToolName(tname) ? popMcpResult(tname, argsObj) : null;
+              const result = mcpEntry ? (mcpEntry.result || '') : '';
+              // For MCP steps: if the JSONL entry carried timing, prefer it over
+              // the transcript entry timestamp (JSONL has richer per-call data).
+              let resolvedStepTiming = stepTiming;
+              if (mcpEntry && (mcpEntry.entry_start_ms !== undefined || mcpEntry.duration_ms !== undefined)) {
+                const mStartMs = mcpEntry.entry_start_ms !== undefined ? mcpEntry.entry_start_ms : stepTiming.start_ms;
+                const mDurMs = mcpEntry.duration_ms;
+                resolvedStepTiming = {
+                  ...(mStartMs !== undefined ? { start_ms: mStartMs } : {}),
+                  ...(mDurMs !== undefined ? { duration_ms: mDurMs } : {}),
+                  ...(mStartMs !== undefined && mDurMs !== undefined ? { end_ms: mStartMs + mDurMs } : {}),
+                };
+              }
               trajectory.push({
                 step: stepNum,
                 action: tname,
                 args: truncatedArgs,
-                result: result || '',
-                start_ms: nowMs,
-                end_ms: nowMs,
+                result,
+                ...resolvedStepTiming,
               });
             }
           }
@@ -419,7 +460,6 @@ function unwrapAceSearchResultJson(rawResultJson) {
       const raw = fs.readFileSync(jsonlPath, 'utf-8');
       const lines = raw.split('\\n').filter(l => l.trim().length > 0);
       let stepNum = 0;
-      const nowMs = Date.now();
       for (const line of lines) {
         let entry;
         try { entry = JSON.parse(line); } catch (_) { continue; }
@@ -435,13 +475,24 @@ function unwrapAceSearchResultJson(rawResultJson) {
           resultStr = entry.tool_output;
         }
         if (resultStr.length > 2000) resultStr = resultStr.slice(0, 2000) + '…';
+        // Derive start_ms from entry.timestamp when present; OMIT when absent.
+        // Use presence check (not truthiness) — timestamp:0 is a valid Unix epoch.
+        let stepStartMs;
+        if (entry.timestamp !== undefined && entry.timestamp !== null) {
+          const t = new Date(entry.timestamp).getTime();
+          if (Number.isFinite(t)) stepStartMs = t;
+        }
+        // Derive duration_ms from entry field independently of timestamp.
+        const stepDurMs = typeof entry.duration_ms === 'number' && Number.isFinite(entry.duration_ms)
+          ? entry.duration_ms : undefined;
         trajectory.push({
           step: stepNum,
           action: String(entry.tool_name).slice(0, 200),
           args: argsObj,
           result: resultStr,
-          start_ms: nowMs,
-          end_ms: nowMs,
+          ...(stepStartMs !== undefined ? { start_ms: stepStartMs } : {}),
+          ...(stepDurMs !== undefined ? { duration_ms: stepDurMs } : {}),
+          ...(stepStartMs !== undefined && stepDurMs !== undefined ? { end_ms: stepStartMs + stepDurMs } : {}),
         });
       }
     }

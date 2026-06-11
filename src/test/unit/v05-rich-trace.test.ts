@@ -1269,3 +1269,340 @@ describe('dev.19 — extension trajectory watcher uses tasks/* glob', () => {
 		expect(src).toMatch(/Map<string, number>/);
 	});
 });
+
+// ===========================================================================
+// u04-timing (#8) — F-080: trajectory timing — start_ms / end_ms / duration_ms
+// ===========================================================================
+
+/**
+ * Build a transcript with entries that carry a timestamp field (multi-key
+ * fallback: timestamp || created_at || ts). Also tests that entries without
+ * any timestamp key produce steps with NO timing fields at all (not 0 / NaN).
+ */
+describe('u04-timing — F-080: trajectory timing fields', () => {
+	const TS_ISO = '2026-06-10T19:35:11.612Z';
+	const TS_MS = new Date(TS_ISO).getTime(); // 1749583511612
+
+	// --- transcript path ---
+
+	it('transcript step carries start_ms from entry.timestamp ISO string', () => {
+		const ctx = writeHelperWithStub();
+		const jsonl = writeTrajectory(ctx.tmpDir, { convId: 'CONV-TM1' });
+		// Transcript entry with a top-level timestamp field.
+		const transcript = writeCursorTranscript(ctx.tmpDir, [
+			{ role: 'user', message: { role: 'user', content: [{ type: 'text', text: 'task' }] }, timestamp: TS_ISO },
+			{ role: 'assistant', message: { role: 'assistant', content: [
+				{ type: 'tool_use', name: 'Shell', input: { command: 'ls' } },
+			] }, timestamp: TS_ISO },
+		]);
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM1', jsonlPath: jsonl, transcriptPath: transcript });
+		expect(r.status, `exit (stderr: ${r.stderr})`).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'Shell');
+		expect(step).toBeTruthy();
+		expect(step.start_ms).toBe(TS_MS);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('transcript step carries start_ms from entry.created_at when timestamp absent', () => {
+		const ctx = writeHelperWithStub();
+		const jsonl = writeTrajectory(ctx.tmpDir, { convId: 'CONV-TM2' });
+		const transcript = writeCursorTranscript(ctx.tmpDir, [
+			{ role: 'user', message: { role: 'user', content: [{ type: 'text', text: 'task' }] }, created_at: TS_ISO },
+			{ role: 'assistant', message: { role: 'assistant', content: [
+				{ type: 'tool_use', name: 'Shell', input: { command: 'echo' } },
+			] }, created_at: TS_ISO },
+		]);
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM2', jsonlPath: jsonl, transcriptPath: transcript });
+		expect(r.status).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'Shell');
+		expect(step).toBeTruthy();
+		expect(step.start_ms).toBe(TS_MS);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('transcript step carries start_ms from entry.ts when timestamp/created_at absent', () => {
+		const ctx = writeHelperWithStub();
+		const jsonl = writeTrajectory(ctx.tmpDir, { convId: 'CONV-TM3' });
+		const transcript = writeCursorTranscript(ctx.tmpDir, [
+			{ role: 'user', message: { role: 'user', content: [{ type: 'text', text: 'task' }] }, ts: TS_ISO },
+			{ role: 'assistant', message: { role: 'assistant', content: [
+				{ type: 'tool_use', name: 'Shell', input: { command: 'pwd' } },
+			] }, ts: TS_ISO },
+		]);
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM3', jsonlPath: jsonl, transcriptPath: transcript });
+		expect(r.status).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'Shell');
+		expect(step).toBeTruthy();
+		expect(step.start_ms).toBe(TS_MS);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('transcript step has NO start_ms / end_ms / duration_ms when entry has no timestamp', () => {
+		const ctx = writeHelperWithStub();
+		const jsonl = writeTrajectory(ctx.tmpDir, { convId: 'CONV-TM4' });
+		// No timestamp / created_at / ts on the entry.
+		const transcript = writeCursorTranscript(ctx.tmpDir, [
+			userMsg('task'),
+			assistantToolUse([
+				{ type: 'tool_use', name: 'Shell', input: { command: 'ls' } },
+			]),
+		]);
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM4', jsonlPath: jsonl, transcriptPath: transcript });
+		expect(r.status).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'Shell');
+		expect(step).toBeTruthy();
+		// Fields must be ABSENT — not null, not 0, not NaN.
+		expect('start_ms' in step).toBe(false);
+		expect('end_ms' in step).toBe(false);
+		expect('duration_ms' in step).toBe(false);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	// --- JSONL fallback path ---
+
+	it('JSONL-fallback step carries start_ms from entry.timestamp', () => {
+		const ctx = writeHelperWithStub();
+		// Build a JSONL with a timestamp field on the entry.
+		const aceDir = path.join(ctx.tmpDir, '.cursor', 'ace');
+		fs.mkdirSync(aceDir, { recursive: true });
+		const jsonl = path.join(aceDir, 'mcp_trajectory.jsonl');
+		fs.writeFileSync(jsonl, JSON.stringify({
+			conversation_id: 'CONV-TM5',
+			tool_name: 'ace_search',
+			tool_input: '{"query":"auth"}',
+			timestamp: TS_ISO,
+		}) + '\n');
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM5', jsonlPath: jsonl });
+		expect(r.status, `exit (stderr: ${r.stderr})`).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'ace_search');
+		expect(step).toBeTruthy();
+		expect(step.start_ms).toBe(TS_MS);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('JSONL-fallback step has NO start_ms / end_ms / duration_ms when entry lacks timestamp', () => {
+		const ctx = writeHelperWithStub();
+		const aceDir = path.join(ctx.tmpDir, '.cursor', 'ace');
+		fs.mkdirSync(aceDir, { recursive: true });
+		const jsonl = path.join(aceDir, 'mcp_trajectory.jsonl');
+		// Entry with no timestamp key at all.
+		fs.writeFileSync(jsonl, JSON.stringify({
+			conversation_id: 'CONV-TM6',
+			tool_name: 'ace_search',
+			tool_input: '{"query":"auth"}',
+		}) + '\n');
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM6', jsonlPath: jsonl });
+		expect(r.status).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'ace_search');
+		expect(step).toBeTruthy();
+		expect('start_ms' in step).toBe(false);
+		expect('end_ms' in step).toBe(false);
+		expect('duration_ms' in step).toBe(false);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	// --- duration_ms / end_ms on JSONL fallback path ---
+
+	it('JSONL-fallback step emits duration_ms and end_ms when entry has timestamp + duration_ms', () => {
+		const ctx = writeHelperWithStub();
+		const aceDir = path.join(ctx.tmpDir, '.cursor', 'ace');
+		fs.mkdirSync(aceDir, { recursive: true });
+		const jsonl = path.join(aceDir, 'mcp_trajectory.jsonl');
+		const DUR = 350;
+		fs.writeFileSync(jsonl, JSON.stringify({
+			conversation_id: 'CONV-TM-DUR1',
+			tool_name: 'ace_search',
+			tool_input: '{"query":"auth"}',
+			timestamp: TS_ISO,
+			duration_ms: DUR,
+		}) + '\n');
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM-DUR1', jsonlPath: jsonl });
+		expect(r.status, `exit (stderr: ${r.stderr})`).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'ace_search');
+		expect(step).toBeTruthy();
+		expect(step.start_ms).toBe(TS_MS);
+		expect(step.duration_ms).toBe(DUR);
+		expect(step.end_ms).toBe(TS_MS + DUR);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('JSONL-fallback step emits duration_ms but NO end_ms when timestamp absent but duration_ms present', () => {
+		const ctx = writeHelperWithStub();
+		const aceDir = path.join(ctx.tmpDir, '.cursor', 'ace');
+		fs.mkdirSync(aceDir, { recursive: true });
+		const jsonl = path.join(aceDir, 'mcp_trajectory.jsonl');
+		const DUR = 120;
+		// No timestamp → stepStartMs undefined; duration_ms still present.
+		fs.writeFileSync(jsonl, JSON.stringify({
+			conversation_id: 'CONV-TM-DUR2',
+			tool_name: 'ace_search',
+			tool_input: '{"query":"auth"}',
+			duration_ms: DUR,
+		}) + '\n');
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM-DUR2', jsonlPath: jsonl });
+		expect(r.status).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'ace_search');
+		expect(step).toBeTruthy();
+		// start_ms absent (no timestamp).
+		expect('start_ms' in step).toBe(false);
+		// duration_ms present from JSONL field.
+		expect(step.duration_ms).toBe(DUR);
+		// end_ms absent (cannot derive without start_ms).
+		expect('end_ms' in step).toBe(false);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('transcript MCP step emits duration_ms and end_ms when JSONL entry has timestamp + duration_ms', () => {
+		// Transcript carries the tool_use; JSONL carries the result + timing.
+		// pushMcpEntry must preserve duration_ms so the transcript-path step can use it.
+		const ctx = writeHelperWithStub();
+		const DUR = 200;
+		const aceDir = path.join(ctx.tmpDir, '.cursor', 'ace');
+		fs.mkdirSync(aceDir, { recursive: true });
+		// Write the JSONL with timing.
+		const jsonl = path.join(aceDir, 'mcp_trajectory.jsonl');
+		const inner = { results: [{ id: 'p1', content: 'x', confidence: 0.9 }], session_id: 'SID-T' };
+		const outer = { content: [{ type: 'text', text: JSON.stringify(inner) }], isError: false };
+		fs.writeFileSync(jsonl, JSON.stringify({
+			conversation_id: 'CONV-TM-MCP1',
+			tool_name: 'ace_search',
+			tool_input: '{"query":"jwt"}',
+			result_json: JSON.stringify(outer),
+			timestamp: TS_ISO,
+			duration_ms: DUR,
+		}) + '\n');
+		// Transcript entry with its OWN timestamp (different from JSONL timestamp).
+		// The step timing for an MCP tool should come from the JSONL entry (richer).
+		const TS_TRANSCRIPT_ISO = '2026-06-10T19:35:00.000Z'; // different from TS_ISO
+		const TS_TRANSCRIPT_MS = new Date(TS_TRANSCRIPT_ISO).getTime();
+		const transcript = writeCursorTranscript(ctx.tmpDir, [
+			{ role: 'user', message: { role: 'user', content: [{ type: 'text', text: 'help' }] }, timestamp: TS_TRANSCRIPT_ISO },
+			{ role: 'assistant', message: { role: 'assistant', content: [
+				{ type: 'tool_use', name: 'ace_search', input: { query: 'jwt' } },
+			] }, timestamp: TS_TRANSCRIPT_ISO },
+		]);
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM-MCP1', jsonlPath: jsonl, transcriptPath: transcript });
+		expect(r.status, `exit (stderr: ${r.stderr})`).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'ace_search');
+		expect(step).toBeTruthy();
+		// For MCP steps: timing should come from JSONL entry (it has richer timing data).
+		// The JSONL entry has timestamp=TS_ISO and duration_ms=DUR.
+		// JSONL start_ms must take precedence over transcript entry start_ms.
+		expect(step.start_ms).toBe(TS_MS);
+		expect(step.duration_ms).toBe(DUR);
+		expect(step.end_ms).toBe(TS_MS + DUR);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	// --- timestamp: 0 (Unix epoch) — presence-not-truthiness (finding 1) ---
+
+	it('transcript step treats timestamp:0 as a valid timestamp (Unix epoch → start_ms=0)', () => {
+		// timestamp: 0 is falsy in JS but IS a valid present value.
+		// The impl must use !== undefined, not truthy check.
+		const ctx = writeHelperWithStub();
+		const jsonl = writeTrajectory(ctx.tmpDir, { convId: 'CONV-TM-EPOCH1' });
+		const transcript = writeCursorTranscript(ctx.tmpDir, [
+			{ role: 'user', message: { role: 'user', content: [{ type: 'text', text: 'task' }] }, timestamp: 0 },
+			{ role: 'assistant', message: { role: 'assistant', content: [
+				{ type: 'tool_use', name: 'Shell', input: { command: 'date' } },
+			] }, timestamp: 0 },
+		]);
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM-EPOCH1', jsonlPath: jsonl, transcriptPath: transcript });
+		expect(r.status).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'Shell');
+		expect(step).toBeTruthy();
+		// timestamp:0 → new Date(0).getTime() = 0 — must be present, not absent.
+		expect('start_ms' in step).toBe(true);
+		expect(step.start_ms).toBe(0);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('JSONL-fallback step treats timestamp:0 as valid (Unix epoch → start_ms=0)', () => {
+		// timestamp: 0 is falsy — impl must use !== undefined, not truthy check.
+		const ctx = writeHelperWithStub();
+		const aceDir = path.join(ctx.tmpDir, '.cursor', 'ace');
+		fs.mkdirSync(aceDir, { recursive: true });
+		const jsonl = path.join(aceDir, 'mcp_trajectory.jsonl');
+		fs.writeFileSync(jsonl, JSON.stringify({
+			conversation_id: 'CONV-TM-EPOCH2',
+			tool_name: 'ace_search',
+			tool_input: '{"query":"epoch"}',
+			timestamp: 0,
+		}) + '\n');
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM-EPOCH2', jsonlPath: jsonl });
+		expect(r.status).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'ace_search');
+		expect(step).toBeTruthy();
+		expect('start_ms' in step).toBe(true);
+		expect(step.start_ms).toBe(0);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('JSONL-path MCP step treats timestamp:0 as valid when building mcpByFingerprint', () => {
+		// The JSONL pre-parse (entryStartMsForMcp) also has the same falsy bug on
+		// line ~302. Feed a JSONL+transcript pair with timestamp:0 and assert the
+		// transcript-path MCP step gets start_ms=0.
+		const ctx = writeHelperWithStub();
+		const aceDir = path.join(ctx.tmpDir, '.cursor', 'ace');
+		fs.mkdirSync(aceDir, { recursive: true });
+		const jsonl = path.join(aceDir, 'mcp_trajectory.jsonl');
+		const inner = { results: [{ id: 'p1', content: 'x', confidence: 0.9 }], session_id: 'SID-E0' };
+		const outer = { content: [{ type: 'text', text: JSON.stringify(inner) }], isError: false };
+		fs.writeFileSync(jsonl, JSON.stringify({
+			conversation_id: 'CONV-TM-EPOCH3',
+			tool_name: 'ace_search',
+			tool_input: '{"query":"epoch3"}',
+			result_json: JSON.stringify(outer),
+			timestamp: 0,
+		}) + '\n');
+		const transcript = writeCursorTranscript(ctx.tmpDir, [
+			{ role: 'user', message: { role: 'user', content: [{ type: 'text', text: 'help' }] } },
+			{ role: 'assistant', message: { role: 'assistant', content: [
+				{ type: 'tool_use', name: 'ace_search', input: { query: 'epoch3' } },
+			] } },
+		]);
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM-EPOCH3', jsonlPath: jsonl, transcriptPath: transcript });
+		expect(r.status, `exit (stderr: ${r.stderr})`).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'ace_search');
+		expect(step).toBeTruthy();
+		expect('start_ms' in step).toBe(true);
+		expect(step.start_ms).toBe(0);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	// --- step, action, args, result fields unchanged ---
+
+	it('base step fields (step, action, args, result) are unchanged when timing is present', () => {
+		const ctx = writeHelperWithStub();
+		const jsonl = writeTrajectory(ctx.tmpDir, { convId: 'CONV-TM7' });
+		const transcript = writeCursorTranscript(ctx.tmpDir, [
+			{ role: 'user', message: { role: 'user', content: [{ type: 'text', text: 'task' }] }, timestamp: TS_ISO },
+			{ role: 'assistant', message: { role: 'assistant', content: [
+				{ type: 'tool_use', name: 'Shell', input: { command: 'make' } },
+			] }, timestamp: TS_ISO },
+		]);
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM7', jsonlPath: jsonl, transcriptPath: transcript });
+		expect(r.status).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'Shell');
+		expect(step).toBeTruthy();
+		expect(step.step).toBe(1);
+		expect(step.action).toBe('Shell');
+		expect(step.args).toEqual({ command: 'make' });
+		expect(step.result).toBe('');
+		expect(step.start_ms).toBe(TS_MS);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+});
