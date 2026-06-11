@@ -26,15 +26,17 @@
  *   4  network/timeout/other recoverable
  *   5  unknown
  *
- * Side effect: writes .cursor/ace/ace-review-result.json with
- *   { helpful_pct, time_saved_min, reason, timestamp }
+ * Side effect: writes .cursor/ace/ace-review-result.json with either:
+ *   ACE 1.5: { reward_delta, reward_tier, patterns_rewarded, time_saved_min, reason, timestamp }
+ *   ACE 1.0: { helpful_pct, time_saved_min, reason, timestamp }
  * so the next prompt's pre-tool-use hook can render <ace-roi/>.
  */
 export function getLearnHelperContent(): string {
 	return `#!/usr/bin/env node
 // ACE learn helper (v0.5.0) — in-process @ace-sdk/core storeExecutionTrace.
 // Spawned by Stop hook with: node helper.js <conv_id> <jsonl_path> [transcript]
-// Writes ace-review-result.json with helpful_pct + time_saved_min for next-prompt ROI.
+// Writes ace-review-result.json with reward_delta/reward_tier (ACE 1.5) or
+// helpful_pct (ACE 1.0 fallback) + time_saved_min for next-prompt ROI.
 // Stable exit codes: 0 ok, 2 token-expired, 3 api-5xx, 4 network/other, 5 unknown.
 //
 // v0.5.0-dev.14 fixes — RICH trajectory data:
@@ -593,18 +595,17 @@ function unwrapAceSearchResultJson(rawResultJson) {
       time_saved_min = parseInt(m[1], 10) || 0;
       reason = String(m[2] || '').trim().slice(0, 200);
     }
-    // Map minutes → helpful_pct buckets.
+    // Map minutes → helpful_pct buckets (legacy fallback for 1.0 servers).
     if (time_saved_min >= 30) helpful_pct = 80;
     else if (time_saved_min >= 15) helpful_pct = 60;
     else if (time_saved_min >= 5) helpful_pct = 30;
     else if (time_saved_min > 0) helpful_pct = 15;
 
-    // Server learning_statistics override if provided.
-    if (learning && learning.learning_statistics) {
-      const stats = learning.learning_statistics;
-      if (typeof stats.helpful_pct === 'number') helpful_pct = stats.helpful_pct;
-    }
-
+    // v0.5.0-dev.25 (ACE 1.5): prefer reward fields from LearningResponse
+    // (cumulative_v15_reward_delta, reward_tier, patterns_rewarded) when the
+    // server populates them. Use presence check (not truthiness) — 0 is a
+    // valid reward value and MUST take the 1.5 path.
+    // Fall back to helpful_pct bucket for 1.0 servers / unpatched server.
     // v0.5.0-dev.19 Task A: walk up from tasks/<conv>/ (or legacy sessions/
     // <conv>/) if needed so the ROI marker lives at the top-level
     // .cursor/ace/ (next prompt's pre-tool hook reads it from there).
@@ -615,12 +616,19 @@ function unwrapAceSearchResultJson(rawResultJson) {
       aceDir = path.dirname(path.dirname(aceDir));
     }
     const reviewPath = path.join(aceDir, 'ace-review-result.json');
-    const review = {
-      helpful_pct,
-      time_saved_min,
-      reason,
-      timestamp: new Date().toISOString(),
-    };
+    const reviewBase = { time_saved_min, reason, timestamp: new Date().toISOString() };
+    // Use typeof === 'number' (not !== undefined) so a server error-path response
+    // that sends cumulative_v15_reward_delta: null correctly routes to the helpful_pct
+    // fallback branch. null !== undefined is true in JS, so the looser check would
+    // write { reward_delta: null } and discard any TIME_SAVED-derived helpful_pct —
+    // violating the backward-compat contract ("absent/null OMITTED on emit").
+    const review = (learning && typeof learning.cumulative_v15_reward_delta === 'number')
+      ? Object.assign({}, reviewBase, {
+          reward_delta: learning.cumulative_v15_reward_delta,
+          reward_tier: learning.reward_tier,
+          patterns_rewarded: learning.patterns_rewarded,
+        })
+      : Object.assign({}, reviewBase, { helpful_pct });
     try { fs.writeFileSync(reviewPath, JSON.stringify(review, null, 2), 'utf-8'); } catch (_) {}
 
     debugLog(jsonlPath, 'exit_0 stored=' + !!(learning && learning.stored) + ' time_saved=' + time_saved_min);

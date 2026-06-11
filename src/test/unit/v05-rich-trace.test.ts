@@ -1910,3 +1910,171 @@ describe('u05-retrievalid — helper source-level assertions', () => {
 		expect(src).toMatch(/appliedLogIds\s*!==\s*undefined/);
 	});
 });
+
+// ===========================================================================
+// u09-rewardsignal — learn helper writes reward_delta/reward_tier/patterns_rewarded
+//                    to ace-review-result.json; falls back to helpful_pct for
+//                    1.0 servers that do not populate cumulative_v15_reward_delta.
+// ===========================================================================
+
+/**
+ * Variant helper stub that returns reward fields from storeExecutionTrace.
+ * Mirrors writeHelperWithStub but configures the return value.
+ */
+function writeHelperWithRewardStub(opts: {
+	returnReward?: { cumulative_v15_reward_delta: number; reward_tier: string; patterns_rewarded: number };
+	returnLegacy?: boolean; // returns { stored: true } with no reward fields
+	returnNull?: boolean;   // returns { stored: true, cumulative_v15_reward_delta: null } — error-path server
+} = {}): { tmpDir: string; helperPath: string; traceFile: string; debugLogPath: string } {
+	const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-reward-'));
+	const aceDir = path.join(tmpDir, '.cursor', 'ace');
+	fs.mkdirSync(aceDir, { recursive: true });
+
+	const stubDir = path.join(tmpDir, 'node_modules', '@ace-sdk', 'core');
+	fs.mkdirSync(stubDir, { recursive: true });
+	const traceFile = path.join(tmpDir, 'sent-trace.json');
+
+	const returnVal = opts.returnReward
+		? JSON.stringify({ stored: true, cumulative_v15_reward_delta: opts.returnReward.cumulative_v15_reward_delta, reward_tier: opts.returnReward.reward_tier, patterns_rewarded: opts.returnReward.patterns_rewarded })
+		: opts.returnNull
+			? JSON.stringify({ stored: true, cumulative_v15_reward_delta: null, reward_tier: 'cold' })
+			: 'JSON.stringify({ stored: true })';
+
+	const stubBody = `
+class AceApiError extends Error { constructor(m, status){ super(m); this.name='AceApiError'; this.status=status; } }
+class TokenExpiredError extends Error { constructor(m){ super(m); this.name='TokenExpiredError'; } }
+function isTokenExpiredError(e){ return e && e.name === 'TokenExpiredError'; }
+async function loadConfig(){
+  return { token:'t', orgId:'o', api_url:'http://x' };
+}
+class AceClient {
+  constructor(c){ this.c = c; }
+  async storeExecutionTrace(trace){
+    require('fs').writeFileSync(${JSON.stringify(traceFile)}, JSON.stringify(trace, null, 2));
+    return ${(opts.returnReward || opts.returnNull) ? returnVal : '{ stored: true }'};
+  }
+}
+module.exports = { loadConfig, AceClient, AceApiError, TokenExpiredError, isTokenExpiredError };
+`;
+	fs.writeFileSync(path.join(stubDir, 'index.js'), stubBody);
+	fs.writeFileSync(
+		path.join(stubDir, 'package.json'),
+		JSON.stringify({ name: '@ace-sdk/core', version: '0.0.0-stub', main: 'index.js' }),
+	);
+
+	const helperPath = path.join(tmpDir, 'helper.js');
+	fs.writeFileSync(helperPath, getLearnHelperContent(), { mode: 0o755 });
+
+	const debugLogPath = path.join(aceDir, 'ace-stop-debug.log');
+	return { tmpDir, helperPath, traceFile, debugLogPath };
+}
+
+function writeSimpleTrajectory(tmpDir: string, convId: string): string {
+	const aceDir = path.join(tmpDir, '.cursor', 'ace');
+	fs.mkdirSync(aceDir, { recursive: true });
+	const jsonl = path.join(aceDir, 'mcp_trajectory.jsonl');
+	fs.writeFileSync(jsonl, JSON.stringify({
+		conversation_id: convId, tool_name: 'Read', tool_input: '{"file":"a.ts"}',
+	}) + '\n');
+	return jsonl;
+}
+
+describe('u09-rewardsignal — learn helper writes reward fields to ace-review-result.json', () => {
+	it('writes reward_delta, reward_tier, patterns_rewarded (not helpful_pct) when server returns reward fields', () => {
+		const ctx = writeHelperWithRewardStub({
+			returnReward: { cumulative_v15_reward_delta: 0.8, reward_tier: 'hot', patterns_rewarded: 2 },
+		});
+		const jsonl = writeSimpleTrajectory(ctx.tmpDir, 'CONV-RW1');
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-RW1', jsonlPath: jsonl });
+		expect(r.status, `helper exit (stderr: ${r.stderr})`).toBe(0);
+
+		const reviewPath = path.join(ctx.tmpDir, '.cursor', 'ace', 'ace-review-result.json');
+		expect(fs.existsSync(reviewPath)).toBe(true);
+		const review = JSON.parse(fs.readFileSync(reviewPath, 'utf-8'));
+
+		expect(review.reward_delta).toBe(0.8);
+		expect(review.reward_tier).toBe('hot');
+		expect(review.patterns_rewarded).toBe(2);
+		// Must NOT contain helpful_pct when reward fields are present
+		expect('helpful_pct' in review).toBe(false);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('EDGE: reward_delta: 0 (valid 1.5 value) writes reward path, not helpful_pct', () => {
+		const ctx = writeHelperWithRewardStub({
+			returnReward: { cumulative_v15_reward_delta: 0, reward_tier: 'cold', patterns_rewarded: 0 },
+		});
+		const jsonl = writeSimpleTrajectory(ctx.tmpDir, 'CONV-RW-ZERO');
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-RW-ZERO', jsonlPath: jsonl });
+		expect(r.status, `helper exit (stderr: ${r.stderr})`).toBe(0);
+
+		const reviewPath = path.join(ctx.tmpDir, '.cursor', 'ace', 'ace-review-result.json');
+		const review = JSON.parse(fs.readFileSync(reviewPath, 'utf-8'));
+		// 0 !== undefined → reward path
+		expect(review.reward_delta).toBe(0);
+		expect('helpful_pct' in review).toBe(false);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('falls back to helpful_pct when server returns no reward fields (1.0 server / legacy)', () => {
+		// Default stub returns { stored: true } with no reward fields.
+		const ctx = writeHelperWithRewardStub({ returnLegacy: true });
+		const jsonl = writeSimpleTrajectory(ctx.tmpDir, 'CONV-RW-LEG');
+		// Give it a TIME_SAVED so helpful_pct > 0 to verify fallback writes correctly
+		// We write the output into the trajectory so the helper parses it as lastAssistant.
+		// Simpler: just verify helpful_pct is present (even if 0) and reward_delta absent.
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-RW-LEG', jsonlPath: jsonl });
+		expect(r.status, `helper exit (stderr: ${r.stderr})`).toBe(0);
+
+		const reviewPath = path.join(ctx.tmpDir, '.cursor', 'ace', 'ace-review-result.json');
+		expect(fs.existsSync(reviewPath)).toBe(true);
+		const review = JSON.parse(fs.readFileSync(reviewPath, 'utf-8'));
+		// Legacy path: helpful_pct present, reward_delta absent
+		expect('helpful_pct' in review).toBe(true);
+		expect('reward_delta' in review).toBe(false);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('helper source: dead stats.helpful_pct override is removed (field absent from LearningStatistics)', () => {
+		const src = getLearnHelperContent();
+		// The old dead-code override checked `typeof stats.helpful_pct === 'number'`.
+		// This must be gone from the source.
+		expect(src).not.toMatch(/stats\.helpful_pct/);
+	});
+
+	it('helper source: uses typeof === number guard for cumulative_v15_reward_delta (not !== undefined)', () => {
+		const src = getLearnHelperContent();
+		// Must use typeof === 'number' so that null (valid JSON from an error-path server)
+		// is correctly routed to the helpful_pct fallback branch.
+		// null !== undefined is true in JS, so the old !== undefined guard would write
+		// { reward_delta: null } and discard any helpful_pct value — violating the
+		// backward-compat contract ("absent fields OMITTED on emit; null takes fallback path").
+		expect(src).toMatch(/typeof\s+learning\.cumulative_v15_reward_delta\s*===\s*['"]number['"]/);
+	});
+
+	it('helper source: reward-first write includes reward_delta, reward_tier, patterns_rewarded', () => {
+		const src = getLearnHelperContent();
+		expect(src).toMatch(/reward_delta/);
+		expect(src).toMatch(/reward_tier/);
+		expect(src).toMatch(/patterns_rewarded/);
+	});
+
+	it('EDGE: server returns cumulative_v15_reward_delta: null → falls back to helpful_pct (not reward_delta: null)', () => {
+		// A partially-upgraded or error-path server may send { cumulative_v15_reward_delta: null }.
+		// null !== undefined is true in JS, so the old discriminator would write reward_delta: null
+		// and discard any TIME_SAVED-derived helpful_pct — violating the backward-compat contract.
+		// The correct discriminator (typeof === 'number') routes null to the fallback branch.
+		const ctx = writeHelperWithRewardStub({ returnNull: true });
+		const jsonl = writeSimpleTrajectory(ctx.tmpDir, 'CONV-RW-NULL');
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-RW-NULL', jsonlPath: jsonl });
+		expect(r.status, `helper exit (stderr: ${r.stderr})`).toBe(0);
+
+		const reviewPath = path.join(ctx.tmpDir, '.cursor', 'ace', 'ace-review-result.json');
+		expect(fs.existsSync(reviewPath)).toBe(true);
+		const review = JSON.parse(fs.readFileSync(reviewPath, 'utf-8'));
+		// null must route to fallback: helpful_pct present, reward_delta ABSENT (never null)
+		expect('helpful_pct' in review).toBe(true);
+		expect('reward_delta' in review).toBe(false);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+});

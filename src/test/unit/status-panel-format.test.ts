@@ -37,7 +37,7 @@ vi.mock('../../ace/client', () => ({
 	getAceClient: vi.fn(),
 }));
 
-import { formatCount, normalizeStats, renderQualityCards, buildTopPatternsUrl, sortTopPatternsByReward, renderPatternRewardBadge, StatusPanel } from '../../webviews/statusPanel';
+import { formatCount, normalizeStats, renderQualityCards, buildTopPatternsUrl, sortTopPatternsByReward, renderPatternRewardBadge, renderTaskSummaryReward, StatusPanel } from '../../webviews/statusPanel';
 import { getValidToken, getHardCapInfo } from '../../commands/login';
 import { loadConfig, loadUserAuth, getDefaultOrgId } from '@ace-sdk/core';
 import { getLastUsageInfo, getAceClient } from '../../ace/client';
@@ -275,6 +275,80 @@ describe('renderPatternRewardBadge', () => {
 		// Should degrade gracefully
 		expect(html).toContain('Helpful:');
 		expect(html).toContain('0');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// u09-rewardsignal: renderTaskSummaryReward — reward-model signal vs helpful_pct
+// ---------------------------------------------------------------------------
+describe('renderTaskSummaryReward (u09-rewardsignal)', () => {
+	it('renders reward path when reward_delta is present', () => {
+		const html = renderTaskSummaryReward({ reward_delta: 0.5, reward_tier: 'warm' });
+		expect(html).toContain('0.50');
+		expect(html).toContain('reward (warm)');
+		// Must NOT render helpful path
+		expect(html).not.toContain('helpful');
+	});
+
+	it('renders reward path with toFixed(2) formatting', () => {
+		const html = renderTaskSummaryReward({ reward_delta: 1.0, reward_tier: 'hot' });
+		expect(html).toContain('1.00');
+		expect(html).toContain('reward (hot)');
+	});
+
+	it('EDGE: reward_delta: 0 is a valid 1.5 value and takes the reward path', () => {
+		// 0 !== undefined → 1.5 path; discriminator is presence, not truthiness
+		const html = renderTaskSummaryReward({ reward_delta: 0, reward_tier: 'cold' });
+		expect(html).toContain('0.00');
+		expect(html).toContain('reward (cold)');
+		expect(html).not.toContain('helpful');
+	});
+
+	it('falls back to helpful_pct when reward_delta is absent', () => {
+		const html = renderTaskSummaryReward({ helpful_pct: 30 });
+		expect(html).toContain('30%');
+		expect(html).toContain('helpful');
+		expect(html).not.toContain('reward');
+	});
+
+	it('returns empty string when both reward_delta and helpful_pct are absent', () => {
+		const html = renderTaskSummaryReward({});
+		expect(html).toBe('');
+	});
+
+	it('returns empty string when helpful_pct is 0 and reward_delta absent', () => {
+		const html = renderTaskSummaryReward({ helpful_pct: 0 });
+		expect(html).toBe('');
+	});
+
+	it('renders reward_tier fallback as "n/a" when tier is missing', () => {
+		const html = renderTaskSummaryReward({ reward_delta: 0.8 });
+		expect(html).toContain('0.80');
+		expect(html).toContain('reward (n/a)');
+	});
+
+	it('EDGE: reward_delta: null returns empty string (not TypeError crash)', () => {
+		// JSON.parse of a server response can produce null for number fields.
+		// null !== undefined is true in JS, so without an explicit null guard
+		// the old code would reach (null).toFixed(2) and throw TypeError.
+		// The corrected guard (typeof reward_delta === 'number') must return ''.
+		expect(() => renderTaskSummaryReward({ reward_delta: null, reward_tier: 'cold' })).not.toThrow();
+		const html = renderTaskSummaryReward({ reward_delta: null, reward_tier: 'cold' });
+		expect(html).toBe('');
+	});
+
+	it('XSS: reward_tier is HTML-escaped before interpolation', () => {
+		// A malicious or compromised server could send reward_tier with HTML characters.
+		// The tier string must be escaped so it cannot inject tags or attributes.
+		const html = renderTaskSummaryReward({ reward_delta: 0.5, reward_tier: '<img src=x onerror=alert(1)>' });
+		expect(html).not.toContain('<img');
+		expect(html).toContain('&lt;img');
+	});
+
+	it('XSS: reward_tier with ampersand and angle brackets fully escaped', () => {
+		const html = renderTaskSummaryReward({ reward_delta: 1.0, reward_tier: 'a&b<c>d' });
+		expect(html).not.toContain('<c>');
+		expect(html).toContain('a&amp;b&lt;c&gt;d');
 	});
 });
 

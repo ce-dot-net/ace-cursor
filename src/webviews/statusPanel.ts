@@ -13,6 +13,20 @@ import type { UsageInfo, UsageMetric } from '@ace-sdk/core';
 import { getLastUsageInfo, getAceClient } from '../ace/client';
 
 /**
+ * Escape special HTML characters to prevent XSS injection in webview HTML.
+ * Applied to any server-supplied string fields (reward_tier, reason, etc.)
+ * before interpolation into HTML templates.
+ */
+export function escapeHtml(str: string): string {
+	return str
+		.replace(/&/g, '&amp;')
+		.replace(/</g, '&lt;')
+		.replace(/>/g, '&gt;')
+		.replace(/"/g, '&quot;')
+		.replace(/'/g, '&#039;');
+}
+
+/**
  * Format a numeric count for display in the status panel.
  *
  * Server-side aggregates (e.g. helpful_total) can arrive as noisy floats like
@@ -151,6 +165,44 @@ export function renderPatternRewardBadge(p: Record<string, any>): string {
 		return `<span>Reward: ${(p.cumulative_v15_reward as number).toFixed(2)}</span>`;
 	}
 	return `<span>Helpful: ${formatCount(p.helpful || 0)}</span>`;
+}
+
+/**
+ * Render the task-summary reward/helpful metric tile from an ace-review-result.json object.
+ *
+ * ACE 1.5: server populates `reward_delta` + `reward_tier` → renders "0.50 reward (warm)".
+ * ACE 1.0 / unpatched: only `helpful_pct` present → renders "30% helpful" (legacy fallback).
+ * Discriminator: presence of `reward_delta` (not truthiness — 0 is valid).
+ *
+ * Returns an empty string when there is no data to show.
+ */
+export function renderTaskSummaryReward(review: Record<string, any>): string {
+	// 1.5 path: reward_delta present and is a number (including 0 — valid reward value).
+	// Explicitly exclude null: JSON.parse of a server response can produce null for numeric
+	// fields, and null !== undefined evaluates true in JS, so without this guard
+	// (null).toFixed(2) would throw a TypeError at runtime.
+	if (typeof review.reward_delta === 'number') {
+		const delta = (review.reward_delta as number).toFixed(2);
+		// Escape tier: reward_tier is a free-form string from the server — no enum
+		// constraint in the ACE SDK. Escaping prevents tag/attribute injection in
+		// the webview (e.g. `<img src=x onerror=...>` → `&lt;img src=x onerror=...&gt;`).
+		const tier = escapeHtml(String(review.reward_tier || 'n/a'));
+		return `
+				<div class="task-metric">
+					<div class="task-metric-value">${delta}</div>
+					<div class="task-metric-label">reward (${tier})</div>
+				</div>`;
+	}
+	// 1.0 legacy fallback: helpful_pct > 0
+	const helpfulPct = review.helpful_pct || 0;
+	if (helpfulPct > 0) {
+		return `
+				<div class="task-metric">
+					<div class="task-metric-value">${helpfulPct}%</div>
+					<div class="task-metric-label">helpful</div>
+				</div>`;
+	}
+	return '';
 }
 
 export class StatusPanel {
@@ -550,22 +602,24 @@ export class StatusPanel {
 		}
 
 		// Parse ace-review-result.json for self-eval
-		let helpfulPct = 0;
+		let reviewData: Record<string, any> = {};
 		let timeSaved = '';
 		let reason = '';
 		if (fs.existsSync(reviewFile)) {
 			try {
-				const review = JSON.parse(fs.readFileSync(reviewFile, 'utf8'));
-				helpfulPct = review.helpful_pct || 0;
-				timeSaved = review.time_saved || '';
-				reason = review.reason || '';
+				reviewData = JSON.parse(fs.readFileSync(reviewFile, 'utf8'));
+				timeSaved = reviewData.time_saved || '';
+				reason = reviewData.reason || '';
 			} catch {
 				// Ignore parse errors
 			}
 		}
 
+		const rewardMetricHtml = renderTaskSummaryReward(reviewData);
+		const hasRewardData = rewardMetricHtml.length > 0;
+
 		// Only show if there's data
-		if (patternsInjected === 0 && helpfulPct === 0) {
+		if (patternsInjected === 0 && !hasRewardData) {
 			return '';
 		}
 
@@ -573,12 +627,8 @@ export class StatusPanel {
 			avgRelevance >= 40 ? 'var(--vscode-inputValidation-warningBorder)' :
 			'var(--vscode-testing-iconFailed)';
 
-		const helpColor = helpfulPct >= 70 ? 'var(--vscode-testing-iconPassed)' :
-			helpfulPct >= 40 ? 'var(--vscode-inputValidation-warningBorder)' :
-			helpfulPct > 0 ? 'var(--vscode-testing-iconFailed)' : 'var(--vscode-descriptionForeground)';
-
-		const timeSavedHtml = timeSaved ? `<span class="task-time-saved">~${timeSaved} saved</span>` : '';
-		const reasonHtml = reason ? `<div class="task-reason">"${reason}"</div>` : '';
+		const timeSavedHtml = timeSaved ? `<span class="task-time-saved">~${escapeHtml(String(timeSaved))} saved</span>` : '';
+		const reasonHtml = reason ? `<div class="task-reason">"${escapeHtml(String(reason))}"</div>` : '';
 
 		return `
 		<div class="task-summary">
@@ -596,11 +646,7 @@ export class StatusPanel {
 					<div class="task-metric-value" style="color: ${relColor}">${avgRelevance}%</div>
 					<div class="task-metric-label">relevance</div>
 				</div>
-				${helpfulPct > 0 ? `
-				<div class="task-metric">
-					<div class="task-metric-value" style="color: ${helpColor}">${helpfulPct}%</div>
-					<div class="task-metric-label">helpful</div>
-				</div>` : ''}
+				${rewardMetricHtml}
 			</div>
 			${timeSaved || reason ? `
 			<div class="task-eval">
