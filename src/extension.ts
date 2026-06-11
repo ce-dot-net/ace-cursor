@@ -1077,7 +1077,7 @@ async function registerMcpServer(context: vscode.ExtensionContext): Promise<void
 	// `npx @ace-sdk/mcp`. Proxy filters tools/list to hide ace_get_playbook +
 	// ace_learn from the AI's tool list. AI no see, AI no call.
 	let mcpCommand = 'npx';
-	let mcpArgs: string[] = ['-y', '@ace-sdk/mcp'];
+	let mcpArgs: string[] = ['-y', '@ace-sdk/mcp@^3.1.1'];
 	try {
 		const helperDir = path.join(context.extensionPath, 'scripts');
 		fs.mkdirSync(helperDir, { recursive: true });

@@ -166,7 +166,7 @@ function packPatternsUntilSize(patterns, maxChars) {
 const MCP_INSTRUCTIONS = ${instructions};
 
 // Spawn the real MCP server. ACE_* env vars come from Cursor MCP registration.
-const child = childProc.spawn('npx', ['-y', '@ace-sdk/mcp'], {
+const child = childProc.spawn('npx', ['-y', '@ace-sdk/mcp@^3.1.1'], {
   stdio: ['pipe', 'pipe', 'pipe'],
   env: process.env,
 });

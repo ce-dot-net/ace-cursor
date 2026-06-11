@@ -137,6 +137,16 @@ describe('ACE MCP proxy — content', () => {
 		expect(script).toMatch(/spawn\(['"]npx['"]/);
 	});
 
+	it('script uses pinned @ace-sdk/mcp@^3.1.1 (no bare unversioned @ace-sdk/mcp in spawn args)', () => {
+		const script = getAceMcpProxyContent();
+		// Must contain the pinned version string.
+		expect(script).toContain('@ace-sdk/mcp@^3.1.1');
+		// Must NOT contain the bare unversioned string as a standalone spawn argument.
+		// The bare string '@ace-sdk/mcp' followed by ']' or ',' (array element boundary)
+		// would indicate an unversioned arg. We check the spawn array specifically.
+		expect(script).not.toMatch(/['"]-y['"],\s*['"]@ace-sdk\/mcp['"]\s*[,\]]/);
+	});
+
 	it('script parses JSON line-by-line and re-emits filtered', () => {
 		const script = getAceMcpProxyContent();
 		expect(script).toContain('JSON.parse');

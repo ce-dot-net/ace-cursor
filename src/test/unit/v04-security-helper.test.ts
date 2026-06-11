@@ -182,6 +182,24 @@ describe('v0.4.1 helper.js (in-process @ace-sdk/core) approach', () => {
 		expect(pkg.dependencies['@ace-sdk/core']).toBeDefined();
 	});
 
+	it('@ace-sdk/core version starts with ^3 (ACE 1.5 requirement)', () => {
+		const pkgPath = path.resolve(__dirname, '../../../package.json');
+		const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+		const ver: string = pkg.dependencies['@ace-sdk/core'];
+		expect(ver, '@ace-sdk/core must be pinned to ^3.x.x').toMatch(/^\^3\./);
+	});
+
+	it('@ace-sdk/mcp is NOT a declared dependency in package.json (npx-fetched at runtime)', () => {
+		const pkgPath = path.resolve(__dirname, '../../../package.json');
+		const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+		const allDeps = {
+			...(pkg.dependencies || {}),
+			...(pkg.devDependencies || {}),
+			...(pkg.peerDependencies || {}),
+		};
+		expect(allDeps['@ace-sdk/mcp']).toBeUndefined();
+	});
+
 	it('package.json version is at least 0.4.1 (v0.4.1+ contract)', () => {
 		// Caveman: original test pinned to 0.4.1 exactly. We bump versions but keep
 		// the contract — this version-floor guard prevents accidental downgrade.
