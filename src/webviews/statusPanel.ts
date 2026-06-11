@@ -25,6 +25,88 @@ export function formatCount(n: number): string {
 	return s.endsWith('.0') ? s.slice(0, -2) : s;
 }
 
+/**
+ * Normalized view of the quality/reward fields returned by /analytics.
+ *
+ * ACE 1.5 servers send `cumulative_reward_total` (and tier counters).
+ * ACE 1.0 servers send only `helpful_total` / `harmful_total`.
+ * Discriminator: presence of `cumulative_reward_total` (not truthiness —
+ * 0 is a valid 1.5 value and MUST take the 1.5 path).
+ */
+export interface NormalizedStats {
+	/** Defined (incl. 0) when server is ACE 1.5. Undefined on 1.0 servers. */
+	rewardTotal: number | undefined;
+	hotTotal: number;
+	warmTotal: number;
+	coldTotal: number;
+	atRiskCount: number;
+	/** ACE 1.0 legacy fields */
+	helpfulTotal: number;
+	harmfulTotal: number;
+	legacyTrustScore: number;
+}
+
+/**
+ * Pure adapter — extract reward/legacy fields from a raw analytics payload.
+ * Safe to call with any shape; missing fields default to 0.
+ */
+export function normalizeStats(stats: Record<string, any>): NormalizedStats {
+	// Presence check (not truthiness) — 0 is a valid 1.5 value.
+	const rewardTotal: number | undefined =
+		stats.cumulative_reward_total !== undefined ? stats.cumulative_reward_total : undefined;
+	const hotTotal = stats.hot_total ?? 0;
+	const warmTotal = stats.warm_total ?? 0;
+	const coldTotal = stats.cold_total ?? 0;
+	const atRiskCount = stats.at_risk_count ?? 0;
+	// Legacy 1.0 fallback fields
+	const helpfulTotal = stats.helpful_total ?? 0;
+	const harmfulTotal = stats.harmful_total ?? 0;
+	const legacyTrustScore =
+		helpfulTotal + harmfulTotal > 0
+			? Math.round((helpfulTotal / (helpfulTotal + harmfulTotal)) * 100)
+			: 100;
+	return { rewardTotal, hotTotal, warmTotal, coldTotal, atRiskCount, helpfulTotal, harmfulTotal, legacyTrustScore };
+}
+
+/**
+ * Pure renderer — produce the three quality-metric card HTML fragments.
+ *
+ * 1.5 path (rewardTotal !== undefined): cumulative reward + tier counters + at-risk.
+ * 1.0 fallback (rewardTotal === undefined): legacy helpful / harmful / trust-score.
+ *
+ * rewardTotal is rendered with .toFixed(1) (NOT formatCount) because it is a
+ * raw float aggregate, not a rounded integer count.
+ */
+export function renderQualityCards(ns: NormalizedStats): string {
+	if (ns.rewardTotal !== undefined) {
+		return `<div class="quality-item">
+    <div class="quality-value">${ns.rewardTotal.toFixed(1)}</div>
+    <div class="quality-label">Cumulative Reward</div>
+</div>
+<div class="quality-item">
+    <div class="quality-value">${ns.hotTotal} / ${ns.warmTotal} / ${ns.coldTotal}</div>
+    <div class="quality-label">Hot / Warm / Cold</div>
+</div>
+<div class="quality-item">
+    <div class="quality-value">${ns.atRiskCount}</div>
+    <div class="quality-label">At-Risk Patterns</div>
+</div>`;
+	}
+	// 1.0 server fallback — legacy cards unchanged
+	return `<div class="quality-item">
+    <div class="quality-value positive">${formatCount(ns.helpfulTotal)}</div>
+    <div class="quality-label">👍 Helpful</div>
+</div>
+<div class="quality-item">
+    <div class="quality-value negative">${formatCount(ns.harmfulTotal)}</div>
+    <div class="quality-label">👎 Harmful</div>
+</div>
+<div class="quality-item">
+    <div class="quality-value neutral">${ns.legacyTrustScore}%</div>
+    <div class="quality-label">🎯 Trust Score</div>
+</div>`;
+}
+
 export class StatusPanel {
 	public static currentPanel: StatusPanel | undefined;
 	private readonly _panel: vscode.WebviewPanel;
@@ -488,12 +570,8 @@ export class StatusPanel {
 
 		// Enhanced metrics
 		const topPatterns = stats.top_patterns || [];
-		const helpfulTotal = stats.helpful_total || 0;
-		const harmfulTotal = stats.harmful_total || 0;
 		const byDomain = stats.by_domain || {};
-		const trustScore = helpfulTotal + harmfulTotal > 0 
-			? Math.round((helpfulTotal / (helpfulTotal + harmfulTotal)) * 100) 
-			: 100;
+		const ns = normalizeStats(stats);
 
 		// Get hard cap info for session expiration display
 		const hardCap = getHardCapInfo();
@@ -1053,18 +1131,7 @@ export class StatusPanel {
 
 	<!-- Quality Metrics -->
 	<div class="quality-metrics">
-		<div class="quality-item">
-			<div class="quality-value positive">${formatCount(helpfulTotal)}</div>
-			<div class="quality-label">👍 Helpful</div>
-		</div>
-		<div class="quality-item">
-			<div class="quality-value negative">${formatCount(harmfulTotal)}</div>
-			<div class="quality-label">👎 Harmful</div>
-		</div>
-		<div class="quality-item">
-			<div class="quality-value neutral">${trustScore}%</div>
-			<div class="quality-label">🎯 Trust Score</div>
-		</div>
+		${renderQualityCards(ns)}
 	</div>
 
 	<!-- Top Patterns -->
