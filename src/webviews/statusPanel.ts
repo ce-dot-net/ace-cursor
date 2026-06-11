@@ -297,7 +297,8 @@ export class StatusPanel {
 				headers: {
 					'Authorization': `Bearer ${token}`,
 					'Content-Type': 'application/json',
-					'X-ACE-Org': orgId
+					'X-ACE-Org': orgId,
+					'X-ACE-Project': ctx.projectId
 				}
 			});
 			if (verifyResponse.ok) {

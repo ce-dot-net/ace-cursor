@@ -6,7 +6,7 @@
  * keeps integers clean while taming floating-point noise.
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // statusPanel.ts imports 'vscode' at the top level. Mock it so the module
 // can load in a plain Node (vitest) environment.
@@ -37,7 +37,10 @@ vi.mock('../../ace/client', () => ({
 	getAceClient: vi.fn(),
 }));
 
-import { formatCount, normalizeStats, renderQualityCards, buildTopPatternsUrl, sortTopPatternsByReward, renderPatternRewardBadge } from '../../webviews/statusPanel';
+import { formatCount, normalizeStats, renderQualityCards, buildTopPatternsUrl, sortTopPatternsByReward, renderPatternRewardBadge, StatusPanel } from '../../webviews/statusPanel';
+import { getValidToken, getHardCapInfo } from '../../commands/login';
+import { loadConfig, loadUserAuth, getDefaultOrgId } from '@ace-sdk/core';
+import { getLastUsageInfo, getAceClient } from '../../ace/client';
 
 describe('formatCount', () => {
 	it('rounds noisy floats to 1 decimal place', () => {
@@ -272,5 +275,90 @@ describe('renderPatternRewardBadge', () => {
 		// Should degrade gracefully
 		expect(html).toContain('Helpful:');
 		expect(html).toContain('0');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// u08-projectheader: X-ACE-Project header on all _fetchStatus raw fetch() calls
+// ---------------------------------------------------------------------------
+describe('_fetchStatus X-ACE-Project headers (u08-projectheader)', () => {
+	const PROJECT_ID = 'proj-abc123';
+	const ORG_ID = 'org-xyz';
+	const TOKEN = 'ace_user_test-token';
+	const SERVER_URL = 'https://ace-test.example.com';
+
+	// Captured fetch calls, keyed by URL substring
+	let fetchCalls: Array<{ url: string; headers: Record<string, string> }> = [];
+
+	beforeEach(() => {
+		fetchCalls = [];
+
+		// Stub global fetch — respond successfully to all three endpoints
+		vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+			const headers = (init?.headers ?? {}) as Record<string, string>;
+			fetchCalls.push({ url: String(url), headers });
+
+			if (String(url).includes('/analytics')) {
+				return { ok: true, json: async () => ({ total_patterns: 42, helpful_total: 10, harmful_total: 1 }) };
+			}
+			if (String(url).includes('/config/verify')) {
+				return { ok: true, json: async () => ({ org_name: 'TestOrg', projects: [{ project_id: PROJECT_ID, project_name: 'TestProject' }] }) };
+			}
+			if (String(url).includes('/top')) {
+				return { ok: true, json: async () => ({ bullets: [] }) };
+			}
+			return { ok: true, json: async () => ({}) };
+		});
+
+		// Stub getValidToken to return a fixed token
+		vi.mocked(getValidToken).mockResolvedValue({ token: TOKEN } as any);
+		vi.mocked(getHardCapInfo).mockResolvedValue(null as any);
+
+		// Stub @ace-sdk/core for _getAceConfig
+		vi.mocked(loadConfig).mockReturnValue({ serverUrl: SERVER_URL } as any);
+		vi.mocked(loadUserAuth).mockReturnValue({ token: TOKEN } as any);
+		vi.mocked(getDefaultOrgId).mockReturnValue(ORG_ID);
+
+		// Stub ace/client — no cached usage
+		vi.mocked(getLastUsageInfo).mockReturnValue(undefined);
+		vi.mocked(getAceClient).mockReturnValue(null as any);
+	});
+
+	/** Build a minimal StatusPanel instance via prototype — bypasses the private constructor. */
+	function makePanel(): any {
+		const instance = Object.create(StatusPanel.prototype);
+		// Stub _getAceConfig to return our test config
+		instance._getAceConfig = () => ({
+			serverUrl: SERVER_URL,
+			auth: { token: TOKEN, default_org_id: ORG_ID },
+		});
+		return instance;
+	}
+
+	it('analytics fetch includes X-ACE-Project', async () => {
+		const panel = makePanel();
+		await panel._fetchStatus({ orgId: ORG_ID, projectId: PROJECT_ID });
+
+		const analyticsCall = fetchCalls.find(c => c.url.includes('/analytics'));
+		expect(analyticsCall, 'analytics fetch should have been called').toBeTruthy();
+		expect(analyticsCall!.headers['X-ACE-Project']).toBe(PROJECT_ID);
+	});
+
+	it('config/verify fetch includes X-ACE-Project', async () => {
+		const panel = makePanel();
+		await panel._fetchStatus({ orgId: ORG_ID, projectId: PROJECT_ID });
+
+		const verifyCall = fetchCalls.find(c => c.url.includes('/config/verify'));
+		expect(verifyCall, 'config/verify fetch should have been called').toBeTruthy();
+		expect(verifyCall!.headers['X-ACE-Project']).toBe(PROJECT_ID);
+	});
+
+	it('top patterns fetch includes X-ACE-Project', async () => {
+		const panel = makePanel();
+		await panel._fetchStatus({ orgId: ORG_ID, projectId: PROJECT_ID });
+
+		const topCall = fetchCalls.find(c => c.url.includes('/top'));
+		expect(topCall, 'top patterns fetch should have been called').toBeTruthy();
+		expect(topCall!.headers['X-ACE-Project']).toBe(PROJECT_ID);
 	});
 });
