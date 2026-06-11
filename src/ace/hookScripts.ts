@@ -467,6 +467,22 @@ if [ "$n" = "0" ] || [ -z "$n" ]; then
   echo '{"permission":"allow"}'; exit 0
 fi
 
+# F-080 — persist retrieval context keyed by conv/gen for the learn helper.
+# Shape: { retrieval_id: string|null, log_id_map: { <patternId>: <retrieval_log_id> } }
+# Accepts both .similar_patterns (ACE 1.5 pre-tool-use path) and .results (MCP path).
+# Cold/shadow LinUCB rows (retrieval_log_id: null) are excluded from log_id_map.
+# Best-effort: || true prevents sidecar failure from blocking the hook.
+retrieval_file="$ace_dir/tasks/$conv_id/$gen_id.retrieval-ctx.json"
+echo "$patterns" | jq '{
+  retrieval_id: (.retrieval_id // null),
+  log_id_map: (
+    ((.similar_patterns // .results // [])
+    | map(select(.id != null and .match_factors.retrieval_log_id != null))
+    | map({ (.id): (.match_factors.retrieval_log_id) })
+    | add) // {}
+  )
+}' > "$retrieval_file" 2>/dev/null || true
+
 # v0.5.0 TASK 2 — wrap as <ace-patterns agent-type="main">{full JSON}</ace-patterns>.
 patterns_wrapped=$(printf '<ace-patterns agent-type="main">%s</ace-patterns>' "$patterns")
 

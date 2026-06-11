@@ -486,3 +486,42 @@ describe('gate enforcement — search-only allow-list (v0.2.80)', () => {
 		expect(r.agent_message).toBeUndefined();
 	});
 });
+
+// ===========================================================================
+// u05-retrievalid (#6) — F-080: pre-tool-use bash hook writes sidecar
+// ===========================================================================
+
+describe('u05-retrievalid — preToolUse script writes retrieval-ctx.json sidecar', () => {
+	it('bash hook source contains sidecar write with retrieval-ctx.json filename', () => {
+		const script = getPreToolUseScriptContent();
+		expect(script).toContain('retrieval-ctx.json');
+	});
+
+	it('bash hook source writes sidecar under tasks/$conv_id/$gen_id path', () => {
+		const script = getPreToolUseScriptContent();
+		expect(script).toMatch(/tasks\/\$conv_id\/\$gen_id\.retrieval-ctx\.json/);
+	});
+
+	it('bash hook source extracts retrieval_id from search response', () => {
+		const script = getPreToolUseScriptContent();
+		expect(script).toMatch(/retrieval_id/);
+	});
+
+	it('bash hook source builds log_id_map from similar_patterns with retrieval_log_id', () => {
+		const script = getPreToolUseScriptContent();
+		expect(script).toMatch(/log_id_map/);
+		expect(script).toMatch(/retrieval_log_id/);
+	});
+
+	it('bash hook jq accepts both .similar_patterns and .results (backward compat)', () => {
+		const script = getPreToolUseScriptContent();
+		// The jq expression must handle both shapes.
+		expect(script).toMatch(/similar_patterns.*results|results.*similar_patterns/);
+	});
+
+	it('bash hook sidecar write is best-effort (|| true prevents hook failure)', () => {
+		const script = getPreToolUseScriptContent();
+		// Must not block the hook on sidecar write failure.
+		expect(script).toMatch(/\|\|\s*true/);
+	});
+});

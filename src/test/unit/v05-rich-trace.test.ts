@@ -1606,3 +1606,307 @@ describe('u04-timing — F-080: trajectory timing fields', () => {
 		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
 	});
 });
+
+// ===========================================================================
+// u05-retrievalid (#6) — F-080: retrieval_id + applied_log_ids (sidecar round-trip)
+// ===========================================================================
+
+/**
+ * Helpers to build trajectories and sidecars for u05 tests.
+ * Uses a per-conv path (.cursor/ace/tasks/<conv>/) which is the production path.
+ */
+function writePerConvTrajectoryWithRetrieval(tmpDir: string, opts: {
+	convId: string;
+	withSidecar?: {
+		retrievalId?: string | null;
+		logIdMap?: Record<string, number>;
+		genId?: string;
+	};
+	withSearchResults?: Array<{ id: string; retrieval_log_id: number | null }>;
+	multipleGens?: boolean;    // writes two gen sidecars, most-recent should win
+}): { jsonlPath: string; tasksDir: string } {
+	const tasksDir = path.join(tmpDir, '.cursor', 'ace', 'tasks', opts.convId);
+	fs.mkdirSync(tasksDir, { recursive: true });
+
+	const jsonlPath = path.join(tasksDir, 'mcp_trajectory.jsonl');
+	const lines: string[] = [];
+
+	if (opts.withSearchResults) {
+		const inner: any = {
+			session_id: 'SID-RETRIEVAL-1',
+			similar_patterns: opts.withSearchResults.map((p, i) => ({
+				id: p.id,
+				content: `content-${i}`,
+				confidence: 0.9,
+			})),
+		};
+		const outer = { content: [{ type: 'text', text: JSON.stringify(inner) }], isError: false };
+		lines.push(JSON.stringify({
+			conversation_id: opts.convId,
+			tool_name: 'ace_search',
+			tool_input: '{"query":"test"}',
+			result_json: JSON.stringify(outer),
+		}));
+	} else {
+		lines.push(JSON.stringify({
+			conversation_id: opts.convId, tool_name: 'Read', tool_input: '{"file":"a.ts"}',
+		}));
+	}
+	fs.writeFileSync(jsonlPath, lines.join('\n') + '\n');
+
+	if (opts.withSidecar !== undefined) {
+		const genId = opts.withSidecar.genId || 'gen-0001';
+		const sidecarPath = path.join(tasksDir, `${genId}.retrieval-ctx.json`);
+		fs.writeFileSync(sidecarPath, JSON.stringify({
+			retrieval_id: opts.withSidecar.retrievalId ?? null,
+			log_id_map: opts.withSidecar.logIdMap ?? {},
+		}));
+	}
+
+	if (opts.multipleGens) {
+		// Write two sidecars: gen-0001 (old) and gen-0002 (new). gen-0002 must win.
+		fs.writeFileSync(path.join(tasksDir, 'gen-0001.retrieval-ctx.json'), JSON.stringify({
+			retrieval_id: 'old-retrieval-id',
+			log_id_map: { 'p-old': 777 },
+		}));
+		fs.writeFileSync(path.join(tasksDir, 'gen-0002.retrieval-ctx.json'), JSON.stringify({
+			retrieval_id: 'new-retrieval-id',
+			log_id_map: { 'p-new': 999 },
+		}));
+		// JSONL has p-new in results so playbookUsed = {p-new}.
+		const inner2: any = {
+			session_id: 'SID-MULTI-GEN',
+			similar_patterns: [{ id: 'p-new', content: 'c', confidence: 0.9 }],
+		};
+		const outer2 = { content: [{ type: 'text', text: JSON.stringify(inner2) }], isError: false };
+		fs.writeFileSync(jsonlPath, JSON.stringify({
+			conversation_id: opts.convId,
+			tool_name: 'ace_search',
+			tool_input: '{"query":"multi"}',
+			result_json: JSON.stringify(outer2),
+		}) + '\n');
+	}
+
+	return { jsonlPath, tasksDir };
+}
+
+describe('u05-retrievalid — learn helper reads sidecar + populates F-080 trace fields', () => {
+	it('trace gets retrieval_id and applied_log_ids when sidecar + playbookUsed match', () => {
+		const ctx = writeHelperWithStub();
+		const { jsonlPath } = writePerConvTrajectoryWithRetrieval(ctx.tmpDir, {
+			convId: 'CONV-F080-1',
+			withSidecar: {
+				retrievalId: 'uuid-abc',
+				logIdMap: { 'p1': 42, 'p2': 99 },
+			},
+			withSearchResults: [
+				{ id: 'p1', retrieval_log_id: 42 },
+				{ id: 'p2', retrieval_log_id: 99 },
+			],
+		});
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-F080-1', jsonlPath });
+		expect(r.status, `helper exit (stderr: ${r.stderr})`).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		expect(trace.retrieval_id).toBe('uuid-abc');
+		expect(Array.isArray(trace.applied_log_ids)).toBe(true);
+		expect(trace.applied_log_ids).toContain(42);
+		expect(trace.applied_log_ids).toContain(99);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('applied_log_ids is the APPLIED SUBSET — pattern not in playbookUsed is excluded', () => {
+		const ctx = writeHelperWithStub();
+		// Only p2 is in the JSONL search results (playbookUsed). Sidecar has p1+p2.
+		const { tasksDir, jsonlPath } = writePerConvTrajectoryWithRetrieval(ctx.tmpDir, {
+			convId: 'CONV-F080-SUBSET',
+			withSearchResults: [{ id: 'p2', retrieval_log_id: 99 }],
+		});
+		fs.writeFileSync(path.join(tasksDir, 'gen-0001.retrieval-ctx.json'), JSON.stringify({
+			retrieval_id: 'uuid-subset',
+			log_id_map: { 'p1': 42, 'p2': 99 },
+		}));
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-F080-SUBSET', jsonlPath });
+		expect(r.status, `helper exit (stderr: ${r.stderr})`).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		expect(trace.retrieval_id).toBe('uuid-subset');
+		expect(trace.applied_log_ids).toEqual([99]);
+		expect(trace.applied_log_ids).not.toContain(42);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('applied_log_ids omitted when no playbookUsed pattern is in log_id_map', () => {
+		const ctx = writeHelperWithStub();
+		// playbookUsed has p-other; sidecar map only has p1→42.
+		const { tasksDir, jsonlPath } = writePerConvTrajectoryWithRetrieval(ctx.tmpDir, {
+			convId: 'CONV-F080-NOAPPLIED',
+			withSearchResults: [{ id: 'p-other', retrieval_log_id: 55 }],
+		});
+		fs.writeFileSync(path.join(tasksDir, 'gen-0001.retrieval-ctx.json'), JSON.stringify({
+			retrieval_id: 'uuid-noapp',
+			log_id_map: { 'p1': 42 },
+		}));
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-F080-NOAPPLIED', jsonlPath });
+		expect(r.status).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		expect(trace.retrieval_id).toBe('uuid-noapp');
+		// applied_log_ids OMITTED (no intersection).
+		expect('applied_log_ids' in trace).toBe(false);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('retrieval_log_id: null (cold LinUCB row) excluded — only numeric ids in applied_log_ids', () => {
+		const ctx = writeHelperWithStub();
+		// Sidecar was built without p1 (it had retrieval_log_id: null, excluded at write-time).
+		// Only p2→42 in log_id_map. playbookUsed = {p1, p2}.
+		const { tasksDir, jsonlPath } = writePerConvTrajectoryWithRetrieval(ctx.tmpDir, {
+			convId: 'CONV-F080-NULL',
+			withSearchResults: [
+				{ id: 'p1', retrieval_log_id: null },
+				{ id: 'p2', retrieval_log_id: 42 },
+			],
+		});
+		fs.writeFileSync(path.join(tasksDir, 'gen-0001.retrieval-ctx.json'), JSON.stringify({
+			retrieval_id: 'uuid-nullid',
+			log_id_map: { 'p2': 42 },   // p1 excluded (cold row)
+		}));
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-F080-NULL', jsonlPath });
+		expect(r.status).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		expect(trace.retrieval_id).toBe('uuid-nullid');
+		expect(trace.applied_log_ids).toEqual([42]);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('both fields omitted when sidecar is absent (search was skipped)', () => {
+		const ctx = writeHelperWithStub();
+		const { jsonlPath } = writePerConvTrajectoryWithRetrieval(ctx.tmpDir, {
+			convId: 'CONV-F080-NOSIDECAR',
+		});
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-F080-NOSIDECAR', jsonlPath });
+		expect(r.status).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		expect('retrieval_id' in trace).toBe(false);
+		expect('applied_log_ids' in trace).toBe(false);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('legacy sidecar with retrieval_id: null → retrieval_id and applied_log_ids both omitted', () => {
+		const ctx = writeHelperWithStub();
+		const { jsonlPath } = writePerConvTrajectoryWithRetrieval(ctx.tmpDir, {
+			convId: 'CONV-F080-LEGACY',
+			withSidecar: { retrievalId: null, logIdMap: {} },
+			withSearchResults: [{ id: 'p1', retrieval_log_id: 42 }],
+		});
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-F080-LEGACY', jsonlPath });
+		expect(r.status).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		// retrieval_id: null → OMIT (not emit null).
+		expect('retrieval_id' in trace).toBe(false);
+		// empty log_id_map → no applied_log_ids.
+		expect('applied_log_ids' in trace).toBe(false);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('most-recent gen sidecar wins when multiple exist', () => {
+		const ctx = writeHelperWithStub();
+		const { jsonlPath } = writePerConvTrajectoryWithRetrieval(ctx.tmpDir, {
+			convId: 'CONV-F080-MULTIGEN',
+			multipleGens: true,
+		});
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-F080-MULTIGEN', jsonlPath });
+		expect(r.status, `helper exit (stderr: ${r.stderr})`).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		expect(trace.retrieval_id).toBe('new-retrieval-id');
+		expect(trace.applied_log_ids).toContain(999);
+		expect(trace.applied_log_ids).not.toContain(777);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('retrieval_log_id: 0 (integer zero) is a valid 1.5 value — not excluded from applied_log_ids', () => {
+		// Zero is a valid LinUCB log row id. A truthiness check (if (n)) would
+		// incorrectly drop it. Only typeof n === 'number' admits it correctly.
+		const ctx = writeHelperWithStub();
+		const { tasksDir, jsonlPath } = writePerConvTrajectoryWithRetrieval(ctx.tmpDir, {
+			convId: 'CONV-F080-ZERO',
+			withSearchResults: [
+				{ id: 'p-zero', retrieval_log_id: 0 },
+				{ id: 'p-pos',  retrieval_log_id: 7 },
+			],
+		});
+		fs.writeFileSync(path.join(tasksDir, 'gen-0001.retrieval-ctx.json'), JSON.stringify({
+			retrieval_id: 'uuid-zero-test',
+			log_id_map: { 'p-zero': 0, 'p-pos': 7 },
+		}));
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-F080-ZERO', jsonlPath });
+		expect(r.status, `helper exit (stderr: ${r.stderr})`).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		expect(trace.retrieval_id).toBe('uuid-zero-test');
+		expect(Array.isArray(trace.applied_log_ids)).toBe(true);
+		// 0 must be present — a truthiness filter would silently drop it.
+		expect(trace.applied_log_ids).toContain(0);
+		expect(trace.applied_log_ids).toContain(7);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('retrieval_id falls back to JSONL result_json when sidecar is absent (MCP proxy path)', () => {
+		// Finding 1 fix: when the pre-tool-use hook never ran (non-Unix, cold start)
+		// but the MCP proxy path (Path B) populated retrieval_id inside result_json,
+		// the learn helper must use that value rather than silently dropping it.
+		const ctx = writeHelperWithStub();
+		const tasksDir = path.join(ctx.tmpDir, '.cursor', 'ace', 'tasks', 'CONV-F080-JSONLRID');
+		fs.mkdirSync(tasksDir, { recursive: true });
+		// JSONL with retrieval_id embedded directly in the result_json (flat shape,
+		// not MCP-wrapped — as the MCP proxy writes it).
+		const inner = {
+			session_id: 'SID-JSONLRID',
+			retrieval_id: 'uuid-from-jsonl',
+			results: [{ id: 'pJ', content: 'c', confidence: 0.9 }],
+		};
+		const jsonlPath = path.join(tasksDir, 'mcp_trajectory.jsonl');
+		fs.writeFileSync(jsonlPath, JSON.stringify({
+			conversation_id: 'CONV-F080-JSONLRID',
+			tool_name: 'ace_search',
+			tool_input: '{"query":"jsonl-rid"}',
+			result_json: JSON.stringify(inner),
+		}) + '\n');
+		// No sidecar file — hook never ran.
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-F080-JSONLRID', jsonlPath });
+		expect(r.status, `helper exit (stderr: ${r.stderr})`).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		// Must surface retrieval_id from JSONL fallback, not silently drop it.
+		expect(trace.retrieval_id).toBe('uuid-from-jsonl');
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+});
+
+describe('u05-retrievalid — helper source-level assertions', () => {
+	it('helper source: unwrapAceSearchResultJson returns retrievalId', () => {
+		const src = getLearnHelperContent();
+		expect(src).toMatch(/retrievalId/);
+		expect(src).toMatch(/retrieval_id/);
+	});
+
+	it('helper source: reads sidecar .retrieval-ctx.json from per-conv dir', () => {
+		const src = getLearnHelperContent();
+		expect(src).toMatch(/retrieval-ctx\.json/);
+		expect(src).toMatch(/readdirSync|readdir/);
+	});
+
+	it('helper source: applied_log_ids built from playbookUsed intersection with log_id_map', () => {
+		const src = getLearnHelperContent();
+		expect(src).toMatch(/log_id_map/);
+		expect(src).toMatch(/applied_log_ids|appliedLogIds/);
+		expect(src).toMatch(/playbookUsed/);
+	});
+
+	it('helper source: null values excluded from applied_log_ids (typeof n === number)', () => {
+		const src = getLearnHelperContent();
+		expect(src).toMatch(/typeof.*number/);
+	});
+
+	it('helper source: retrieval_id and applied_log_ids use conditional spread (presence check)', () => {
+		const src = getLearnHelperContent();
+		expect(src).toMatch(/retrievalId\s*!==\s*undefined/);
+		expect(src).toMatch(/appliedLogIds\s*!==\s*undefined/);
+	});
+});

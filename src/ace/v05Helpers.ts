@@ -118,18 +118,22 @@ function gitInfo() {
   return { hash, branch };
 }
 
-// Caveman: parse the MCP-wrapped result_json. Returns { results, sessionId }.
+// Caveman: parse the MCP-wrapped result_json.
+// Returns { results, sessionId, retrievalId }.
 // Two layers: result_json is { content: [{ type:'text', text:'<inner-json>' }], isError:false }
 // and the inner JSON has the actual { results, session_id, query, ... }.
+// retrievalId: top-level .retrieval_id from the SearchResponseWithMetadata (ACE 1.5 SDK 3.2.0).
+// Backward compat: 1.0 responses lack retrieval_id → returns retrievalId: undefined.
 function unwrapAceSearchResultJson(rawResultJson) {
   try {
     const outer = typeof rawResultJson === 'string' ? JSON.parse(rawResultJson) : rawResultJson;
-    if (!outer) return { results: [], sessionId: '' };
+    if (!outer) return { results: [], sessionId: '', retrievalId: undefined };
     // Legacy / direct shape — try .similar_patterns / .results at top level.
     if (Array.isArray(outer.results) || Array.isArray(outer.similar_patterns)) {
       return {
         results: outer.results || outer.similar_patterns || [],
         sessionId: String(outer.session_id || ''),
+        retrievalId: outer.retrieval_id !== undefined ? outer.retrieval_id : undefined,
       };
     }
     // MCP wrapper shape.
@@ -142,12 +146,13 @@ function unwrapAceSearchResultJson(rawResultJson) {
           return {
             results: Array.isArray(inner.results) ? inner.results : (inner.similar_patterns || []),
             sessionId: String(inner.session_id || ''),
+            retrievalId: inner.retrieval_id !== undefined ? inner.retrieval_id : undefined,
           };
         } catch (_) { /* not JSON-in-text — fall through */ }
       }
     }
   } catch (_) {}
-  return { results: [], sessionId: '' };
+  return { results: [], sessionId: '', retrievalId: undefined };
 }
 
 (async () => {
@@ -245,6 +250,9 @@ function unwrapAceSearchResultJson(rawResultJson) {
     const playbookUsed = new Set();
     let serverSessionId = '';
     let lastReceivedPatterns = [];
+    // F-080 JSONL fallback: retrieval_id extracted from the MCP result_json when
+    // the pre-tool-use sidecar was not written (hook absent / non-Unix path).
+    let jsonlRetrievalId = undefined;
 
     // mcpByFingerprint: key = tool_name + '\\u0001' + canonical(args)
     //   → array of { result, raw } in insertion order. We POP from the front
@@ -311,7 +319,7 @@ function unwrapAceSearchResultJson(rawResultJson) {
         // session_id from the (MCP-wrapped) result_json. Latest call wins.
         const tn = String(entry.tool_name || '');
         if (/ace_search/i.test(tn) && entry.result_json) {
-          const { results, sessionId } = unwrapAceSearchResultJson(entry.result_json);
+          const { results, sessionId, retrievalId: rid } = unwrapAceSearchResultJson(entry.result_json);
           if (Array.isArray(results) && results.length > 0) {
             for (const p of results) { if (p && p.id) playbookUsed.add(String(p.id)); }
             // Truncate content to keep payload reasonable.
@@ -324,6 +332,11 @@ function unwrapAceSearchResultJson(rawResultJson) {
             });
           }
           if (sessionId) serverSessionId = sessionId;
+          // F-080 fallback: persist retrieval_id from JSONL (MCP proxy path B)
+          // so it is available when the pre-tool-use sidecar was never written
+          // (non-Unix, cold start, or hook not registered).
+          // Presence check — undefined means 1.0/absent; null means legacy cold.
+          if (rid !== undefined && rid !== null) jsonlRetrievalId = rid;
         }
       }
     }
@@ -499,6 +512,41 @@ function unwrapAceSearchResultJson(rawResultJson) {
 
     if (!task) task = 'cursor-task-' + convId.slice(0, 8);
 
+    // ----- F-080: read retrieval sidecar for retrieval_id + applied_log_ids -----
+    // The pre-tool-use bash hook writes <gen_id>.retrieval-ctx.json to the
+    // per-conv tasks dir after each search. We read the most-recent one here
+    // (sorted alphabetically → lexicographic gen_id order, most recent last).
+    // retrievalId: undefined → omitted from trace (NEVER emit null/undefined).
+    // appliedLogIds: intersection of playbookUsed pattern ids with the log_id_map,
+    //   mapped to retrieval_log_id ints, excluding null (cold/shadow LinUCB rows).
+    let retrievalId = undefined;
+    let appliedLogIds = undefined;
+    try {
+      const convDir = path.dirname(jsonlPath);
+      const ctxFiles = fs.readdirSync(convDir)
+        .filter(function(f) { return f.endsWith('.retrieval-ctx.json'); })
+        .sort()
+        .reverse();  // most-recent gen_id first (lexicographic)
+      if (ctxFiles.length > 0) {
+        const ctx = JSON.parse(fs.readFileSync(path.join(convDir, ctxFiles[0]), 'utf-8'));
+        // Presence check — ctx.retrieval_id may be null (legacy/cold) → omit.
+        if (ctx.retrieval_id !== undefined && ctx.retrieval_id !== null) {
+          retrievalId = ctx.retrieval_id;
+        }
+        if (ctx.log_id_map && playbookUsed.size > 0) {
+          const ids = Array.from(playbookUsed)
+            .map(function(id) { return ctx.log_id_map[id]; })
+            .filter(function(n) { return typeof n === 'number'; });
+          if (ids.length > 0) appliedLogIds = ids;
+        }
+      } else if (jsonlRetrievalId !== undefined) {
+        // Sidecar absent (hook never ran) — fall back to retrieval_id captured
+        // from the JSONL result_json (MCP proxy path B). No log_id_map available
+        // so applied_log_ids stays undefined (omitted from trace).
+        retrievalId = jsonlRetrievalId;
+      }
+    } catch (_) { /* best-effort — sidecar absent or unreadable */ }
+
     // ----- Git context (best-effort) -----
     const git = gitInfo();
 
@@ -520,6 +568,10 @@ function unwrapAceSearchResultJson(rawResultJson) {
       // v0.5.0-dev.14: full pattern payload for server-side helpfulness scoring.
       received_patterns: lastReceivedPatterns,
       git: { branch: git.branch, commit_hash: git.hash, isRepo: git.hash !== 'unknown' },
+      // F-080: retrieval attribution fields (ACE 1.5 SDK 3.2.0).
+      // Conditionally spread — fields OMITTED entirely when absent (not null/undefined).
+      ...(retrievalId !== undefined ? { retrieval_id: retrievalId } : {}),
+      ...(appliedLogIds !== undefined ? { applied_log_ids: appliedLogIds } : {}),
     };
 
     debugLog(jsonlPath, 'trace_built session_id=' + sessionId.slice(0, 8) +

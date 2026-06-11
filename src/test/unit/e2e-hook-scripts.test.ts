@@ -400,6 +400,125 @@ describe('E2E: Unix Hook Script Execution', () => {
 		});
 	});
 
+	describeUnix('u05-retrievalid — pre-tool-use bash sidecar write (F-080)', () => {
+		/**
+		 * Build a minimal pre-tool-use script that ONLY does the sidecar-write
+		 * portion after the search returns results. This exercises the actual
+		 * bash jq pipeline we bake into getPreToolUseScriptContent().
+		 */
+		function writeSidecarOnlyScript(dir: string, patterns: object): string {
+			const patternsJson = JSON.stringify(patterns).replace(/'/g, "'\\''");
+			const scriptPath = path.join(dir, 'ace_sidecar_test.sh');
+			const script = `#!/bin/bash
+# Minimal test harness: pretend the search helper already ran and returned $patterns.
+# This mirrors the sidecar-write block in the real pre-tool-use hook.
+ace_dir=".cursor/ace"
+conv_id="conv-e2e-test"
+gen_id="gen-e2e-0001"
+mkdir -p "$ace_dir/tasks/$conv_id"
+
+patterns='${patternsJson}'
+retrieval_file="$ace_dir/tasks/$conv_id/$gen_id.retrieval-ctx.json"
+echo "$patterns" | jq '{
+  retrieval_id: (.retrieval_id // null),
+  log_id_map: (
+    ((.similar_patterns // .results // [])
+    | map(select(.id != null and .match_factors.retrieval_log_id != null))
+    | map({ (.id): (.match_factors.retrieval_log_id) })
+    | add) // {}
+  )
+}' > "$retrieval_file" 2>/dev/null || true
+
+echo '{"permission":"allow"}'
+`;
+			fs.writeFileSync(scriptPath, script, { mode: 0o755 });
+			return scriptPath;
+		}
+
+		it('sidecar written with retrieval_id and log_id_map from 1.5-shape response', () => {
+			const response = {
+				retrieval_id: 'uuid-e2e-1',
+				similar_patterns: [
+					{ id: 'pat-A', confidence: 0.9, match_factors: { retrieval_log_id: 100, retrieval_id: 'uuid-e2e-1' } },
+					{ id: 'pat-B', confidence: 0.8, match_factors: { retrieval_log_id: 101, retrieval_id: 'uuid-e2e-1' } },
+				],
+			};
+			const scriptPath = writeSidecarOnlyScript(workDir, response);
+			const result = runBashScript(scriptPath, '{}', workDir);
+			expect(result.exitCode).toBe(0);
+			const sidecarPath = path.join(workDir, '.cursor', 'ace', 'tasks', 'conv-e2e-test', 'gen-e2e-0001.retrieval-ctx.json');
+			expect(fs.existsSync(sidecarPath)).toBe(true);
+			const sidecar = JSON.parse(fs.readFileSync(sidecarPath, 'utf-8'));
+			expect(sidecar.retrieval_id).toBe('uuid-e2e-1');
+			expect(sidecar.log_id_map['pat-A']).toBe(100);
+			expect(sidecar.log_id_map['pat-B']).toBe(101);
+		});
+
+		it('sidecar written with retrieval_id: null for legacy 1.0 response (no retrieval_id)', () => {
+			const response = {
+				similar_patterns: [
+					{ id: 'pat-C', confidence: 0.9 }, // no match_factors
+				],
+			};
+			const scriptPath = writeSidecarOnlyScript(workDir, response);
+			const result = runBashScript(scriptPath, '{}', workDir);
+			expect(result.exitCode).toBe(0);
+			const sidecarPath = path.join(workDir, '.cursor', 'ace', 'tasks', 'conv-e2e-test', 'gen-e2e-0001.retrieval-ctx.json');
+			expect(fs.existsSync(sidecarPath)).toBe(true);
+			const sidecar = JSON.parse(fs.readFileSync(sidecarPath, 'utf-8'));
+			expect(sidecar.retrieval_id).toBeNull();
+			// No valid retrieval_log_id → empty map.
+			expect(Object.keys(sidecar.log_id_map).length).toBe(0);
+		});
+
+		it('cold LinUCB pattern (retrieval_log_id: null) excluded from log_id_map', () => {
+			const response = {
+				retrieval_id: 'uuid-e2e-cold',
+				similar_patterns: [
+					{ id: 'pat-cold', confidence: 0.9, match_factors: { retrieval_log_id: null, retrieval_id: 'uuid-e2e-cold' } },
+					{ id: 'pat-warm', confidence: 0.8, match_factors: { retrieval_log_id: 202, retrieval_id: 'uuid-e2e-cold' } },
+				],
+			};
+			const scriptPath = writeSidecarOnlyScript(workDir, response);
+			const result = runBashScript(scriptPath, '{}', workDir);
+			expect(result.exitCode).toBe(0);
+			const sidecarPath = path.join(workDir, '.cursor', 'ace', 'tasks', 'conv-e2e-test', 'gen-e2e-0001.retrieval-ctx.json');
+			const sidecar = JSON.parse(fs.readFileSync(sidecarPath, 'utf-8'));
+			// cold row excluded.
+			expect('pat-cold' in sidecar.log_id_map).toBe(false);
+			// warm row included.
+			expect(sidecar.log_id_map['pat-warm']).toBe(202);
+		});
+
+		it('jq accepts .results shape (ACE 1.5 MCP-path backward compat)', () => {
+			// The hook must also handle .results (not just .similar_patterns).
+			const response = {
+				retrieval_id: 'uuid-e2e-results',
+				results: [
+					{ id: 'pat-R1', confidence: 0.9, match_factors: { retrieval_log_id: 303 } },
+				],
+			};
+			const scriptPath = writeSidecarOnlyScript(workDir, response);
+			const result = runBashScript(scriptPath, '{}', workDir);
+			expect(result.exitCode).toBe(0);
+			const sidecarPath = path.join(workDir, '.cursor', 'ace', 'tasks', 'conv-e2e-test', 'gen-e2e-0001.retrieval-ctx.json');
+			const sidecar = JSON.parse(fs.readFileSync(sidecarPath, 'utf-8'));
+			expect(sidecar.retrieval_id).toBe('uuid-e2e-results');
+			expect(sidecar.log_id_map['pat-R1']).toBe(303);
+		});
+
+		it('sidecar write is best-effort: hook outputs allow even when jq unavailable (|| true)', () => {
+			// The real hook guards with || true. In the test, we just verify the
+			// allow output is present regardless of sidecar outcome.
+			const response = { similar_patterns: [] };
+			const scriptPath = writeSidecarOnlyScript(workDir, response);
+			const result = runBashScript(scriptPath, '{}', workDir);
+			expect(result.exitCode).toBe(0);
+			const parsed = parseJsonOutput(result.stdout);
+			expect(parsed.permission).toBe('allow');
+		});
+	});
+
 	describeUnix('Tab hooks — performance-critical minimal scripts', () => {
 		it('ace_before_tab_file_read.sh should NOT create any files (zero side effects)', () => {
 			const scriptPath = path.join(scriptsDir, 'ace_before_tab_file_read.sh');
