@@ -154,7 +154,7 @@
   },
   "dependencies": {
     "@ace-sdk/core": "^3.2.0",
-    "better-sqlite3": "^12.6.2",
+    "better-sqlite3": "^12.8.0",
     "fs-extra": "^11.2.0"
   },
   "overrides": {
