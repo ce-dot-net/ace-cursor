@@ -835,7 +835,8 @@ async function initializeWorkspaceForFolder(
 	forceUpdate: boolean = false
 ): Promise<InitSummary> {
 	// v0.5.0-dev.22 — capture pre-init version so we can report from→to.
-	const versionFrom = readWorkspaceVersion(folder);
+	// readWorkspaceVersion returns string|null; InitSummary.versionFrom is string|undefined.
+	const versionFrom = readWorkspaceVersion(folder) ?? undefined;
 
 	const summary: InitSummary = {
 		migrated: [],

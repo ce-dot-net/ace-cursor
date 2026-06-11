@@ -302,15 +302,39 @@ function filterLine(line) {
           && Array.isArray(inner.results)
           && typeof inner.query === 'string') {
         const originalCount = (typeof inner.count === 'number') ? inner.count : inner.results.length;
-        // Smart-pack patterns to fit under the byte budget.
-        const packed = packPatternsUntilSize(inner.results, MAX_INLINE_PATTERN_BYTES);
+        // u10-expanded Fix A (revised): strip match_factors both for byte-counting
+        // AND from the inline output. The disk copy written below preserves the
+        // full patterns (with match_factors). Stripping inline ensures the wire
+        // payload never exceeds Cursor's ~8 KB macOS pipe-buffer limit even when
+        // ACE 1.5 match_factors (~200 bytes each) are present on every pattern.
+        const stripped = inner.results.map((p) => {
+          const { match_factors, ...rest } = p;
+          return rest;
+        });
+        const packed = packPatternsUntilSize(stripped, MAX_INLINE_PATTERN_BYTES);
+        // u10-expanded Fix B (early-return fix): compute expanded_note BEFORE the
+        // early-return so non-truncated responses with expanded[] still get it.
+        // Feature-detect: 1.0 (key absent) and 1.5-empty ([]) both produce nothing.
+        const expandedNote = (Array.isArray(inner.expanded) && inner.expanded.length > 0)
+          ? inner.expanded.length + ' 2-hop neighbor pattern(s) from local graph cache are in expanded[].' +
+            ' Cached stubs (cached:true) are already in ~/.ace-cache — call ace_batch_get([...pattern_ids]) to fetch their content.'
+          : undefined;
         if (packed.length >= inner.results.length) {
-          // Already small enough — nothing to do.
-          return line;
+          // No truncation needed — only emit a modified line when there are
+          // neighbors to annotate or match_factors to strip.
+          const hasMF = inner.results.some((p) => p.match_factors !== undefined);
+          if (expandedNote === undefined && !hasMF) {
+            // Pure 1.0 path — nothing changed, avoid re-serialising.
+            return line;
+          }
+          // Strip match_factors from inline and/or inject expanded_note.
+          inner.results = stripped;
+          if (expandedNote !== undefined) inner.expanded_note = expandedNote;
+          msg.result.content[0].text = JSON.stringify(inner, null, 2);
+          return JSON.stringify(msg);
         }
-        // Persist the FULL inner JSON to disk so the AI can Read all patterns
-        // when inline truncation drops something relevant. Failure is
-        // non-fatal — we still emit the truncated inline response.
+        // Truncation path: persist FULL inner JSON (with match_factors) to disk
+        // BEFORE mutating inner so the disk copy is always the complete record.
         const sid = (typeof inner.session_id === 'string' && inner.session_id) ? inner.session_id : ('search-' + Date.now());
         const safeSid = String(sid).replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 200);
         const fullPath = path.join('.cursor', 'ace', 'searches', safeSid + '.json');
@@ -326,11 +350,16 @@ function filterLine(line) {
         }
         inner.original_count = originalCount;
         inner.truncated_to = packed.length;
-        inner.results = packed;
+        // Inline: stripped (no match_factors) to stay within 8 KB wire limit.
+        inner.results = stripped.slice(0, packed.length);
         if (writtenPath) {
           inner.full_results_path = writtenPath;
-          inner.full_results_note = 'FULL RESULTS: Showing top ' + packed.length + ' of ' + originalCount + ' patterns inline. The complete result set is at ' + writtenPath + '. If patterns inline don\\'t fully address the task, Read the full file for the complete pattern library.';
+          // u10-expanded Fix C: mention expanded[] in the note.
+          inner.full_results_note = 'FULL RESULTS: Showing top ' + packed.length + ' of ' + originalCount +
+            ' patterns inline. The complete result set (including expanded[] neighbors) is at ' + writtenPath +
+            '. If patterns inline don\\'t fully address the task, Read the full file for the complete pattern library.';
         }
+        if (expandedNote !== undefined) inner.expanded_note = expandedNote;
         // Preserve inner.count as-is — AI knows there were more.
         msg.result.content[0].text = JSON.stringify(inner, null, 2);
         return JSON.stringify(msg);

@@ -82,10 +82,38 @@ function makeFilterLine(opts: { writeDir?: string; throwOnWrite?: boolean } = {}
 					&& Array.isArray(inner.results)
 					&& typeof inner.query === 'string') {
 					const originalCount = (typeof inner.count === 'number') ? inner.count : inner.results.length;
-					const packed = packPatternsUntilSize(inner.results, MAX_INLINE_PATTERN_BYTES);
+					// u10-expanded Fix A (revised): strip match_factors both for
+					// byte-counting AND from inline output. The disk copy preserves
+					// the full patterns. This ensures the wire payload stays under
+					// the 8 KB Cursor pipe limit even when match_factors are present.
+					const stripped = inner.results.map((p: any) => {
+						// eslint-disable-next-line @typescript-eslint/no-unused-vars
+						const { match_factors, ...rest } = p;
+						return rest;
+					});
+					const packed = packPatternsUntilSize(stripped, MAX_INLINE_PATTERN_BYTES);
+					// u10-expanded Fix B (early-return fix): inject expanded_note BEFORE
+					// the early return so non-truncated responses with expanded[] still
+					// get the note.
+					const expandedNoteValue = (Array.isArray(inner.expanded) && inner.expanded.length > 0)
+						? inner.expanded.length + ' 2-hop neighbor pattern(s) from local graph cache are in expanded[].' +
+							' Cached stubs (cached:true) are already in ~/.ace-cache — call ace_batch_get([...pattern_ids]) to fetch their content.'
+						: undefined;
 					if (packed.length >= inner.results.length) {
-						return line; // Nothing to truncate.
+						// No truncation needed — only re-emit when there's something to
+						// change: neighbors to annotate OR match_factors to strip.
+						const hasMF = inner.results.some((p: any) => p.match_factors !== undefined);
+						if (expandedNoteValue === undefined && !hasMF) {
+							// Pure 1.0 path — nothing changed, avoid re-serialising.
+							return line;
+						}
+						// Strip match_factors from inline and/or inject expanded_note.
+						inner.results = stripped;
+						if (expandedNoteValue !== undefined) inner.expanded_note = expandedNoteValue;
+						msg.result.content[0].text = JSON.stringify(inner, null, 2);
+						return JSON.stringify(msg);
 					}
+					// Truncation path: write full (un-stripped) inner JSON to disk first.
 					const sid = (typeof inner.session_id === 'string' && inner.session_id) ? inner.session_id : ('search-' + Date.now());
 					const safeSid = String(sid).replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 200);
 					const baseDir = opts.writeDir || process.cwd();
@@ -99,10 +127,16 @@ function makeFilterLine(opts: { writeDir?: string; throwOnWrite?: boolean } = {}
 					} catch (_) { /* defensive — passthrough without full path */ }
 					inner.original_count = originalCount;
 					inner.truncated_to = packed.length;
-					inner.results = packed;
+					// Inline: use stripped patterns (no match_factors) to stay under 8 KB.
+					inner.results = stripped.slice(0, packed.length);
 					if (writtenPath) {
 						inner.full_results_path = writtenPath;
-						inner.full_results_note = 'FULL RESULTS: Showing top ' + packed.length + ' of ' + originalCount + ' patterns inline. The complete result set is at ' + writtenPath + '. If patterns inline don\'t fully address the task, Read the full file for the complete pattern library.';
+						inner.full_results_note = 'FULL RESULTS: Showing top ' + packed.length + ' of ' + originalCount +
+							' patterns inline. The complete result set (including expanded[] neighbors) is at ' + writtenPath +
+							'. If patterns inline don\'t fully address the task, Read the full file for the complete pattern library.';
+					}
+					if (expandedNoteValue !== undefined) {
+						inner.expanded_note = expandedNoteValue;
 					}
 					msg.result.content[0].text = JSON.stringify(inner, null, 2);
 					return JSON.stringify(msg);
@@ -692,5 +726,293 @@ describe('ACE MCP proxy — Node syntax sanity', () => {
 		} finally {
 			fs.rmSync(tmp, { recursive: true, force: true });
 		}
+	});
+});
+
+// ─── u10-expanded: match_factors budget-stripping + expanded_note ─────────────
+
+describe('ACE MCP proxy — u10-expanded (match_factors + expanded neighbors)', () => {
+	/**
+	 * Build a search response where patterns carry match_factors (~200 bytes each).
+	 * When stripped, more patterns fit in the inline budget.
+	 */
+	function buildSearchResponseWithMatchFactors(
+		numResults: number,
+		sessionId?: string,
+		expanded?: Array<{ pattern_id: string; cumulative_reward: number; cached: boolean }>,
+	) {
+		// Each pattern is ~300 bytes of content + ~200 bytes of match_factors.
+		const filler = 'x'.repeat(250);
+		const results = Array.from({ length: numResults }, (_, i) => ({
+			id: `pat-${i}`,
+			name: `pattern-${i}`,
+			content: filler,
+			confidence: 0.9,
+			helpful: 5,
+			match_factors: {
+				semantic_score: 0.95 + i * 0.001,
+				domain_boost: false,
+				domain_relevance: 0,
+				error_context_boost: false,
+				formula_boost_applied: true,
+				ucb_score: 0.97,
+				bandit_rank: i + 1,
+				retrieval_log_id: 100000 + i,
+				retrieval_id: `uuid-${i}`,
+				shadow_mode: false,
+			},
+		}));
+		const inner: any = { query: 'foo', threshold: 0.7, results, count: numResults };
+		if (sessionId) inner.session_id = sessionId;
+		if (expanded !== undefined) inner.expanded = expanded;
+		return JSON.stringify({
+			jsonrpc: '2.0', id: 42,
+			result: { content: [{ type: 'text', text: JSON.stringify(inner) }] },
+		});
+	}
+
+	it('match_factors excluded from byte budget: more patterns fit inline when match_factors present', () => {
+		// Build two identical response sets — one with match_factors, one without.
+		// After the fix, both should pack the same number of patterns inline
+		// because match_factors is stripped before byte-counting.
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-mf-budget-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+
+			// With match_factors on each pattern.
+			const respWithMF = buildSearchResponseWithMatchFactors(30, 'sid-mf');
+			const filteredWithMF = JSON.parse(filter(respWithMF));
+			const innerWithMF = JSON.parse(filteredWithMF.result.content[0].text);
+			const countWithMF = innerWithMF.results.length;
+
+			// Without match_factors (same content volume, same budget).
+			const filler = 'x'.repeat(250);
+			const resultsNoMF = Array.from({ length: 30 }, (_, i) => ({
+				id: `pat-${i}`, name: `pattern-${i}`, content: filler, confidence: 0.9, helpful: 5,
+			}));
+			const innerNoMF: any = { query: 'foo', threshold: 0.7, results: resultsNoMF, count: 30, session_id: 'sid-nomf' };
+			const respNoMF = JSON.stringify({
+				jsonrpc: '2.0', id: 43,
+				result: { content: [{ type: 'text', text: JSON.stringify(innerNoMF) }] },
+			});
+			const filteredNoMF = JSON.parse(filter(respNoMF));
+			const innerNoMFOut = JSON.parse(filteredNoMF.result.content[0].text);
+			const countNoMF = innerNoMFOut.results.length;
+
+			// The budget-stripping fix must make withMF pack at least as many patterns
+			// as withoutMF (ideally identical, since match_factors are excluded).
+			expect(countWithMF).toBeGreaterThanOrEqual(countNoMF);
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('match_factors stripped from inline results but preserved on disk (wire-safe)', () => {
+		// Codex-review fix: inline results must NOT carry match_factors so the
+		// wire payload stays under the 8 KB Cursor pipe limit.  The disk file
+		// (full_results_path) is the authoritative source and MUST preserve them.
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-mf-preserve-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			const resp = buildSearchResponseWithMatchFactors(30, 'sid-preserve');
+			const filtered = JSON.parse(filter(resp));
+			const inner = JSON.parse(filtered.result.content[0].text);
+			expect(inner.results.length).toBeGreaterThan(0);
+			// Inline: match_factors must be absent (stripped to stay under 8 KB).
+			expect(inner.results[0]).not.toHaveProperty('match_factors');
+			// Wire budget: the inline results array serializes within 5 000 bytes.
+			expect(JSON.stringify(inner.results).length).toBeLessThanOrEqual(MAX_INLINE_PATTERN_BYTES);
+			// Disk: full result set preserves match_factors.
+			expect(inner.full_results_path).toBeTruthy();
+			const onDisk = JSON.parse(fs.readFileSync(inner.full_results_path, 'utf-8'));
+			expect(onDisk.results[0]).toHaveProperty('match_factors');
+			expect(onDisk.results[0].match_factors).toHaveProperty('semantic_score');
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('expanded_note emitted for small response that fits without truncation (early-return bug)', () => {
+		// Codex-review finding 2: the early-return path fires before expanded_note
+		// is injected.  A response small enough to not need truncation but that
+		// still carries expanded[] must emit expanded_note.
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-notrunc-expnote-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			// Use just 2 short patterns — easily fits the 5 000-byte budget with
+			// no truncation needed.
+			const shortFiller = 'y'.repeat(50);
+			const results = [
+				{ id: 'p0', name: 'pat-0', content: shortFiller, confidence: 0.9, helpful: 5 },
+				{ id: 'p1', name: 'pat-1', content: shortFiller, confidence: 0.8, helpful: 4 },
+			];
+			const expanded = [
+				{ pattern_id: 'nbr-small', cumulative_reward: 1.1, cached: true },
+			];
+			const innerRaw: any = { query: 'q', threshold: 0.7, results, count: 2, session_id: 'sid-notrunc', expanded };
+			const resp = JSON.stringify({
+				jsonrpc: '2.0', id: 77,
+				result: { content: [{ type: 'text', text: JSON.stringify(innerRaw) }] },
+			});
+			const filtered = JSON.parse(filter(resp));
+			const inner = JSON.parse(filtered.result.content[0].text);
+			// expanded_note must be present even when no truncation was needed.
+			expect(inner).toHaveProperty('expanded_note');
+			expect(inner.expanded_note).toContain('ace_batch_get');
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('expanded_note emitted when neighbor has cumulative_reward: 0 (zero is valid)', () => {
+		// Codex-review finding 3: a 0-reward neighbor must still trigger expanded_note.
+		// The guard uses Array.isArray + .length — 0-reward value is irrelevant.
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-zero-reward-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			const expanded = [{ pattern_id: 'zero-reward', cumulative_reward: 0, cached: false }];
+			const resp = buildSearchResponseWithMatchFactors(30, 'sid-zero-reward', expanded);
+			const filtered = JSON.parse(filter(resp));
+			const inner = JSON.parse(filtered.result.content[0].text);
+			expect(inner).toHaveProperty('expanded_note');
+			expect(inner.expanded_note).toContain('ace_batch_get');
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('expanded_note emitted when inner.expanded is non-empty array', () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-expanded-note-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			const expanded = [
+				{ pattern_id: 'nbr-1', cumulative_reward: 1.2, cached: true },
+				{ pattern_id: 'nbr-2', cumulative_reward: 0.8, cached: false },
+			];
+			const resp = buildSearchResponseWithMatchFactors(30, 'sid-expnote', expanded);
+			const filtered = JSON.parse(filter(resp));
+			const inner = JSON.parse(filtered.result.content[0].text);
+			// expanded_note must be present and mention ace_batch_get.
+			expect(inner).toHaveProperty('expanded_note');
+			expect(typeof inner.expanded_note).toBe('string');
+			expect(inner.expanded_note).toContain('ace_batch_get');
+			expect(inner.expanded_note).toContain('expanded[]');
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('expanded_note absent when inner.expanded is empty array (1.5-empty → no-op)', () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-expanded-empty-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			const resp = buildSearchResponseWithMatchFactors(30, 'sid-expempty', []);
+			const filtered = JSON.parse(filter(resp));
+			const inner = JSON.parse(filtered.result.content[0].text);
+			// Empty expanded array → no expanded_note.
+			expect(inner).not.toHaveProperty('expanded_note');
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('expanded_note absent when inner.expanded key is missing (1.0 input → byte-identical behavior)', () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-expanded-absent-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			// 1.0 response: no expanded key at all.
+			const resp = buildSearchResponseWithMatchFactors(30, 'sid-exp10');
+			// Verify no expanded key in the raw input.
+			const rawInner = JSON.parse(JSON.parse(resp).result.content[0].text);
+			expect(rawInner).not.toHaveProperty('expanded');
+			const filtered = JSON.parse(filter(resp));
+			const inner = JSON.parse(filtered.result.content[0].text);
+			expect(inner).not.toHaveProperty('expanded_note');
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('full_results_note mentions expanded[] neighbors', () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-frnote-expanded-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			const expanded = [{ pattern_id: 'n1', cumulative_reward: 0.9, cached: true }];
+			const resp = buildSearchResponseWithMatchFactors(30, 'sid-frnote', expanded);
+			const filtered = JSON.parse(filter(resp));
+			const inner = JSON.parse(filtered.result.content[0].text);
+			// full_results_note must mention expanded.
+			expect(inner.full_results_note).toContain('expanded');
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('disk file contains both results and expanded keys', () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-disk-expanded-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			const expanded = [{ pattern_id: 'nbr-disk', cumulative_reward: 1.5, cached: true }];
+			const resp = buildSearchResponseWithMatchFactors(30, 'sid-disk-exp', expanded);
+			const filtered = JSON.parse(filter(resp));
+			const inner = JSON.parse(filtered.result.content[0].text);
+			expect(inner.full_results_path).toBeTruthy();
+			const onDisk = JSON.parse(fs.readFileSync(inner.full_results_path, 'utf-8'));
+			expect(Array.isArray(onDisk.results)).toBe(true);
+			expect(Array.isArray(onDisk.expanded)).toBe(true);
+			expect(onDisk.expanded[0].pattern_id).toBe('nbr-disk');
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('1.0 input (no match_factors, no expanded) stays byte-identical to previous behavior', () => {
+		// A 1.0-format search response with no match_factors and no expanded.
+		// After the change the output must be identical to what the old code produced.
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-1dot0-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			const filler = 'x'.repeat(250);
+			const results = Array.from({ length: 30 }, (_, i) => ({
+				id: `pat-${i}`, name: `pattern-${i}`, content: filler, confidence: 0.9, helpful: 5,
+			}));
+			const innerRaw: any = { query: 'bar', threshold: 0.7, results, count: 30, session_id: 'sid-1dot0' };
+			const resp = JSON.stringify({
+				jsonrpc: '2.0', id: 55,
+				result: { content: [{ type: 'text', text: JSON.stringify(innerRaw) }] },
+			});
+			const out = JSON.parse(filter(resp));
+			const inner = JSON.parse(out.result.content[0].text);
+			// No new fields injected for 1.0 input.
+			expect(inner).not.toHaveProperty('expanded_note');
+			// match_factors absent on patterns (1.0 input, nothing to strip).
+			inner.results.forEach((p: any) => expect(p).not.toHaveProperty('match_factors'));
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('no-truncation + match_factors-only: match_factors stripped inline, no full_results_path, no expanded_note', () => {
+		// Codex-review blocking finding: the no-truncation + match_factors-only
+		// path (few short patterns that all fit under the byte budget, match_factors
+		// present, no expanded array) was exercised by neither the test harness nor
+		// the tests.  The harness had a divergence from production: it only re-emits
+		// when expandedNoteValue !== undefined, so it passed through match_factors
+		// intact.  Production correctly strips them via the hasMF guard.
+		// This test pins the correct behavior against the production function directly.
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-notrunc-mfonly-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			// 2 very short patterns — easily under the 5000-byte budget.
+			const results = [
+				{
+					id: 'p0', name: 'pat-0', content: 'short content A', confidence: 0.9, helpful: 5,
+					match_factors: { semantic_score: 0.95, ucb_score: 0.97, bandit_rank: 1, retrieval_id: 'uuid-0' },
+				},
+				{
+					id: 'p1', name: 'pat-1', content: 'short content B', confidence: 0.8, helpful: 4,
+					match_factors: { semantic_score: 0.88, ucb_score: 0.90, bandit_rank: 2, retrieval_id: 'uuid-1' },
+				},
+				{
+					id: 'p2', name: 'pat-2', content: 'short content C', confidence: 0.75, helpful: 3,
+					match_factors: { semantic_score: 0.80, ucb_score: 0.82, bandit_rank: 3, retrieval_id: 'uuid-2' },
+				},
+			];
+			const innerRaw: any = { query: 'q', threshold: 0.7, results, count: 3, session_id: 'sid-notrunc-mf' };
+			// No expanded key — ACE 1.0 compatible input with 1.5 match_factors added.
+			const resp = JSON.stringify({
+				jsonrpc: '2.0', id: 99,
+				result: { content: [{ type: 'text', text: JSON.stringify(innerRaw) }] },
+			});
+			const filtered = JSON.parse(filter(resp));
+			const inner = JSON.parse(filtered.result.content[0].text);
+			// (a) No truncation: no full_results_path (all 3 patterns fit inline).
+			expect(inner).not.toHaveProperty('full_results_path');
+			expect(inner.results).toHaveLength(3);
+			// (b) match_factors absent from every inline result.
+			inner.results.forEach((p: any) => expect(p).not.toHaveProperty('match_factors'));
+			// (c) No expanded_note (no expanded key in input).
+			expect(inner).not.toHaveProperty('expanded_note');
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 	});
 });
