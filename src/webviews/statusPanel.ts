@@ -205,6 +205,35 @@ export function renderTaskSummaryReward(review: Record<string, any>): string {
 	return '';
 }
 
+/**
+ * Renders an org/project meta value: "Name (id)" when a display name exists,
+ * else the bare id, else "n/a". `name` and `id` are server-supplied strings
+ * and are HTML-escaped to prevent injection into the webview.
+ */
+export function renderMetaValue(name: any, id: any): string {
+	if (name) {
+		return `${escapeHtml(String(name))} <span class="meta-id">(${escapeHtml(String(id ?? ''))})</span>`;
+	}
+	return id ? escapeHtml(String(id)) : 'n/a';
+}
+
+/**
+ * Truncates a server-supplied pattern content string to `max` chars and
+ * HTML-escapes it for safe webview interpolation.
+ */
+export function formatPatternContent(content: any, max = 200): string {
+	const s = String(content ?? '');
+	return escapeHtml(s.substring(0, max)) + (s.length > max ? '...' : '');
+}
+
+/**
+ * Formats a server-supplied domain key for display ("foo-bar" -> "foo bar"),
+ * HTML-escaped.
+ */
+export function formatDomainName(domain: any): string {
+	return escapeHtml(String(domain ?? '').replace(/-/g, ' '));
+}
+
 export class StatusPanel {
 	public static currentPanel: StatusPanel | undefined;
 	private readonly _panel: vscode.WebviewPanel;
@@ -1175,11 +1204,11 @@ export class StatusPanel {
 		<div class="meta">
 			<div class="meta-item">
 				<span class="meta-label">Organization:</span>
-				<span class="meta-value">${stats.org_name ? `${stats.org_name} <span class="meta-id">(${stats.org_id})</span>` : (stats.org_id || 'n/a')}</span>
+				<span class="meta-value">${renderMetaValue(stats.org_name, stats.org_id)}</span>
 			</div>
 			<div class="meta-item">
 				<span class="meta-label">Project:</span>
-				<span class="meta-value">${stats.project_name ? `${stats.project_name} <span class="meta-id">(${stats.project_id})</span>` : (stats.project_id || 'n/a')}</span>
+				<span class="meta-value">${renderMetaValue(stats.project_name, stats.project_id)}</span>
 			</div>
 		</div>
 	</div>
@@ -1235,12 +1264,12 @@ export class StatusPanel {
 		<h2>🏆 Top Performing Patterns</h2>
 		${topPatterns.slice(0, 5).map((p: any) => `
 			<div class="pattern-item">
-				${p.content?.substring(0, 200)}${p.content?.length > 200 ? '...' : ''}
+				${formatPatternContent(p.content)}
 				<div class="pattern-meta">
-					<span class="pattern-badge">${p.section?.replace(/_/g, ' ') || 'general'}</span>
+					<span class="pattern-badge">${escapeHtml(p.section ? String(p.section).replace(/_/g, ' ') : 'general')}</span>
 					${renderPatternRewardBadge(p)}
 					<span>📊 ${Math.round((p.confidence || 0) * 100)}% confidence</span>
-					${p.domain ? `<span>🏷️ ${p.domain}</span>` : ''}
+					${p.domain ? `<span>🏷️ ${escapeHtml(String(p.domain))}</span>` : ''}
 				</div>
 			</div>
 		`).join('')}
@@ -1259,7 +1288,7 @@ export class StatusPanel {
 				.sort((a: [string, any], b: [string, any]) => (b[1] as number) - (a[1] as number))
 				.map(([domain, count]: [string, any]) => `
 				<div class="domain-item">
-					<div class="domain-name">${domain.replace(/-/g, ' ')}</div>
+					<div class="domain-name">${formatDomainName(domain)}</div>
 					<div class="domain-count">${count}</div>
 				</div>
 			`).join('')}

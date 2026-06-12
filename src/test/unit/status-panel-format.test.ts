@@ -37,7 +37,7 @@ vi.mock('../../ace/client', () => ({
 	getAceClient: vi.fn(),
 }));
 
-import { formatCount, normalizeStats, renderQualityCards, buildTopPatternsUrl, sortTopPatternsByReward, renderPatternRewardBadge, renderTaskSummaryReward, StatusPanel } from '../../webviews/statusPanel';
+import { formatCount, normalizeStats, renderQualityCards, buildTopPatternsUrl, sortTopPatternsByReward, renderPatternRewardBadge, renderTaskSummaryReward, renderMetaValue, formatPatternContent, formatDomainName, StatusPanel } from '../../webviews/statusPanel';
 import { getValidToken, getHardCapInfo } from '../../commands/login';
 import { loadConfig, loadUserAuth, getDefaultOrgId } from '@ace-sdk/core';
 import { getLastUsageInfo, getAceClient } from '../../ace/client';
@@ -434,5 +434,38 @@ describe('_fetchStatus X-ACE-Project headers (u08-projectheader)', () => {
 		const topCall = fetchCalls.find(c => c.url.includes('/top'));
 		expect(topCall, 'top patterns fetch should have been called').toBeTruthy();
 		expect(topCall!.headers['X-ACE-Project']).toBe(PROJECT_ID);
+	});
+});
+
+// Pre-existing XSS hardening: org/project meta + top-pattern content/domain are
+// server-controlled strings rendered into the webview. They must be HTML-escaped.
+describe('statusPanel XSS hardening for server-controlled strings', () => {
+	const XSS = '<img src=x onerror=alert(1)>';
+
+	it('renderMetaValue escapes both name and id, preserves structure', () => {
+		const out = renderMetaValue(XSS, XSS);
+		expect(out).not.toContain('<img');
+		expect(out).toContain('&lt;img');
+		expect(out).toContain('class="meta-id"');
+	});
+
+	it('renderMetaValue falls back to escaped id, then n/a', () => {
+		expect(renderMetaValue('', XSS)).toContain('&lt;img');
+		expect(renderMetaValue('', XSS)).not.toContain('<img');
+		expect(renderMetaValue('', '')).toBe('n/a');
+	});
+
+	it('formatPatternContent escapes content and truncates at 200 with ellipsis', () => {
+		const out = formatPatternContent(XSS);
+		expect(out).not.toContain('<img');
+		expect(out).toContain('&lt;img');
+		expect(formatPatternContent('a'.repeat(250)).endsWith('...')).toBe(true);
+		expect(formatPatternContent('short').includes('...')).toBe(false);
+	});
+
+	it('formatDomainName escapes and de-hyphenates', () => {
+		expect(formatDomainName('foo-bar')).toBe('foo bar');
+		expect(formatDomainName(XSS)).not.toContain('<img');
+		expect(formatDomainName(XSS)).toContain('&lt;img');
 	});
 });
