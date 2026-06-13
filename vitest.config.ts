@@ -7,5 +7,10 @@ export default defineConfig({
 		exclude: ['**/node_modules/**', '**/dist/**'],
 		// ESM support for @ace-sdk/core
 		globals: true,
+		// Many unit tests spawn bash/pwsh/node subprocesses (hook scripts, the baked
+		// MCP proxy, the search/learn helpers). Under parallel load these legitimately
+		// exceed the 5s default and flake; 20s gives headroom without masking real hangs.
+		testTimeout: 20000,
+		hookTimeout: 20000,
 	},
 });
