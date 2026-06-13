@@ -469,3 +469,37 @@ describe('statusPanel XSS hardening for server-controlled strings', () => {
 		expect(formatDomainName(XSS)).toContain('&lt;img');
 	});
 });
+
+// Reward fields can arrive as `null` from the server (cold-shadow rows / error
+// paths). `null !== undefined` is true, so a bare presence check would reach
+// (null).toFixed() and throw — crashing the webview. These guard the typeof check.
+describe('statusPanel reward null-safety (no toFixed crash)', () => {
+	it('normalizeStats: cumulative_reward_total null → 1.0 fallback (rewardTotal undefined)', () => {
+		expect(normalizeStats({ cumulative_reward_total: null }).rewardTotal).toBeUndefined();
+		// 0 still takes the 1.5 path.
+		expect(normalizeStats({ cumulative_reward_total: 0 }).rewardTotal).toBe(0);
+	});
+
+	it('renderQualityCards: null reward total renders legacy cards without throwing', () => {
+		const ns = normalizeStats({ cumulative_reward_total: null, helpful_total: 3, harmful_total: 1 });
+		expect(() => renderQualityCards(ns)).not.toThrow();
+		expect(renderQualityCards(ns)).toContain('Trust Score');
+	});
+
+	it('renderPatternRewardBadge: null cumulative_v15_reward → Helpful fallback, no throw', () => {
+		expect(() => renderPatternRewardBadge({ cumulative_v15_reward: null, helpful: 4 })).not.toThrow();
+		expect(renderPatternRewardBadge({ cumulative_v15_reward: null, helpful: 4 })).toContain('Helpful:');
+		// 0 is a valid 1.5 reward.
+		expect(renderPatternRewardBadge({ cumulative_v15_reward: 0 })).toContain('Reward: 0.00');
+	});
+
+	it('sortTopPatternsByReward: null reward sorts via helpful fallback, not as 0', () => {
+		const sorted = sortTopPatternsByReward([
+			{ id: 'lo', cumulative_v15_reward: null, helpful: 1 },
+			{ id: 'hi', cumulative_v15_reward: null, helpful: 9 },
+			{ id: 'rw', cumulative_v15_reward: 5 },
+		]);
+		// hi (helpful 9) must outrank lo (helpful 1); neither treated as 0.
+		expect(sorted.findIndex(p => p.id === 'hi')).toBeLessThan(sorted.findIndex(p => p.id === 'lo'));
+	});
+});

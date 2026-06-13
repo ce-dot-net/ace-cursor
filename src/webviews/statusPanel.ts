@@ -65,9 +65,11 @@ export interface NormalizedStats {
  * Safe to call with any shape; missing fields default to 0.
  */
 export function normalizeStats(stats: Record<string, any>): NormalizedStats {
-	// Presence check (not truthiness) — 0 is a valid 1.5 value.
+	// typeof-number check: 0 is a valid 1.5 value (kept), but a server `null`
+	// (cold-shadow row / error path) must route to the 1.0 fallback — `null !==
+	// undefined` is true, so a bare presence check would later throw on .toFixed().
 	const rewardTotal: number | undefined =
-		stats.cumulative_reward_total !== undefined ? stats.cumulative_reward_total : undefined;
+		typeof stats.cumulative_reward_total === 'number' ? stats.cumulative_reward_total : undefined;
 	const hotTotal = stats.hot_total ?? 0;
 	const warmTotal = stats.warm_total ?? 0;
 	const coldTotal = stats.cold_total ?? 0;
@@ -141,14 +143,15 @@ export function buildTopPatternsUrl(serverUrl: string, limit: number): string {
  * Sort an array of patterns by reward descending.
  *
  * 1.5 patterns carry `cumulative_v15_reward`; 1.0 patterns do not.
- * Discriminator: PRESENCE (not truthiness) — `cumulative_v15_reward !== undefined`.
+ * Discriminator: `typeof === 'number'` — 0 is a valid 1.5 value, but a server
+ * `null` must fall back to `helpful` (a bare presence check would sort null as 0).
  * Sort key: `cumulative_v15_reward ?? helpful ?? 0`.
  * Returns a new array (does not mutate the input).
  */
 export function sortTopPatternsByReward(patterns: Record<string, any>[]): Record<string, any>[] {
 	return [...patterns].sort((a, b) => {
-		const ra = a.cumulative_v15_reward !== undefined ? a.cumulative_v15_reward : (a.helpful ?? 0);
-		const rb = b.cumulative_v15_reward !== undefined ? b.cumulative_v15_reward : (b.helpful ?? 0);
+		const ra = typeof a.cumulative_v15_reward === 'number' ? a.cumulative_v15_reward : (a.helpful ?? 0);
+		const rb = typeof b.cumulative_v15_reward === 'number' ? b.cumulative_v15_reward : (b.helpful ?? 0);
 		return rb - ra;
 	});
 }
@@ -156,13 +159,14 @@ export function sortTopPatternsByReward(patterns: Record<string, any>[]): Record
 /**
  * Render the per-pattern reward/helpful badge.
  *
- * 1.5 path (cumulative_v15_reward present): "Reward: 4.20"
- * 1.0 fallback (absent):                    "Helpful: N"
- * Discriminator: `p.cumulative_v15_reward !== undefined` (0 is a valid 1.5 value).
+ * 1.5 path (cumulative_v15_reward is a number): "Reward: 4.20"
+ * 1.0 fallback (absent OR null):               "Helpful: N"
+ * Discriminator: `typeof === 'number'` — 0 is a valid 1.5 value, but a server
+ * `null` must fall back (else `(null).toFixed(2)` throws and collapses the view).
  */
 export function renderPatternRewardBadge(p: Record<string, any>): string {
-	if (p.cumulative_v15_reward !== undefined) {
-		return `<span>Reward: ${(p.cumulative_v15_reward as number).toFixed(2)}</span>`;
+	if (typeof p.cumulative_v15_reward === 'number') {
+		return `<span>Reward: ${p.cumulative_v15_reward.toFixed(2)}</span>`;
 	}
 	return `<span>Helpful: ${formatCount(p.helpful || 0)}</span>`;
 }
@@ -573,15 +577,15 @@ export class StatusPanel {
 
 		const featuresHtml = featuresList.length > 0 ? `
 			<div class="usage-features">
-				${featuresList.map(f => `<span class="usage-feature-badge">${f}</span>`).join('')}
+				${featuresList.map(f => `<span class="usage-feature-badge">${escapeHtml(String(f))}</span>`).join('')}
 			</div>` : '';
 
 		return `
 		<div class="usage-section">
 			<h2>Organization Usage</h2>
 			<div class="usage-plan-row">
-				<span class="usage-plan-badge ${usage.planTier}">${planLabel}</span>
-				<span class="usage-status" style="color: ${statusColor}">${usage.status}</span>
+				<span class="usage-plan-badge ${escapeHtml(String(usage.planTier))}">${escapeHtml(String(planLabel))}</span>
+				<span class="usage-status" style="color: ${statusColor}">${escapeHtml(String(usage.status))}</span>
 			</div>
 			<div class="usage-bars">
 				${bars}

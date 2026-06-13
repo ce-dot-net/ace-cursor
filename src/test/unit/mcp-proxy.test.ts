@@ -415,6 +415,75 @@ EOF
 			fs.rmSync(tmp, { recursive: true, force: true });
 		}
 	});
+
+	// Run the REAL baked getAceMcpProxyContent() against an ace_search response and
+	// return the forwarded line + parsed inner. cwd=tmp so disk writes (full_results)
+	// land in the temp dir, not the repo.
+	function runBakedProxy(tmp: string, inner: any): { rawLine: string; outInner: any } {
+		const proxyPath = path.join(tmp, 'ace_mcp_proxy.js');
+		fs.writeFileSync(proxyPath, getAceMcpProxyContent(), { mode: 0o755 });
+		const searchLine = JSON.stringify({ jsonrpc: '2.0', id: 2, result: { content: [{ type: 'text', text: JSON.stringify(inner) }] } });
+		const binDir = path.join(tmp, 'bin');
+		fs.mkdirSync(binDir);
+		fs.writeFileSync(path.join(binDir, 'npx'), `#!/bin/bash
+cat <<'EOF'
+{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2024-11-05","serverInfo":{"name":"@ace-sdk/mcp","version":"3.1.1"},"capabilities":{"tools":{}}}}
+${searchLine}
+EOF
+`, { mode: 0o755 });
+		const out = spawnSync('node', [proxyPath], {
+			input: '', encoding: 'utf-8', cwd: tmp,
+			env: { ...process.env, PATH: `${binDir}:${process.env.PATH || ''}` },
+			timeout: 5000,
+		});
+		if (out.status !== 0) throw new Error('proxy exit ' + out.status + ': ' + out.stderr);
+		const rawLine = (out.stdout.split('\n').filter(l => l.trim().length > 0).find(l => {
+			try { return JSON.parse(l)?.result?.content?.[0]?.text?.includes('"results"'); } catch { return false; }
+		})) || '';
+		return { rawLine, outInner: rawLine ? JSON.parse(JSON.parse(rawLine).result.content[0].text) : null };
+	}
+
+	it('baked proxy keeps a huge single pattern under 8 KB on the wire (0 inline, full set on disk)', () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-baked-huge-'));
+		try {
+			const inner = {
+				query: 'q', threshold: 0.7, count: 1, session_id: 'sid-huge',
+				results: [{ id: 'big', content: 'y'.repeat(10000), confidence: 0.9 }],
+			};
+			const { rawLine, outInner } = runBakedProxy(tmp, inner);
+			expect(Buffer.byteLength(rawLine, 'utf8')).toBeLessThanOrEqual(8192);
+			expect(outInner.results).toHaveLength(0);
+			expect(outInner.full_results_path).toBeTruthy();
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('baked proxy budgets a multibyte (emoji) query in BYTES → line ≤ 8 KB', () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-baked-utf8-'));
+		try {
+			const inner = {
+				query: '😀'.repeat(2200), threshold: 0.7, count: 1, session_id: 'sid-utf8',
+				results: [{ id: 'p', content: 'ok', confidence: 0.9 }],
+			};
+			const { rawLine } = runBakedProxy(tmp, inner);
+			expect(Buffer.byteLength(rawLine, 'utf8')).toBeLessThanOrEqual(8192);
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('baked proxy sheds a huge expanded[] but keeps real patterns, full set on disk', () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-baked-exp-'));
+		try {
+			const inner = {
+				query: 'q', threshold: 0.7, count: 2, session_id: 'sid-exp',
+				results: [{ id: 'a', content: 'short A', confidence: 0.9 }, { id: 'b', content: 'short B', confidence: 0.8 }],
+				expanded: Array.from({ length: 150 }, (_, i) => ({ pattern_id: 'n-' + 'x'.repeat(60) + i, cumulative_reward: 1.2, cached: true })),
+			};
+			const { rawLine, outInner } = runBakedProxy(tmp, inner);
+			expect(Buffer.byteLength(rawLine, 'utf8')).toBeLessThanOrEqual(8192);
+			expect(outInner.results).toHaveLength(2);
+			expect(outInner).not.toHaveProperty('expanded');
+			expect(outInner.full_results_path).toBeTruthy();
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
 });
 
 describe('ACE MCP proxy — Fix A (stdin agent_type injection)', () => {
@@ -633,7 +702,8 @@ describe('ACE MCP proxy — Fix B2 / Task B+D (smart-packed ace_search + full re
 			const filter = makeFilterLine({ writeDir: tmp });
 			const resp = buildSearchResponse(150, 500, 'sid-8k');
 			const filtered = filter(resp);
-			expect(filtered.length).toBeLessThan(8 * 1024);
+			// Byte count, not char count — the Cursor pipe limit is in bytes.
+			expect(Buffer.byteLength(filtered, 'utf8')).toBeLessThan(8 * 1024);
 		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 	});
 

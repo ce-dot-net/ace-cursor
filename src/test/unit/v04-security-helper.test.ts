@@ -130,10 +130,13 @@ describe('v0.4.1 helper.js (in-process @ace-sdk/core) approach', () => {
 		expect(helper).toMatch(/searchPatterns/);
 	});
 
-	it('getSearchHelperContent calls ensureValidToken pre-flight (per SDK contract)', async () => {
+	it('getSearchHelperContent does NOT call the removed ensureValidToken (not on AceClient prototype)', async () => {
 		const mod = await import('../../ace/hookScripts');
 		const helper = (mod as any).getSearchHelperContent() as string;
-		expect(helper).toMatch(/ensureValidToken/);
+		// ensureValidToken was removed in v0.5.0-dev.6 — it is not a real AceClient
+		// method, so a live call would throw at runtime. An explanatory comment may
+		// still mention the name; what must never reappear is an actual `.ensureValidToken(` call.
+		expect(helper).not.toMatch(/\.ensureValidToken\s*\(/);
 	});
 
 	it('getSearchHelperContent maps errors to stable exit codes (2/3/4 or 5)', async () => {
