@@ -82,10 +82,9 @@ function makeFilterLine(opts: { writeDir?: string; throwOnWrite?: boolean } = {}
 					&& Array.isArray(inner.results)
 					&& typeof inner.query === 'string') {
 					const originalCount = (typeof inner.count === 'number') ? inner.count : inner.results.length;
-					// u10-expanded Fix A (revised): strip match_factors both for
-					// byte-counting AND from inline output. The disk copy preserves
-					// the full patterns. This ensures the wire payload stays under
-					// the 8 KB Cursor pipe limit even when match_factors are present.
+					// u10-expanded Fix A (issue #13): exclude match_factors from the
+					// byte BUDGET only. match_factors are PRESERVED in the inline
+					// output; only the packed COUNT comes from this stripped projection.
 					const stripped = inner.results.map((p: any) => {
 						// eslint-disable-next-line @typescript-eslint/no-unused-vars
 						const { match_factors, ...rest } = p;
@@ -100,16 +99,12 @@ function makeFilterLine(opts: { writeDir?: string; throwOnWrite?: boolean } = {}
 							' Cached stubs (cached:true) are already in ~/.ace-cache — call ace_batch_get([...pattern_ids]) to fetch their content.'
 						: undefined;
 					if (packed.length >= inner.results.length) {
-						// No truncation needed — only re-emit when there's something to
-						// change: neighbors to annotate OR match_factors to strip.
-						const hasMF = inner.results.some((p: any) => p.match_factors !== undefined);
-						if (expandedNoteValue === undefined && !hasMF) {
-							// Pure 1.0 path — nothing changed, avoid re-serialising.
+						// No truncation — match_factors stay inline (only excluded from
+						// the budget); the only possible inline change is an expanded_note.
+						if (expandedNoteValue === undefined) {
 							return line;
 						}
-						// Strip match_factors from inline and/or inject expanded_note.
-						inner.results = stripped;
-						if (expandedNoteValue !== undefined) inner.expanded_note = expandedNoteValue;
+						inner.expanded_note = expandedNoteValue;
 						msg.result.content[0].text = JSON.stringify(inner, null, 2);
 						return JSON.stringify(msg);
 					}
@@ -127,8 +122,9 @@ function makeFilterLine(opts: { writeDir?: string; throwOnWrite?: boolean } = {}
 					} catch (_) { /* defensive — passthrough without full path */ }
 					inner.original_count = originalCount;
 					inner.truncated_to = packed.length;
-					// Inline: use stripped patterns (no match_factors) to stay under 8 KB.
-					inner.results = stripped.slice(0, packed.length);
+					// Inline: keep FULL patterns (with match_factors); only the COUNT
+					// is budget-limited (issue #13).
+					inner.results = inner.results.slice(0, packed.length);
 					if (writtenPath) {
 						inner.full_results_path = writtenPath;
 						inner.full_results_note = 'FULL RESULTS: Showing top ' + packed.length + ' of ' + originalCount +
@@ -346,6 +342,63 @@ EOF
 			// Third line: tools/call result — passthrough.
 			const tcall = JSON.parse(lines[2]);
 			expect(tcall.result.content[0].text).toBe('ok');
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	// issue #13: verify against the ACTUAL baked getAceMcpProxyContent() script
+	// (not the makeFilterLine re-implementation) that an ace_search response with
+	// match_factors keeps them inline. This is the drift-proof end-to-end guard.
+	it('baked proxy preserves match_factors inline for an ace_search response (#13)', () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-mcp-proxy-mf-'));
+		try {
+			const proxyPath = path.join(tmp, 'ace_mcp_proxy.js');
+			fs.writeFileSync(proxyPath, getAceMcpProxyContent(), { mode: 0o755 });
+
+			// Small ace_search result (1 pattern, no truncation, no expanded) carrying
+			// match_factors. Built in JS so the JSON escaping is correct.
+			const inner = {
+				query: 'auth', threshold: 0.7, count: 1, session_id: 'sid-e2e',
+				results: [{
+					id: 'p0', content: 'short content', confidence: 0.9,
+					match_factors: { semantic_score: 0.95, ucb_score: 0.97, retrieval_log_id: 11 },
+				}],
+			};
+			const searchLine = JSON.stringify({
+				jsonrpc: '2.0', id: 2,
+				result: { content: [{ type: 'text', text: JSON.stringify(inner) }] },
+			});
+
+			const binDir = path.join(tmp, 'bin');
+			fs.mkdirSync(binDir);
+			fs.writeFileSync(path.join(binDir, 'npx'), `#!/bin/bash
+cat <<'EOF'
+{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2024-11-05","serverInfo":{"name":"@ace-sdk/mcp","version":"3.1.1"},"capabilities":{"tools":{}}}}
+${searchLine}
+EOF
+`, { mode: 0o755 });
+
+			const proxyOut = spawnSync('node', [proxyPath], {
+				input: '', encoding: 'utf-8',
+				env: { ...process.env, PATH: `${binDir}:${process.env.PATH || ''}` },
+				timeout: 5000,
+			});
+			expect(proxyOut.status).toBe(0);
+
+			const outLines = proxyOut.stdout.split('\n').filter(l => l.trim().length > 0);
+			// Find the forwarded ace_search result line.
+			const searchOut = outLines
+				.map(l => { try { return JSON.parse(l); } catch { return null; } })
+				.find(m => m && m.result && Array.isArray(m.result.content)
+					&& typeof m.result.content[0]?.text === 'string'
+					&& m.result.content[0].text.includes('"results"'));
+			expect(searchOut, 'proxy should forward the ace_search result').toBeTruthy();
+			const outInner = JSON.parse(searchOut.result.content[0].text);
+			expect(outInner.results).toHaveLength(1);
+			// The whole point of #13: match_factors survive the real baked proxy.
+			expect(outInner.results[0]).toHaveProperty('match_factors');
+			expect(outInner.results[0].match_factors).toHaveProperty('retrieval_log_id', 11);
 		} finally {
 			fs.rmSync(tmp, { recursive: true, force: true });
 		}
@@ -893,10 +946,10 @@ describe('ACE MCP proxy — u10-expanded (match_factors + expanded neighbors)', 
 		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 	});
 
-	it('match_factors stripped from inline results but preserved on disk (wire-safe)', () => {
-		// Codex-review fix: inline results must NOT carry match_factors so the
-		// wire payload stays under the 8 KB Cursor pipe limit.  The disk file
-		// (full_results_path) is the authoritative source and MUST preserve them.
+	it('match_factors PRESERVED inline (issue #13) — excluded from the byte budget only', () => {
+		// Issue #13 spec: match_factors are stripped ONLY for size estimation, not
+		// from the inline output. The patterns that fit keep their match_factors,
+		// and the disk copy is the full set.
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-mf-preserve-'));
 		try {
 			const filter = makeFilterLine({ writeDir: tmp });
@@ -904,11 +957,13 @@ describe('ACE MCP proxy — u10-expanded (match_factors + expanded neighbors)', 
 			const filtered = JSON.parse(filter(resp));
 			const inner = JSON.parse(filtered.result.content[0].text);
 			expect(inner.results.length).toBeGreaterThan(0);
-			// Inline: match_factors must be absent (stripped to stay under 8 KB).
-			expect(inner.results[0]).not.toHaveProperty('match_factors');
-			// Wire budget: the inline results array serializes within 5 000 bytes.
-			expect(JSON.stringify(inner.results).length).toBeLessThanOrEqual(MAX_INLINE_PATTERN_BYTES);
-			// Disk: full result set preserves match_factors.
+			// 30 patterns overflow the stripped budget → truncation happened.
+			expect(inner.truncated_to).toBe(inner.results.length);
+			expect(inner.results.length).toBeLessThan(30);
+			// Inline patterns KEEP their match_factors (preserved, not stripped).
+			expect(inner.results[0]).toHaveProperty('match_factors');
+			expect(inner.results[0].match_factors).toHaveProperty('semantic_score');
+			// Disk: full result set also preserves match_factors.
 			expect(inner.full_results_path).toBeTruthy();
 			const onDisk = JSON.parse(fs.readFileSync(inner.full_results_path, 'utf-8'));
 			expect(onDisk.results[0]).toHaveProperty('match_factors');
@@ -1060,14 +1115,10 @@ describe('ACE MCP proxy — u10-expanded (match_factors + expanded neighbors)', 
 		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 	});
 
-	it('no-truncation + match_factors-only: match_factors stripped inline, no full_results_path, no expanded_note', () => {
-		// Codex-review blocking finding: the no-truncation + match_factors-only
-		// path (few short patterns that all fit under the byte budget, match_factors
-		// present, no expanded array) was exercised by neither the test harness nor
-		// the tests.  The harness had a divergence from production: it only re-emits
-		// when expandedNoteValue !== undefined, so it passed through match_factors
-		// intact.  Production correctly strips them via the hasMF guard.
-		// This test pins the correct behavior against the production function directly.
+	it('no-truncation + match_factors-only: match_factors PRESERVED inline, no full_results_path, no expanded_note', () => {
+		// Issue #13: a small response (all patterns fit the stripped budget) with
+		// match_factors present and no expanded[] must pass through UNMODIFIED —
+		// match_factors stay inline, nothing is stripped, no annotations added.
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-notrunc-mfonly-'));
 		try {
 			const filter = makeFilterLine({ writeDir: tmp });
@@ -1097,8 +1148,8 @@ describe('ACE MCP proxy — u10-expanded (match_factors + expanded neighbors)', 
 			// (a) No truncation: no full_results_path (all 3 patterns fit inline).
 			expect(inner).not.toHaveProperty('full_results_path');
 			expect(inner.results).toHaveLength(3);
-			// (b) match_factors absent from every inline result.
-			inner.results.forEach((p: any) => expect(p).not.toHaveProperty('match_factors'));
+			// (b) match_factors PRESERVED on every inline result (issue #13).
+			inner.results.forEach((p: any) => expect(p).toHaveProperty('match_factors'));
 			// (c) No expanded_note (no expanded key in input).
 			expect(inner).not.toHaveProperty('expanded_note');
 		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }

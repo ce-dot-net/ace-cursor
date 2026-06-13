@@ -315,11 +315,12 @@ function filterLine(line) {
           && Array.isArray(inner.results)
           && typeof inner.query === 'string') {
         const originalCount = (typeof inner.count === 'number') ? inner.count : inner.results.length;
-        // u10-expanded Fix A (revised): strip match_factors both for byte-counting
-        // AND from the inline output. The disk copy written below preserves the
-        // full patterns (with match_factors). Stripping inline ensures the wire
-        // payload never exceeds Cursor's ~8 KB macOS pipe-buffer limit even when
-        // ACE 1.5 match_factors (~200 bytes each) are present on every pattern.
+        // u10-expanded Fix A (issue #13): exclude match_factors from the byte
+        // BUDGET only — the AI doesn't act on match_factors (LinUCB scoring
+        // metadata, consumed by the F-080 sidecar), so they shouldn't count
+        // against MAX_INLINE_PATTERN_BYTES and crowd out actionable patterns.
+        // match_factors are PRESERVED in the inline output; only the packed COUNT
+        // is derived from this stripped projection.
         const stripped = inner.results.map((p) => {
           const { match_factors, ...rest } = p;
           return rest;
@@ -333,16 +334,13 @@ function filterLine(line) {
             ' Cached stubs (cached:true) are already in ~/.ace-cache — call ace_batch_get([...pattern_ids]) to fetch their content.'
           : undefined;
         if (packed.length >= inner.results.length) {
-          // No truncation needed — only emit a modified line when there are
-          // neighbors to annotate or match_factors to strip.
-          const hasMF = inner.results.some((p) => p.match_factors !== undefined);
-          if (expandedNote === undefined && !hasMF) {
-            // Pure 1.0 path — nothing changed, avoid re-serialising.
+          // No truncation needed. match_factors stay inline (only excluded from
+          // the budget above), so the only possible inline change is an
+          // expanded_note. With no neighbors there is nothing to modify.
+          if (expandedNote === undefined) {
             return line;
           }
-          // Strip match_factors from inline and/or inject expanded_note.
-          inner.results = stripped;
-          if (expandedNote !== undefined) inner.expanded_note = expandedNote;
+          inner.expanded_note = expandedNote;
           msg.result.content[0].text = JSON.stringify(inner, null, 2);
           return JSON.stringify(msg);
         }
@@ -363,8 +361,9 @@ function filterLine(line) {
         }
         inner.original_count = originalCount;
         inner.truncated_to = packed.length;
-        // Inline: stripped (no match_factors) to stay within 8 KB wire limit.
-        inner.results = stripped.slice(0, packed.length);
+        // Inline: keep the FULL patterns (with match_factors) for the count the
+        // stripped budget allowed; only the NUMBER of patterns is limited (#13).
+        inner.results = inner.results.slice(0, packed.length);
         if (writtenPath) {
           inner.full_results_path = writtenPath;
           // u10-expanded Fix C: mention expanded[] in the note.
