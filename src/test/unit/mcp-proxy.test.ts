@@ -86,14 +86,15 @@ function makeFilterLine(opts: { writeDir?: string; throwOnWrite?: boolean } = {}
 					// Real constraint: the WHOLE JSON-RPC line (pretty inner + envelope +
 					// expanded[] + notes) must stay under Cursor's ~8 KB pipe limit, not
 					// just inner.results (issue #13).
-					const WIRE_LIMIT = 7500;
+					const WIRE_LIMIT = 7500; // bytes
+					const byteLen = (s: string) => Buffer.byteLength(s, 'utf8');
 					const packed = packPatternsUntilSize(originalResults, MAX_INLINE_PATTERN_BYTES);
 					const expandedNoteValue = (Array.isArray(inner.expanded) && inner.expanded.length > 0)
 						? inner.expanded.length + ' 2-hop neighbor pattern(s) from local graph cache are in expanded[].' +
 							' Cached stubs (cached:true) are already in ~/.ace-cache — call ace_batch_get([...pattern_ids]) to fetch their content.'
 						: undefined;
 					// Fast path: all fit, no neighbors, already wire-safe → passthrough.
-					if (packed.length >= originalResults.length && expandedNoteValue === undefined && line.length <= WIRE_LIMIT) {
+					if (packed.length >= originalResults.length && expandedNoteValue === undefined && byteLen(line) <= WIRE_LIMIT) {
 						return line;
 					}
 					inner.results = originalResults.slice(0, packed.length);
@@ -126,8 +127,19 @@ function makeFilterLine(opts: { writeDir?: string; throwOnWrite?: boolean } = {}
 						return JSON.stringify(msg);
 					};
 					let out = rebuild();
-					while (out.length > WIRE_LIMIT && inner.results.length > 1) {
+					// 1. Drop whole patterns until it fits — down to zero (all on disk).
+					while (byteLen(out) > WIRE_LIMIT && inner.results.length > 0) {
 						inner.results = originalResults.slice(0, inner.results.length - 1);
+						out = rebuild();
+					}
+					// 2. Still oversize → drop the raw expanded[] inline (kept on disk).
+					if (byteLen(out) > WIRE_LIMIT && inner.expanded !== undefined) {
+						delete inner.expanded;
+						out = rebuild();
+					}
+					// 3. Last resort → truncate the echoed query (full query is on disk).
+					if (byteLen(out) > WIRE_LIMIT && typeof inner.query === 'string' && inner.query.length > 64) {
+						inner.query = inner.query.slice(0, 64) + '…';
 						out = rebuild();
 					}
 					return out;
@@ -980,8 +992,9 @@ describe('ACE MCP proxy — u10-expanded (match_factors + expanded neighbors)', 
 			const expanded = Array.from({ length: 20 }, (_, i) => ({ pattern_id: `exp-${i}`, cumulative_reward: 1.2, cached: true }));
 			const resp = buildSearchResponseWithMatchFactors(40, 'x'.repeat(200), expanded);
 			const lineOut = filter(resp);
-			// The whole emitted JSON-RPC line — not just inner.results — fits the pipe.
-			expect(lineOut.length).toBeLessThanOrEqual(8192);
+			// The whole emitted JSON-RPC line — not just inner.results — fits the pipe
+			// (measured in BYTES, the actual transport limit).
+			expect(Buffer.byteLength(lineOut, 'utf8')).toBeLessThanOrEqual(8192);
 			const inner = JSON.parse(JSON.parse(lineOut).result.content[0].text);
 			// match_factors are still preserved on the inline patterns (issue #13).
 			expect(inner.results.length).toBeGreaterThan(0);
@@ -989,6 +1002,37 @@ describe('ACE MCP proxy — u10-expanded (match_factors + expanded neighbors)', 
 			// Truncated → the complete set (incl. expanded) is on disk.
 			expect(inner.full_results_path).toBeTruthy();
 			expect(inner.expanded_note).toBeTruthy();
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('one oversized pattern alone → trims to zero inline, full set on disk, line ≤ 8 KB (Codex P1)', () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-wire-huge-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			// A single ~10 KB pattern — bigger than the whole wire budget by itself.
+			const huge = { id: 'big', name: 'big', content: 'y'.repeat(10000), confidence: 0.9, helpful: 9 };
+			const innerRaw = { query: 'q', threshold: 0.7, results: [huge], count: 1, session_id: 'sid-huge' };
+			const resp = JSON.stringify({ jsonrpc: '2.0', id: 7, result: { content: [{ type: 'text', text: JSON.stringify(innerRaw) }] } });
+			const lineOut = filter(resp);
+			expect(Buffer.byteLength(lineOut, 'utf8')).toBeLessThanOrEqual(8192);
+			const inner = JSON.parse(JSON.parse(lineOut).result.content[0].text);
+			// No room for even one pattern inline → zero inline, everything on disk.
+			expect(inner.results).toHaveLength(0);
+			expect(inner.full_results_path).toBeTruthy();
+			const onDisk = JSON.parse(fs.readFileSync(inner.full_results_path, 'utf-8'));
+			expect(onDisk.results[0].content.length).toBe(10000);
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('multibyte UTF-8 query is budgeted in bytes, not chars (Codex P2)', () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-wire-utf8-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			// ~2200 emoji: char length ~4600 but ~9000 bytes on the wire.
+			const innerRaw = { query: '😀'.repeat(2200), threshold: 0.7, results: [{ id: 'p', name: 'n', content: 'ok' }], count: 1, session_id: 'sid-utf8' };
+			const resp = JSON.stringify({ jsonrpc: '2.0', id: 8, result: { content: [{ type: 'text', text: JSON.stringify(innerRaw) }] } });
+			const lineOut = filter(resp);
+			expect(Buffer.byteLength(lineOut, 'utf8')).toBeLessThanOrEqual(8192);
 		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 	});
 

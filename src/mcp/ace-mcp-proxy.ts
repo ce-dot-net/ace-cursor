@@ -319,7 +319,8 @@ function filterLine(line) {
         // Real constraint: the WHOLE JSON-RPC line (pretty-printed inner + envelope
         // + expanded[] + notes) must stay under Cursor's ~8 KB macOS pipe limit.
         // Budgeting only inner.results is insufficient (issue #13).
-        const WIRE_LIMIT = 7500;
+        const WIRE_LIMIT = 7500; // BYTES — Cursor's macOS pipe limit is ~8 KB on the wire.
+        const byteLen = (s) => Buffer.byteLength(s, 'utf8');
         // Coarse first cut on the results array. Issue #13: match_factors are kept
         // inline, so the FULL patterns are counted here.
         const packed = packPatternsUntilSize(originalResults, MAX_INLINE_PATTERN_BYTES);
@@ -332,7 +333,7 @@ function filterLine(line) {
         // Fast path: all results fit, no neighbors to annotate, and the incoming
         // line is already wire-safe → pass through untouched (1.0 / small responses
         // stay byte-identical).
-        if (packed.length >= originalResults.length && expandedNote === undefined && line.length <= WIRE_LIMIT) {
+        if (packed.length >= originalResults.length && expandedNote === undefined && byteLen(line) <= WIRE_LIMIT) {
           return line;
         }
         // Build the inline view and enforce the wire limit by trimming whole
@@ -368,8 +369,21 @@ function filterLine(line) {
           return JSON.stringify(msg);
         };
         let out = rebuild();
-        while (out.length > WIRE_LIMIT && inner.results.length > 1) {
+        // 1. Drop whole patterns until the line fits — down to zero (all on disk).
+        while (byteLen(out) > WIRE_LIMIT && inner.results.length > 0) {
           inner.results = originalResults.slice(0, inner.results.length - 1);
+          out = rebuild();
+        }
+        // 2. Still oversize → a large expanded[] passthrough is the bloat; drop it
+        //    inline (the disk copy + ace_batch_get hint keep it reachable).
+        if (byteLen(out) > WIRE_LIMIT && inner.expanded !== undefined) {
+          delete inner.expanded;
+          out = rebuild();
+        }
+        // 3. Last resort → a huge echoed query; truncate the inline echo (the full
+        //    query is on disk) so the frame is always wire-safe.
+        if (byteLen(out) > WIRE_LIMIT && typeof inner.query === 'string' && inner.query.length > 64) {
+          inner.query = inner.query.slice(0, 64) + '…';
           out = rebuild();
         }
         return out;
