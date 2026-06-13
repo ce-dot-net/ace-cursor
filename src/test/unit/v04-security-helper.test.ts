@@ -470,6 +470,32 @@ describe('F-080 search helper: VALID_INTENTS allowlist + conditional spread', ()
 		expect(helper).toMatch(/process\.argv\[3\]/);
 	});
 
+	it('pre-tool-use heuristic maps real prompts to the correct task_intent bucket (behavioral)', () => {
+		// Extract the ACTUAL heuristic block from the generated pre-tool-use script
+		// and run it in isolation, so we exercise the real regexes end-to-end (a
+		// typo'd alternation that still parses would be caught here).
+		const script = getPreToolUseScriptContent();
+		const start = script.indexOf('# Heuristic: derive task_intent');
+		const end = script.indexOf('# routine is the catch-all');
+		expect(start).toBeGreaterThan(-1);
+		expect(end).toBeGreaterThan(start);
+		const heuristic = script.slice(start, end);
+
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-intent-'));
+		try {
+			const runner = path.join(tmp, 'intent.sh');
+			fs.writeFileSync(runner, `#!/bin/bash\nprompt="$1"\n${heuristic}\nprintf '%s' "$task_intent"\n`, { mode: 0o755 });
+			const intentFor = (p: string) => spawnSync('bash', [runner, p], { encoding: 'utf-8' }).stdout;
+
+			expect(intentFor('Please refactor the auth module')).toBe('refactor');
+			expect(intentFor('rename the helper and extract a function')).toBe('refactor');
+			expect(intentFor('write a test that verifies coverage')).toBe('spec_strict');
+			expect(intentFor('explain how does the cache work')).toBe('explore');
+			// catch-all → omitted entirely (server default preserved)
+			expect(intentFor('add a shiny new button to the page')).toBe('');
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
 	it('getSearchHelperContent defines VALID_INTENTS allowlist containing the four union literals', () => {
 		const helper = getSearchHelperContent();
 		expect(helper).toMatch(/VALID_INTENTS/);
