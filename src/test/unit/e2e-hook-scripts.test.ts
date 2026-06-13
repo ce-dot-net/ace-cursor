@@ -19,6 +19,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { execSync, spawnSync } from 'child_process';
+import { getPreToolUseScriptContent } from '../../ace/hookScripts';
 
 // ============================================================================
 // Helpers
@@ -402,32 +403,32 @@ describe('E2E: Unix Hook Script Execution', () => {
 
 	describeUnix('u05-retrievalid — pre-tool-use bash sidecar write (F-080)', () => {
 		/**
-		 * Build a minimal pre-tool-use script that ONLY does the sidecar-write
-		 * portion after the search returns results. This exercises the actual
-		 * bash jq pipeline we bake into getPreToolUseScriptContent().
+		 * Build a harness that runs the REAL sidecar block extracted verbatim from
+		 * getPreToolUseScriptContent() — from the empty/null guard through the
+		 * sidecar write and the 0-pattern early-exit. Slicing the production source
+		 * (rather than re-implementing it) means this test also pins the ORDERING:
+		 * the sidecar must be persisted BEFORE the 0-pattern exit.
 		 */
 		function writeSidecarOnlyScript(dir: string, patterns: object): string {
+			const full = getPreToolUseScriptContent();
+			const start = full.indexOf('# Empty/null response');
+			const end = full.indexOf('# v0.5.0 TASK 2');
+			if (start < 0 || end < 0 || end <= start) {
+				throw new Error('could not locate the real sidecar block in getPreToolUseScriptContent()');
+			}
+			const realBlock = full.slice(start, end);
 			const patternsJson = JSON.stringify(patterns).replace(/'/g, "'\\''");
 			const scriptPath = path.join(dir, 'ace_sidecar_test.sh');
 			const script = `#!/bin/bash
-# Minimal test harness: pretend the search helper already ran and returned $patterns.
-# This mirrors the sidecar-write block in the real pre-tool-use hook.
+# Seed the variables the real block depends on, then run the verbatim production
+# slice (search already "returned" $patterns).
 ace_dir=".cursor/ace"
 conv_id="conv-e2e-test"
 gen_id="gen-e2e-0001"
 mkdir -p "$ace_dir/tasks/$conv_id"
-
 patterns='${patternsJson}'
-retrieval_file="$ace_dir/tasks/$conv_id/$gen_id.retrieval-ctx.json"
-echo "$patterns" | jq '{
-  retrieval_id: (.retrieval_id // null),
-  log_id_map: (
-    ((.similar_patterns // .results // [])
-    | map(select(.id != null and .match_factors.retrieval_log_id != null))
-    | map({ (.id): (.match_factors.retrieval_log_id) })
-    | add) // {}
-  )
-}' > "$retrieval_file" 2>/dev/null || true
+
+${realBlock}
 
 echo '{"permission":"allow"}'
 `;
@@ -505,6 +506,25 @@ echo '{"permission":"allow"}'
 			const sidecar = JSON.parse(fs.readFileSync(sidecarPath, 'utf-8'));
 			expect(sidecar.retrieval_id).toBe('uuid-e2e-results');
 			expect(sidecar.log_id_map['pat-R1']).toBe(303);
+		});
+
+		it('0-pattern search STILL writes the sidecar with retrieval_id (F-080 invariant #3: persist before early-exit)', () => {
+			// A search the server processed is stamped with a retrieval_id even when
+			// it returns zero patterns. The sidecar MUST be persisted before the
+			// 0-pattern early-exit — otherwise the learn trace arrives unanchored and
+			// the successful retrieval is lost. (Regression guard for the ACE-SDK
+			// v7.1.3 eval-loop fix applied to the Cursor pre-tool-use hook.)
+			const response = { retrieval_id: 'uuid-zero-patterns', similar_patterns: [] };
+			const scriptPath = writeSidecarOnlyScript(workDir, response);
+			const result = runBashScript(scriptPath, '{}', workDir);
+			expect(result.exitCode).toBe(0);
+			const sidecarPath = path.join(workDir, '.cursor', 'ace', 'tasks', 'conv-e2e-test', 'gen-e2e-0001.retrieval-ctx.json');
+			// The bug this guards against: sidecar missing because the 0-pattern exit
+			// fired first.
+			expect(fs.existsSync(sidecarPath)).toBe(true);
+			const sidecar = JSON.parse(fs.readFileSync(sidecarPath, 'utf-8'));
+			expect(sidecar.retrieval_id).toBe('uuid-zero-patterns');
+			expect(Object.keys(sidecar.log_id_map).length).toBe(0);
 		});
 
 		it('sidecar write is best-effort: hook outputs allow even when jq unavailable (|| true)', () => {

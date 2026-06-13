@@ -456,23 +456,24 @@ if command -v node >/dev/null 2>&1; then
   fi
 fi
 
-# Empty/null/no-results → fail-open
+# Empty/null response → fail-open. No parseable search result means no
+# retrieval_id to anchor — correct to abstain (no server row was stamped that we
+# can see, or the helper errored).
 if [ -z "$patterns" ] || [ "$patterns" = "{}" ] || [ "$patterns" = "null" ]; then
   echo '{"permission":"allow"}'; exit 0
 fi
 
-# Sanity check: must have at least 1 similar_pattern.
-n=$(echo "$patterns" | jq -r '(.similar_patterns // []) | length' 2>/dev/null || echo "0")
-if [ "$n" = "0" ] || [ -z "$n" ]; then
-  echo '{"permission":"allow"}'; exit 0
-fi
-
-# F-080 — persist retrieval context keyed by conv/gen for the learn helper.
+# F-080 — persist retrieval context BEFORE any pattern-count branching (invariant:
+# a search the server processed is stamped with a retrieval_id even when it
+# returns 0 patterns; the learn trace must still anchor to it, or the successful
+# retrieval is lost). Seed the sidecar UNCONDITIONALLY here, ahead of the
+# 0-pattern early-exit below.
 # Shape: { retrieval_id: string|null, log_id_map: { <patternId>: <retrieval_log_id> } }
 # Accepts both .similar_patterns (ACE 1.5 pre-tool-use path) and .results (MCP path).
 # Cold/shadow LinUCB rows (retrieval_log_id: null) are excluded from log_id_map.
 # Best-effort: || true prevents sidecar failure from blocking the hook.
 retrieval_file="$ace_dir/tasks/$conv_id/$gen_id.retrieval-ctx.json"
+mkdir -p "$ace_dir/tasks/$conv_id" 2>/dev/null || true
 echo "$patterns" | jq '{
   retrieval_id: (.retrieval_id // null),
   log_id_map: (
@@ -482,6 +483,13 @@ echo "$patterns" | jq '{
     | add) // {}
   )
 }' > "$retrieval_file" 2>/dev/null || true
+
+# Sanity check: must have at least 1 similar_pattern to INJECT (gate decision
+# only — the sidecar above is already persisted regardless of pattern count).
+n=$(echo "$patterns" | jq -r '(.similar_patterns // []) | length' 2>/dev/null || echo "0")
+if [ "$n" = "0" ] || [ -z "$n" ]; then
+  echo '{"permission":"allow"}'; exit 0
+fi
 
 # v0.5.0 TASK 2 — wrap as <ace-patterns agent-type="main">{full JSON}</ace-patterns>.
 patterns_wrapped=$(printf '<ace-patterns agent-type="main">%s</ace-patterns>' "$patterns")
