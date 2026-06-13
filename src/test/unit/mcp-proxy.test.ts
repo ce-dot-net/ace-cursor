@@ -81,56 +81,56 @@ function makeFilterLine(opts: { writeDir?: string; throwOnWrite?: boolean } = {}
 				if (inner && typeof inner === 'object'
 					&& Array.isArray(inner.results)
 					&& typeof inner.query === 'string') {
-					const originalCount = (typeof inner.count === 'number') ? inner.count : inner.results.length;
-					// u10-expanded (issue #13): match_factors are PRESERVED inline.
-					// The FULL patterns are counted against the budget so the wire
-					// payload stays under the 8 KB Cursor pipe limit.
-					const packed = packPatternsUntilSize(inner.results, MAX_INLINE_PATTERN_BYTES);
-					// u10-expanded Fix B (early-return fix): inject expanded_note BEFORE
-					// the early return so non-truncated responses with expanded[] still
-					// get the note.
+					const originalResults = inner.results;
+					const originalCount = (typeof inner.count === 'number') ? inner.count : originalResults.length;
+					// Real constraint: the WHOLE JSON-RPC line (pretty inner + envelope +
+					// expanded[] + notes) must stay under Cursor's ~8 KB pipe limit, not
+					// just inner.results (issue #13).
+					const WIRE_LIMIT = 7500;
+					const packed = packPatternsUntilSize(originalResults, MAX_INLINE_PATTERN_BYTES);
 					const expandedNoteValue = (Array.isArray(inner.expanded) && inner.expanded.length > 0)
 						? inner.expanded.length + ' 2-hop neighbor pattern(s) from local graph cache are in expanded[].' +
 							' Cached stubs (cached:true) are already in ~/.ace-cache — call ace_batch_get([...pattern_ids]) to fetch their content.'
 						: undefined;
-					if (packed.length >= inner.results.length) {
-						// Everything fits — match_factors stay inline; the only possible
-						// inline change is an expanded_note.
-						if (expandedNoteValue === undefined) {
-							return line;
-						}
-						inner.expanded_note = expandedNoteValue;
-						msg.result.content[0].text = JSON.stringify(inner, null, 2);
-						return JSON.stringify(msg);
+					// Fast path: all fit, no neighbors, already wire-safe → passthrough.
+					if (packed.length >= originalResults.length && expandedNoteValue === undefined && line.length <= WIRE_LIMIT) {
+						return line;
 					}
-					// Truncation path: write full (un-stripped) inner JSON to disk first.
+					inner.results = originalResults.slice(0, packed.length);
+					if (expandedNoteValue !== undefined) inner.expanded_note = expandedNoteValue;
 					const sid = (typeof inner.session_id === 'string' && inner.session_id) ? inner.session_id : ('search-' + Date.now());
 					const safeSid = String(sid).replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 200);
 					const baseDir = opts.writeDir || process.cwd();
 					const fullPath = pathMod.join(baseDir, '.cursor', 'ace', 'searches', safeSid + '.json');
 					let writtenPath = '';
-					try {
-						if (opts.throwOnWrite) throw new Error('synthetic write failure');
-						fsMod.mkdirSync(pathMod.dirname(fullPath), { recursive: true });
-						fsMod.writeFileSync(fullPath, JSON.stringify(inner, null, 2));
-						writtenPath = fullPath;
-					} catch (_) { /* defensive — passthrough without full path */ }
-					inner.original_count = originalCount;
-					inner.truncated_to = packed.length;
-					// Inline: full patterns (with match_factors), trimmed to the count
-					// that fits the 8 KB-safe budget (issue #13).
-					inner.results = inner.results.slice(0, packed.length);
-					if (writtenPath) {
-						inner.full_results_path = writtenPath;
-						inner.full_results_note = 'FULL RESULTS: Showing top ' + packed.length + ' of ' + originalCount +
-							' patterns inline. The complete result set (including expanded[] neighbors) is at ' + writtenPath +
-							'. If patterns inline don\'t fully address the task, Read the full file for the complete pattern library.';
+					const rebuild = () => {
+						if (inner.results.length < originalResults.length) {
+							if (!writtenPath) {
+								try {
+									if (opts.throwOnWrite) throw new Error('synthetic write failure');
+									fsMod.mkdirSync(pathMod.dirname(fullPath), { recursive: true });
+									fsMod.writeFileSync(fullPath, JSON.stringify(JSON.parse(innerText), null, 2));
+									writtenPath = fullPath;
+								} catch (_) { /* defensive — passthrough without full path */ }
+							}
+							inner.original_count = originalCount;
+							inner.truncated_to = inner.results.length;
+							if (writtenPath) {
+								inner.full_results_path = writtenPath;
+								inner.full_results_note = 'FULL RESULTS: Showing top ' + inner.results.length + ' of ' + originalCount +
+									' patterns inline. The complete result set (including expanded[] neighbors) is at ' + writtenPath +
+									'. If patterns inline don\'t fully address the task, Read the full file for the complete pattern library.';
+							}
+						}
+						msg.result.content[0].text = JSON.stringify(inner, null, 2);
+						return JSON.stringify(msg);
+					};
+					let out = rebuild();
+					while (out.length > WIRE_LIMIT && inner.results.length > 1) {
+						inner.results = originalResults.slice(0, inner.results.length - 1);
+						out = rebuild();
 					}
-					if (expandedNoteValue !== undefined) {
-						inner.expanded_note = expandedNoteValue;
-					}
-					msg.result.content[0].text = JSON.stringify(inner, null, 2);
-					return JSON.stringify(msg);
+					return out;
 				}
 			}
 		} catch (_) { /* passthrough */ }
@@ -967,6 +967,28 @@ describe('ACE MCP proxy — u10-expanded (match_factors + expanded neighbors)', 
 			const onDisk = JSON.parse(fs.readFileSync(inner.full_results_path, 'utf-8'));
 			expect(onDisk.results[0]).toHaveProperty('match_factors');
 			expect(onDisk.results[0].match_factors).toHaveProperty('semantic_score');
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('full JSON-RPC line stays under Cursor 8 KB pipe limit with match_factors + expanded (Codex P1)', () => {
+		// The exact failure Codex flagged: a normal 1.5 response (match_factors on
+		// every result + expanded neighbors + long session_id + truncation notes)
+		// must not emit a line over ~8 KB. The wire-trim budgets the WHOLE line.
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-wire-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			const expanded = Array.from({ length: 20 }, (_, i) => ({ pattern_id: `exp-${i}`, cumulative_reward: 1.2, cached: true }));
+			const resp = buildSearchResponseWithMatchFactors(40, 'x'.repeat(200), expanded);
+			const lineOut = filter(resp);
+			// The whole emitted JSON-RPC line — not just inner.results — fits the pipe.
+			expect(lineOut.length).toBeLessThanOrEqual(8192);
+			const inner = JSON.parse(JSON.parse(lineOut).result.content[0].text);
+			// match_factors are still preserved on the inline patterns (issue #13).
+			expect(inner.results.length).toBeGreaterThan(0);
+			expect(inner.results[0]).toHaveProperty('match_factors');
+			// Truncated → the complete set (incl. expanded) is on disk.
+			expect(inner.full_results_path).toBeTruthy();
+			expect(inner.expanded_note).toBeTruthy();
 		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 	});
 

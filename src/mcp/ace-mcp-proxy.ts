@@ -314,62 +314,65 @@ function filterLine(line) {
       if (inner && typeof inner === 'object'
           && Array.isArray(inner.results)
           && typeof inner.query === 'string') {
-        const originalCount = (typeof inner.count === 'number') ? inner.count : inner.results.length;
-        // u10-expanded (issue #13): match_factors are PRESERVED in the inline
-        // output. To stay under Cursor's ~8 KB macOS pipe limit, the FULL patterns
-        // (match_factors included, ~200 bytes each) are counted against
-        // MAX_INLINE_PATTERN_BYTES — so when match_factors are present fewer
-        // patterns fit inline, but the wire payload never overflows. The disk copy
-        // (full_results_path) always holds the complete result set.
-        const packed = packPatternsUntilSize(inner.results, MAX_INLINE_PATTERN_BYTES);
-        // u10-expanded Fix B (early-return fix): compute expanded_note BEFORE the
-        // early-return so non-truncated responses with expanded[] still get it.
-        // Feature-detect: 1.0 (key absent) and 1.5-empty ([]) both produce nothing.
+        const originalResults = inner.results;
+        const originalCount = (typeof inner.count === 'number') ? inner.count : originalResults.length;
+        // Real constraint: the WHOLE JSON-RPC line (pretty-printed inner + envelope
+        // + expanded[] + notes) must stay under Cursor's ~8 KB macOS pipe limit.
+        // Budgeting only inner.results is insufficient (issue #13).
+        const WIRE_LIMIT = 7500;
+        // Coarse first cut on the results array. Issue #13: match_factors are kept
+        // inline, so the FULL patterns are counted here.
+        const packed = packPatternsUntilSize(originalResults, MAX_INLINE_PATTERN_BYTES);
+        // Feature-detect expanded[] neighbors: 1.0 (key absent) and 1.5-empty both
+        // produce nothing.
         const expandedNote = (Array.isArray(inner.expanded) && inner.expanded.length > 0)
           ? inner.expanded.length + ' 2-hop neighbor pattern(s) from local graph cache are in expanded[].' +
             ' Cached stubs (cached:true) are already in ~/.ace-cache — call ace_batch_get([...pattern_ids]) to fetch their content.'
           : undefined;
-        if (packed.length >= inner.results.length) {
-          // Everything fits — match_factors stay inline. The only possible inline
-          // change is an expanded_note; with no neighbors nothing is modified.
-          if (expandedNote === undefined) {
-            return line;
-          }
-          inner.expanded_note = expandedNote;
-          msg.result.content[0].text = JSON.stringify(inner, null, 2);
-          return JSON.stringify(msg);
+        // Fast path: all results fit, no neighbors to annotate, and the incoming
+        // line is already wire-safe → pass through untouched (1.0 / small responses
+        // stay byte-identical).
+        if (packed.length >= originalResults.length && expandedNote === undefined && line.length <= WIRE_LIMIT) {
+          return line;
         }
-        // Truncation path: persist FULL inner JSON (with match_factors) to disk
-        // BEFORE mutating inner so the disk copy is always the complete record.
+        // Build the inline view and enforce the wire limit by trimming whole
+        // patterns until the FULLY-annotated line fits.
+        inner.results = originalResults.slice(0, packed.length);
+        if (expandedNote !== undefined) inner.expanded_note = expandedNote;
         const sid = (typeof inner.session_id === 'string' && inner.session_id) ? inner.session_id : ('search-' + Date.now());
         const safeSid = String(sid).replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 200);
         const fullPath = path.join('.cursor', 'ace', 'searches', safeSid + '.json');
         let writtenPath = '';
-        try {
-          fs.mkdirSync(path.dirname(fullPath), { recursive: true });
-          fs.writeFileSync(fullPath, JSON.stringify(inner, null, 2));
-          writtenPath = fullPath;
-        } catch (writeErr) {
-          // Defensive: read-only fs / permission issues — passthrough with
-          // truncation but no full_results_path. AI still gets inline patterns.
-          process.stderr.write('[ace-mcp-proxy] full-results write failed: ' + (writeErr && writeErr.message || writeErr) + '\\n');
+        const rebuild = () => {
+          if (inner.results.length < originalResults.length) {
+            // Persist the COMPLETE record once, before annotating the inline view.
+            if (!writtenPath) {
+              try {
+                fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+                fs.writeFileSync(fullPath, JSON.stringify(JSON.parse(innerText), null, 2));
+                writtenPath = fullPath;
+              } catch (writeErr) {
+                process.stderr.write('[ace-mcp-proxy] full-results write failed: ' + (writeErr && writeErr.message || writeErr) + '\\n');
+              }
+            }
+            inner.original_count = originalCount;
+            inner.truncated_to = inner.results.length;
+            if (writtenPath) {
+              inner.full_results_path = writtenPath;
+              inner.full_results_note = 'FULL RESULTS: Showing top ' + inner.results.length + ' of ' + originalCount +
+                ' patterns inline. The complete result set (including expanded[] neighbors) is at ' + writtenPath +
+                '. If patterns inline don\\'t fully address the task, Read the full file for the complete pattern library.';
+            }
+          }
+          msg.result.content[0].text = JSON.stringify(inner, null, 2);
+          return JSON.stringify(msg);
+        };
+        let out = rebuild();
+        while (out.length > WIRE_LIMIT && inner.results.length > 1) {
+          inner.results = originalResults.slice(0, inner.results.length - 1);
+          out = rebuild();
         }
-        inner.original_count = originalCount;
-        inner.truncated_to = packed.length;
-        // Inline: full patterns (with match_factors), trimmed to the count that
-        // fits the 8 KB-safe byte budget (#13).
-        inner.results = inner.results.slice(0, packed.length);
-        if (writtenPath) {
-          inner.full_results_path = writtenPath;
-          // u10-expanded Fix C: mention expanded[] in the note.
-          inner.full_results_note = 'FULL RESULTS: Showing top ' + packed.length + ' of ' + originalCount +
-            ' patterns inline. The complete result set (including expanded[] neighbors) is at ' + writtenPath +
-            '. If patterns inline don\\'t fully address the task, Read the full file for the complete pattern library.';
-        }
-        if (expandedNote !== undefined) inner.expanded_note = expandedNote;
-        // Preserve inner.count as-is — AI knows there were more.
-        msg.result.content[0].text = JSON.stringify(inner, null, 2);
-        return JSON.stringify(msg);
+        return out;
       }
     }
   } catch (_) { /* fall through to passthrough */ }
