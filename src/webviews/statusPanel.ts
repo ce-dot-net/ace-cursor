@@ -48,7 +48,12 @@ export function formatCount(n: number): string {
  * 0 is a valid 1.5 value and MUST take the 1.5 path).
  */
 export interface NormalizedStats {
-	/** Defined (incl. 0) when server is ACE 1.5. Undefined on 1.0 servers. */
+	/** True when the payload carries ANY ACE 1.5 signal (numeric reward OR tier
+	 * counters). Drives 1.5-vs-1.0 card selection independently of rewardTotal,
+	 * so a null reward with present tiers still renders 1.5 tier cards. */
+	is15: boolean;
+	/** A number (incl. 0) when the 1.5 reward total is present; undefined when it
+	 * is absent OR null (server cold-shadow/error path) — render as "n/a". */
 	rewardTotal: number | undefined;
 	hotTotal: number;
 	warmTotal: number;
@@ -74,6 +79,14 @@ export function normalizeStats(stats: Record<string, any>): NormalizedStats {
 	const warmTotal = stats.warm_total ?? 0;
 	const coldTotal = stats.cold_total ?? 0;
 	const atRiskCount = stats.at_risk_count ?? 0;
+	// 1.5 detection is broader than rewardTotal: a 1.5 server may send tier
+	// counters with a null/absent reward total (cold-shadow / pre-aggregation).
+	// Treat ANY 1.5 signal as 1.5 so we keep the real tier cards instead of
+	// degrading to legacy 1.0 cards (which 1.5 servers don't populate).
+	const is15 =
+		typeof stats.cumulative_reward_total === 'number' ||
+		stats.hot_total !== undefined || stats.warm_total !== undefined ||
+		stats.cold_total !== undefined || stats.at_risk_count !== undefined;
 	// Legacy 1.0 fallback fields
 	const helpfulTotal = stats.helpful_total ?? 0;
 	const harmfulTotal = stats.harmful_total ?? 0;
@@ -81,22 +94,25 @@ export function normalizeStats(stats: Record<string, any>): NormalizedStats {
 		helpfulTotal + harmfulTotal > 0
 			? Math.round((helpfulTotal / (helpfulTotal + harmfulTotal)) * 100)
 			: 100;
-	return { rewardTotal, hotTotal, warmTotal, coldTotal, atRiskCount, helpfulTotal, harmfulTotal, legacyTrustScore };
+	return { is15, rewardTotal, hotTotal, warmTotal, coldTotal, atRiskCount, helpfulTotal, harmfulTotal, legacyTrustScore };
 }
 
 /**
  * Pure renderer — produce the three quality-metric card HTML fragments.
  *
- * 1.5 path (rewardTotal !== undefined): cumulative reward + tier counters + at-risk.
- * 1.0 fallback (rewardTotal === undefined): legacy helpful / harmful / trust-score.
+ * 1.5 path (ns.is15): cumulative reward + tier counters + at-risk. The reward
+ * value shows "n/a" when the total is null/absent but tier counters exist — we
+ * keep the real 1.5 tier cards rather than degrading to legacy 1.0 cards.
+ * 1.0 fallback (!ns.is15): legacy helpful / harmful / trust-score.
  *
  * rewardTotal is rendered with .toFixed(1) (NOT formatCount) because it is a
  * raw float aggregate, not a rounded integer count.
  */
 export function renderQualityCards(ns: NormalizedStats): string {
-	if (ns.rewardTotal !== undefined) {
+	if (ns.is15) {
+		const rewardLabel = ns.rewardTotal !== undefined ? ns.rewardTotal.toFixed(1) : 'n/a';
 		return `<div class="quality-item">
-    <div class="quality-value">${ns.rewardTotal.toFixed(1)}</div>
+    <div class="quality-value">${rewardLabel}</div>
     <div class="quality-label">Cumulative Reward</div>
 </div>
 <div class="quality-item">
@@ -159,14 +175,18 @@ export function sortTopPatternsByReward(patterns: Record<string, any>[]): Record
 /**
  * Render the per-pattern reward/helpful badge.
  *
- * 1.5 path (cumulative_v15_reward is a number): "Reward: 4.20"
- * 1.0 fallback (absent OR null):               "Helpful: N"
- * Discriminator: `typeof === 'number'` — 0 is a valid 1.5 value, but a server
- * `null` must fall back (else `(null).toFixed(2)` throws and collapses the view).
+ * 1.5 reward present (number):       "Reward: 4.20"  (0 is valid)
+ * 1.5 pattern, reward null/pending:  "Reward: —"     (key present but not a number)
+ * 1.0 pattern (key absent):          "Helpful: N"
+ * Using typeof avoids `(null).toFixed(2)` (which throws); the `in` check keeps a
+ * null-reward 1.5 pattern from being mislabeled as a legacy "Helpful: 0".
  */
 export function renderPatternRewardBadge(p: Record<string, any>): string {
 	if (typeof p.cumulative_v15_reward === 'number') {
 		return `<span>Reward: ${p.cumulative_v15_reward.toFixed(2)}</span>`;
+	}
+	if ('cumulative_v15_reward' in p) {
+		return `<span>Reward: —</span>`;
 	}
 	return `<span>Helpful: ${formatCount(p.helpful || 0)}</span>`;
 }

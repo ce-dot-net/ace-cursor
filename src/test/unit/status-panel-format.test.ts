@@ -480,17 +480,31 @@ describe('statusPanel reward null-safety (no toFixed crash)', () => {
 		expect(normalizeStats({ cumulative_reward_total: 0 }).rewardTotal).toBe(0);
 	});
 
-	it('renderQualityCards: null reward total renders legacy cards without throwing', () => {
-		const ns = normalizeStats({ cumulative_reward_total: null, helpful_total: 3, harmful_total: 1 });
+	it('renderQualityCards: pure 1.0 payload (no 1.5 signal) → legacy cards', () => {
+		const ns = normalizeStats({ helpful_total: 3, harmful_total: 1 });
+		expect(ns.is15).toBe(false);
 		expect(() => renderQualityCards(ns)).not.toThrow();
 		expect(renderQualityCards(ns)).toContain('Trust Score');
 	});
 
-	it('renderPatternRewardBadge: null cumulative_v15_reward → Helpful fallback, no throw', () => {
+	it('renderQualityCards: null reward total but tier counters present → 1.5 cards with n/a reward (not legacy)', () => {
+		const ns = normalizeStats({ cumulative_reward_total: null, hot_total: 2, warm_total: 3, cold_total: 1, at_risk_count: 0 });
+		expect(ns.is15).toBe(true);
+		expect(ns.rewardTotal).toBeUndefined();
+		const html = renderQualityCards(ns);
+		expect(html).toContain('Cumulative Reward');
+		expect(html).toContain('n/a');
+		expect(html).not.toContain('Trust Score');
+	});
+
+	it('renderPatternRewardBadge: null 1.5 reward → "Reward: —" (no crash, not mislabeled Helpful)', () => {
 		expect(() => renderPatternRewardBadge({ cumulative_v15_reward: null, helpful: 4 })).not.toThrow();
-		expect(renderPatternRewardBadge({ cumulative_v15_reward: null, helpful: 4 })).toContain('Helpful:');
+		expect(renderPatternRewardBadge({ cumulative_v15_reward: null, helpful: 4 })).toContain('Reward: —');
+		expect(renderPatternRewardBadge({ cumulative_v15_reward: null })).not.toContain('Helpful');
 		// 0 is a valid 1.5 reward.
 		expect(renderPatternRewardBadge({ cumulative_v15_reward: 0 })).toContain('Reward: 0.00');
+		// 1.0 pattern (key absent) → legacy Helpful.
+		expect(renderPatternRewardBadge({ helpful: 4 })).toContain('Helpful: 4');
 	});
 
 	it('sortTopPatternsByReward: null reward sorts via helpful fallback, not as 0', () => {
