@@ -82,15 +82,10 @@ function makeFilterLine(opts: { writeDir?: string; throwOnWrite?: boolean } = {}
 					&& Array.isArray(inner.results)
 					&& typeof inner.query === 'string') {
 					const originalCount = (typeof inner.count === 'number') ? inner.count : inner.results.length;
-					// u10-expanded Fix A (issue #13): exclude match_factors from the
-					// byte BUDGET only. match_factors are PRESERVED in the inline
-					// output; only the packed COUNT comes from this stripped projection.
-					const stripped = inner.results.map((p: any) => {
-						// eslint-disable-next-line @typescript-eslint/no-unused-vars
-						const { match_factors, ...rest } = p;
-						return rest;
-					});
-					const packed = packPatternsUntilSize(stripped, MAX_INLINE_PATTERN_BYTES);
+					// u10-expanded (issue #13): match_factors are PRESERVED inline.
+					// The FULL patterns are counted against the budget so the wire
+					// payload stays under the 8 KB Cursor pipe limit.
+					const packed = packPatternsUntilSize(inner.results, MAX_INLINE_PATTERN_BYTES);
 					// u10-expanded Fix B (early-return fix): inject expanded_note BEFORE
 					// the early return so non-truncated responses with expanded[] still
 					// get the note.
@@ -99,8 +94,8 @@ function makeFilterLine(opts: { writeDir?: string; throwOnWrite?: boolean } = {}
 							' Cached stubs (cached:true) are already in ~/.ace-cache — call ace_batch_get([...pattern_ids]) to fetch their content.'
 						: undefined;
 					if (packed.length >= inner.results.length) {
-						// No truncation — match_factors stay inline (only excluded from
-						// the budget); the only possible inline change is an expanded_note.
+						// Everything fits — match_factors stay inline; the only possible
+						// inline change is an expanded_note.
 						if (expandedNoteValue === undefined) {
 							return line;
 						}
@@ -122,8 +117,8 @@ function makeFilterLine(opts: { writeDir?: string; throwOnWrite?: boolean } = {}
 					} catch (_) { /* defensive — passthrough without full path */ }
 					inner.original_count = originalCount;
 					inner.truncated_to = packed.length;
-					// Inline: keep FULL patterns (with match_factors); only the COUNT
-					// is budget-limited (issue #13).
+					// Inline: full patterns (with match_factors), trimmed to the count
+					// that fits the 8 KB-safe budget (issue #13).
 					inner.results = inner.results.slice(0, packed.length);
 					if (writtenPath) {
 						inner.full_results_path = writtenPath;
@@ -912,10 +907,10 @@ describe('ACE MCP proxy — u10-expanded (match_factors + expanded neighbors)', 
 		});
 	}
 
-	it('match_factors excluded from byte budget: more patterns fit inline when match_factors present', () => {
-		// Build two identical response sets — one with match_factors, one without.
-		// After the fix, both should pack the same number of patterns inline
-		// because match_factors is stripped before byte-counting.
+	it('match_factors counted in byte budget: inline payload stays 8 KB-safe (issue #13)', () => {
+		// Issue #13 (revised): match_factors are PRESERVED inline, so they count
+		// against the budget — fewer patterns fit when match_factors are present,
+		// but the wire payload never overflows the 8 KB Cursor pipe limit.
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-mf-budget-'));
 		try {
 			const filter = makeFilterLine({ writeDir: tmp });
@@ -940,16 +935,18 @@ describe('ACE MCP proxy — u10-expanded (match_factors + expanded neighbors)', 
 			const innerNoMFOut = JSON.parse(filteredNoMF.result.content[0].text);
 			const countNoMF = innerNoMFOut.results.length;
 
-			// The budget-stripping fix must make withMF pack at least as many patterns
-			// as withoutMF (ideally identical, since match_factors are excluded).
-			expect(countWithMF).toBeGreaterThanOrEqual(countNoMF);
+			// match_factors add bytes, so withMF packs no MORE patterns than withoutMF.
+			expect(countWithMF).toBeLessThanOrEqual(countNoMF);
+			// Critical (the reason for option C): the emitted inline results array —
+			// match_factors and all — stays within the byte budget → pipe-safe.
+			expect(JSON.stringify(innerWithMF.results).length).toBeLessThanOrEqual(MAX_INLINE_PATTERN_BYTES);
 		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 	});
 
-	it('match_factors PRESERVED inline (issue #13) — excluded from the byte budget only', () => {
-		// Issue #13 spec: match_factors are stripped ONLY for size estimation, not
-		// from the inline output. The patterns that fit keep their match_factors,
-		// and the disk copy is the full set.
+	it('match_factors PRESERVED inline (issue #13), wire stays 8 KB-safe', () => {
+		// Issue #13: match_factors stay in the inline output. They count against the
+		// budget, so the patterns that fit keep their match_factors AND the inline
+		// payload stays within MAX_INLINE_PATTERN_BYTES. Disk holds the full set.
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-mf-preserve-'));
 		try {
 			const filter = makeFilterLine({ writeDir: tmp });
@@ -957,12 +954,14 @@ describe('ACE MCP proxy — u10-expanded (match_factors + expanded neighbors)', 
 			const filtered = JSON.parse(filter(resp));
 			const inner = JSON.parse(filtered.result.content[0].text);
 			expect(inner.results.length).toBeGreaterThan(0);
-			// 30 patterns overflow the stripped budget → truncation happened.
+			// 30 patterns overflow the budget → truncation happened.
 			expect(inner.truncated_to).toBe(inner.results.length);
 			expect(inner.results.length).toBeLessThan(30);
 			// Inline patterns KEEP their match_factors (preserved, not stripped).
 			expect(inner.results[0]).toHaveProperty('match_factors');
 			expect(inner.results[0].match_factors).toHaveProperty('semantic_score');
+			// Pipe safety: the emitted inline results stay within the byte budget.
+			expect(JSON.stringify(inner.results).length).toBeLessThanOrEqual(MAX_INLINE_PATTERN_BYTES);
 			// Disk: full result set also preserves match_factors.
 			expect(inner.full_results_path).toBeTruthy();
 			const onDisk = JSON.parse(fs.readFileSync(inner.full_results_path, 'utf-8'));

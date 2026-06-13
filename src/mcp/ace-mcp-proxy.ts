@@ -315,17 +315,13 @@ function filterLine(line) {
           && Array.isArray(inner.results)
           && typeof inner.query === 'string') {
         const originalCount = (typeof inner.count === 'number') ? inner.count : inner.results.length;
-        // u10-expanded Fix A (issue #13): exclude match_factors from the byte
-        // BUDGET only — the AI doesn't act on match_factors (LinUCB scoring
-        // metadata, consumed by the F-080 sidecar), so they shouldn't count
-        // against MAX_INLINE_PATTERN_BYTES and crowd out actionable patterns.
-        // match_factors are PRESERVED in the inline output; only the packed COUNT
-        // is derived from this stripped projection.
-        const stripped = inner.results.map((p) => {
-          const { match_factors, ...rest } = p;
-          return rest;
-        });
-        const packed = packPatternsUntilSize(stripped, MAX_INLINE_PATTERN_BYTES);
+        // u10-expanded (issue #13): match_factors are PRESERVED in the inline
+        // output. To stay under Cursor's ~8 KB macOS pipe limit, the FULL patterns
+        // (match_factors included, ~200 bytes each) are counted against
+        // MAX_INLINE_PATTERN_BYTES — so when match_factors are present fewer
+        // patterns fit inline, but the wire payload never overflows. The disk copy
+        // (full_results_path) always holds the complete result set.
+        const packed = packPatternsUntilSize(inner.results, MAX_INLINE_PATTERN_BYTES);
         // u10-expanded Fix B (early-return fix): compute expanded_note BEFORE the
         // early-return so non-truncated responses with expanded[] still get it.
         // Feature-detect: 1.0 (key absent) and 1.5-empty ([]) both produce nothing.
@@ -334,9 +330,8 @@ function filterLine(line) {
             ' Cached stubs (cached:true) are already in ~/.ace-cache — call ace_batch_get([...pattern_ids]) to fetch their content.'
           : undefined;
         if (packed.length >= inner.results.length) {
-          // No truncation needed. match_factors stay inline (only excluded from
-          // the budget above), so the only possible inline change is an
-          // expanded_note. With no neighbors there is nothing to modify.
+          // Everything fits — match_factors stay inline. The only possible inline
+          // change is an expanded_note; with no neighbors nothing is modified.
           if (expandedNote === undefined) {
             return line;
           }
@@ -361,8 +356,8 @@ function filterLine(line) {
         }
         inner.original_count = originalCount;
         inner.truncated_to = packed.length;
-        // Inline: keep the FULL patterns (with match_factors) for the count the
-        // stripped budget allowed; only the NUMBER of patterns is limited (#13).
+        // Inline: full patterns (with match_factors), trimmed to the count that
+        // fits the 8 KB-safe byte budget (#13).
         inner.results = inner.results.slice(0, packed.length);
         if (writtenPath) {
           inner.full_results_path = writtenPath;
