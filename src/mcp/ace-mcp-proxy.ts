@@ -344,45 +344,53 @@ function filterLine(line) {
         const safeSid = String(sid).replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 200);
         const fullPath = path.join('.cursor', 'ace', 'searches', safeSid + '.json');
         let writtenPath = '';
+        // Persist the COMPLETE record to disk once (idempotent) and point the inline
+        // view at it. Called before ANY data is dropped (results, expanded, or query)
+        // so nothing is ever lost.
+        const persist = () => {
+          if (!writtenPath) {
+            try {
+              fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+              fs.writeFileSync(fullPath, JSON.stringify(JSON.parse(innerText), null, 2));
+              writtenPath = fullPath;
+            } catch (writeErr) {
+              process.stderr.write('[ace-mcp-proxy] full-results write failed: ' + (writeErr && writeErr.message || writeErr) + '\\n');
+            }
+          }
+          if (writtenPath && inner.full_results_path === undefined) {
+            inner.full_results_path = writtenPath;
+            inner.full_results_note = 'FULL RESULTS: the complete record — full query, all ' + originalCount +
+              ' results, and expanded[] neighbors — is at ' + writtenPath +
+              '. The inline view is trimmed to fit Cursor\\'s ~8 KB wire limit; Read the file if the inline subset is insufficient.';
+          }
+        };
         const rebuild = () => {
           if (inner.results.length < originalResults.length) {
-            // Persist the COMPLETE record once, before annotating the inline view.
-            if (!writtenPath) {
-              try {
-                fs.mkdirSync(path.dirname(fullPath), { recursive: true });
-                fs.writeFileSync(fullPath, JSON.stringify(JSON.parse(innerText), null, 2));
-                writtenPath = fullPath;
-              } catch (writeErr) {
-                process.stderr.write('[ace-mcp-proxy] full-results write failed: ' + (writeErr && writeErr.message || writeErr) + '\\n');
-              }
-            }
+            persist();
             inner.original_count = originalCount;
             inner.truncated_to = inner.results.length;
-            if (writtenPath) {
-              inner.full_results_path = writtenPath;
-              inner.full_results_note = 'FULL RESULTS: Showing top ' + inner.results.length + ' of ' + originalCount +
-                ' patterns inline. The complete result set (including expanded[] neighbors) is at ' + writtenPath +
-                '. If patterns inline don\\'t fully address the task, Read the full file for the complete pattern library.';
-            }
           }
           msg.result.content[0].text = JSON.stringify(inner, null, 2);
           return JSON.stringify(msg);
         };
         let out = rebuild();
-        // 1. Drop whole patterns until the line fits — down to zero (all on disk).
+        // 1. If a large expanded[] inflates the line, persist and drop the raw
+        //    stubs inline first — they're the least valuable inline (summary note +
+        //    disk copy keep them reachable), so we shed them before real patterns.
+        if (byteLen(out) > WIRE_LIMIT && inner.expanded !== undefined) {
+          persist();
+          delete inner.expanded;
+          out = rebuild();
+        }
+        // 2. Drop whole patterns until the line fits — down to zero (all on disk).
         while (byteLen(out) > WIRE_LIMIT && inner.results.length > 0) {
           inner.results = originalResults.slice(0, inner.results.length - 1);
           out = rebuild();
         }
-        // 2. Still oversize → a large expanded[] passthrough is the bloat; drop it
-        //    inline (the disk copy + ace_batch_get hint keep it reachable).
-        if (byteLen(out) > WIRE_LIMIT && inner.expanded !== undefined) {
-          delete inner.expanded;
-          out = rebuild();
-        }
-        // 3. Last resort → a huge echoed query; truncate the inline echo (the full
+        // 3. Last resort → persist and truncate the echoed query inline (the full
         //    query is on disk) so the frame is always wire-safe.
         if (byteLen(out) > WIRE_LIMIT && typeof inner.query === 'string' && inner.query.length > 64) {
+          persist();
           inner.query = inner.query.slice(0, 64) + '…';
           out = rebuild();
         }

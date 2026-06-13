@@ -104,41 +104,46 @@ function makeFilterLine(opts: { writeDir?: string; throwOnWrite?: boolean } = {}
 					const baseDir = opts.writeDir || process.cwd();
 					const fullPath = pathMod.join(baseDir, '.cursor', 'ace', 'searches', safeSid + '.json');
 					let writtenPath = '';
+					const persist = () => {
+						if (!writtenPath) {
+							try {
+								if (opts.throwOnWrite) throw new Error('synthetic write failure');
+								fsMod.mkdirSync(pathMod.dirname(fullPath), { recursive: true });
+								fsMod.writeFileSync(fullPath, JSON.stringify(JSON.parse(innerText), null, 2));
+								writtenPath = fullPath;
+							} catch (_) { /* defensive — passthrough without full path */ }
+						}
+						if (writtenPath && inner.full_results_path === undefined) {
+							inner.full_results_path = writtenPath;
+							inner.full_results_note = 'FULL RESULTS: the complete record — full query, all ' + originalCount +
+								' results, and expanded[] neighbors — is at ' + writtenPath +
+								'. The inline view is trimmed to fit Cursor\'s ~8 KB wire limit; Read the file if the inline subset is insufficient.';
+						}
+					};
 					const rebuild = () => {
 						if (inner.results.length < originalResults.length) {
-							if (!writtenPath) {
-								try {
-									if (opts.throwOnWrite) throw new Error('synthetic write failure');
-									fsMod.mkdirSync(pathMod.dirname(fullPath), { recursive: true });
-									fsMod.writeFileSync(fullPath, JSON.stringify(JSON.parse(innerText), null, 2));
-									writtenPath = fullPath;
-								} catch (_) { /* defensive — passthrough without full path */ }
-							}
+							persist();
 							inner.original_count = originalCount;
 							inner.truncated_to = inner.results.length;
-							if (writtenPath) {
-								inner.full_results_path = writtenPath;
-								inner.full_results_note = 'FULL RESULTS: Showing top ' + inner.results.length + ' of ' + originalCount +
-									' patterns inline. The complete result set (including expanded[] neighbors) is at ' + writtenPath +
-									'. If patterns inline don\'t fully address the task, Read the full file for the complete pattern library.';
-							}
 						}
 						msg.result.content[0].text = JSON.stringify(inner, null, 2);
 						return JSON.stringify(msg);
 					};
 					let out = rebuild();
-					// 1. Drop whole patterns until it fits — down to zero (all on disk).
+					// 1. Drop a large expanded[] inline first (least valuable; on disk).
+					if (byteLen(out) > WIRE_LIMIT && inner.expanded !== undefined) {
+						persist();
+						delete inner.expanded;
+						out = rebuild();
+					}
+					// 2. Drop whole patterns until it fits — down to zero (all on disk).
 					while (byteLen(out) > WIRE_LIMIT && inner.results.length > 0) {
 						inner.results = originalResults.slice(0, inner.results.length - 1);
 						out = rebuild();
 					}
-					// 2. Still oversize → drop the raw expanded[] inline (kept on disk).
-					if (byteLen(out) > WIRE_LIMIT && inner.expanded !== undefined) {
-						delete inner.expanded;
-						out = rebuild();
-					}
-					// 3. Last resort → truncate the echoed query (full query is on disk).
+					// 3. Last resort → persist, then truncate the echoed query inline.
 					if (byteLen(out) > WIRE_LIMIT && typeof inner.query === 'string' && inner.query.length > 64) {
+						persist();
 						inner.query = inner.query.slice(0, 64) + '…';
 						out = rebuild();
 					}
@@ -1033,6 +1038,32 @@ describe('ACE MCP proxy — u10-expanded (match_factors + expanded neighbors)', 
 			const resp = JSON.stringify({ jsonrpc: '2.0', id: 8, result: { content: [{ type: 'text', text: JSON.stringify(innerRaw) }] } });
 			const lineOut = filter(resp);
 			expect(Buffer.byteLength(lineOut, 'utf8')).toBeLessThanOrEqual(8192);
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('oversize from a huge expanded[] (results fit) → persists full set, drops expanded inline, keeps results (Codex P1)', () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-wire-exp-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			const results = [
+				{ id: 'a', name: 'a', content: 'short A', confidence: 0.9 },
+				{ id: 'b', name: 'b', content: 'short B', confidence: 0.8 },
+			];
+			// ~150 fat neighbor stubs → expanded alone blows the wire budget while the
+			// two real results fit easily.
+			const expanded = Array.from({ length: 150 }, (_, i) => ({ pattern_id: 'neighbor-' + 'x'.repeat(60) + i, cumulative_reward: 1.2, cached: true }));
+			const innerRaw = { query: 'q', threshold: 0.7, results, count: 2, expanded, session_id: 'sid-exp' };
+			const resp = JSON.stringify({ jsonrpc: '2.0', id: 9, result: { content: [{ type: 'text', text: JSON.stringify(innerRaw) }] } });
+			const lineOut = filter(resp);
+			expect(Buffer.byteLength(lineOut, 'utf8')).toBeLessThanOrEqual(8192);
+			const inner = JSON.parse(JSON.parse(lineOut).result.content[0].text);
+			// Real patterns are kept (expanded shed first); expanded is gone inline.
+			expect(inner.results).toHaveLength(2);
+			expect(inner).not.toHaveProperty('expanded');
+			// Nothing lost: the full record (incl. all 150 neighbors) is on disk.
+			expect(inner.full_results_path).toBeTruthy();
+			const onDisk = JSON.parse(fs.readFileSync(inner.full_results_path, 'utf-8'));
+			expect(onDisk.expanded).toHaveLength(150);
 		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 	});
 
