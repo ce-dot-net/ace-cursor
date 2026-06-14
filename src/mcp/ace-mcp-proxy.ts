@@ -395,8 +395,12 @@ function filterLine(line) {
           out = rebuild();
         }
         // 4. The only remaining unbounded value is a server-assigned session_id
-        //    (normally a 36-char UUID). Persist + clamp it inline so the frame is
-        //    provably bounded even for a pathologically long session_id.
+        //    (normally a 36-char UUID). A pathologically long one cannot be echoed
+        //    inline AND stay under the wire limit, so we clamp it (the full value is
+        //    preserved on disk via persist()). This degrades the LEGACY inline
+        //    session_id attribution for that one response, but F-080 attribution
+        //    uses the separate retrieval_id sidecar and is unaffected. Real UUIDs
+        //    never reach this branch.
         if (byteLen(out) > WIRE_LIMIT && typeof inner.session_id === 'string' && inner.session_id.length > 64) {
           persist();
           inner.session_id = inner.session_id.slice(0, 64) + '…';
