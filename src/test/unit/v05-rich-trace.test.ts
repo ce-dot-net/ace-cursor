@@ -1269,3 +1269,912 @@ describe('dev.19 — extension trajectory watcher uses tasks/* glob', () => {
 		expect(src).toMatch(/Map<string, number>/);
 	});
 });
+
+// ===========================================================================
+// u04-timing (#8) — F-080: trajectory timing — start_ms / end_ms / duration_ms
+// ===========================================================================
+
+/**
+ * Build a transcript with entries that carry a timestamp field (multi-key
+ * fallback: timestamp || created_at || ts). Also tests that entries without
+ * any timestamp key produce steps with NO timing fields at all (not 0 / NaN).
+ */
+describe('u04-timing — F-080: trajectory timing fields', () => {
+	const TS_ISO = '2026-06-10T19:35:11.612Z';
+	const TS_MS = new Date(TS_ISO).getTime(); // 1749583511612
+
+	// --- transcript path ---
+
+	it('transcript step carries start_ms from entry.timestamp ISO string', () => {
+		const ctx = writeHelperWithStub();
+		const jsonl = writeTrajectory(ctx.tmpDir, { convId: 'CONV-TM1' });
+		// Transcript entry with a top-level timestamp field.
+		const transcript = writeCursorTranscript(ctx.tmpDir, [
+			{ role: 'user', message: { role: 'user', content: [{ type: 'text', text: 'task' }] }, timestamp: TS_ISO },
+			{ role: 'assistant', message: { role: 'assistant', content: [
+				{ type: 'tool_use', name: 'Shell', input: { command: 'ls' } },
+			] }, timestamp: TS_ISO },
+		]);
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM1', jsonlPath: jsonl, transcriptPath: transcript });
+		expect(r.status, `exit (stderr: ${r.stderr})`).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'Shell');
+		expect(step).toBeTruthy();
+		expect(step.start_ms).toBe(TS_MS);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('transcript step carries start_ms from entry.created_at when timestamp absent', () => {
+		const ctx = writeHelperWithStub();
+		const jsonl = writeTrajectory(ctx.tmpDir, { convId: 'CONV-TM2' });
+		const transcript = writeCursorTranscript(ctx.tmpDir, [
+			{ role: 'user', message: { role: 'user', content: [{ type: 'text', text: 'task' }] }, created_at: TS_ISO },
+			{ role: 'assistant', message: { role: 'assistant', content: [
+				{ type: 'tool_use', name: 'Shell', input: { command: 'echo' } },
+			] }, created_at: TS_ISO },
+		]);
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM2', jsonlPath: jsonl, transcriptPath: transcript });
+		expect(r.status).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'Shell');
+		expect(step).toBeTruthy();
+		expect(step.start_ms).toBe(TS_MS);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('transcript step carries start_ms from entry.ts when timestamp/created_at absent', () => {
+		const ctx = writeHelperWithStub();
+		const jsonl = writeTrajectory(ctx.tmpDir, { convId: 'CONV-TM3' });
+		const transcript = writeCursorTranscript(ctx.tmpDir, [
+			{ role: 'user', message: { role: 'user', content: [{ type: 'text', text: 'task' }] }, ts: TS_ISO },
+			{ role: 'assistant', message: { role: 'assistant', content: [
+				{ type: 'tool_use', name: 'Shell', input: { command: 'pwd' } },
+			] }, ts: TS_ISO },
+		]);
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM3', jsonlPath: jsonl, transcriptPath: transcript });
+		expect(r.status).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'Shell');
+		expect(step).toBeTruthy();
+		expect(step.start_ms).toBe(TS_MS);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('transcript step has NO start_ms / end_ms / duration_ms when entry has no timestamp', () => {
+		const ctx = writeHelperWithStub();
+		const jsonl = writeTrajectory(ctx.tmpDir, { convId: 'CONV-TM4' });
+		// No timestamp / created_at / ts on the entry.
+		const transcript = writeCursorTranscript(ctx.tmpDir, [
+			userMsg('task'),
+			assistantToolUse([
+				{ type: 'tool_use', name: 'Shell', input: { command: 'ls' } },
+			]),
+		]);
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM4', jsonlPath: jsonl, transcriptPath: transcript });
+		expect(r.status).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'Shell');
+		expect(step).toBeTruthy();
+		// Fields must be ABSENT — not null, not 0, not NaN.
+		expect('start_ms' in step).toBe(false);
+		expect('end_ms' in step).toBe(false);
+		expect('duration_ms' in step).toBe(false);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	// --- JSONL fallback path ---
+
+	it('JSONL-fallback step carries start_ms from entry.timestamp', () => {
+		const ctx = writeHelperWithStub();
+		// Build a JSONL with a timestamp field on the entry.
+		const aceDir = path.join(ctx.tmpDir, '.cursor', 'ace');
+		fs.mkdirSync(aceDir, { recursive: true });
+		const jsonl = path.join(aceDir, 'mcp_trajectory.jsonl');
+		fs.writeFileSync(jsonl, JSON.stringify({
+			conversation_id: 'CONV-TM5',
+			tool_name: 'ace_search',
+			tool_input: '{"query":"auth"}',
+			timestamp: TS_ISO,
+		}) + '\n');
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM5', jsonlPath: jsonl });
+		expect(r.status, `exit (stderr: ${r.stderr})`).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'ace_search');
+		expect(step).toBeTruthy();
+		expect(step.start_ms).toBe(TS_MS);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('JSONL-fallback step has NO start_ms / end_ms / duration_ms when entry lacks timestamp', () => {
+		const ctx = writeHelperWithStub();
+		const aceDir = path.join(ctx.tmpDir, '.cursor', 'ace');
+		fs.mkdirSync(aceDir, { recursive: true });
+		const jsonl = path.join(aceDir, 'mcp_trajectory.jsonl');
+		// Entry with no timestamp key at all.
+		fs.writeFileSync(jsonl, JSON.stringify({
+			conversation_id: 'CONV-TM6',
+			tool_name: 'ace_search',
+			tool_input: '{"query":"auth"}',
+		}) + '\n');
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM6', jsonlPath: jsonl });
+		expect(r.status).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'ace_search');
+		expect(step).toBeTruthy();
+		expect('start_ms' in step).toBe(false);
+		expect('end_ms' in step).toBe(false);
+		expect('duration_ms' in step).toBe(false);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	// --- duration_ms / end_ms on JSONL fallback path ---
+
+	it('JSONL-fallback step emits duration_ms and end_ms when entry has timestamp + duration_ms', () => {
+		const ctx = writeHelperWithStub();
+		const aceDir = path.join(ctx.tmpDir, '.cursor', 'ace');
+		fs.mkdirSync(aceDir, { recursive: true });
+		const jsonl = path.join(aceDir, 'mcp_trajectory.jsonl');
+		const DUR = 350;
+		fs.writeFileSync(jsonl, JSON.stringify({
+			conversation_id: 'CONV-TM-DUR1',
+			tool_name: 'ace_search',
+			tool_input: '{"query":"auth"}',
+			timestamp: TS_ISO,
+			duration_ms: DUR,
+		}) + '\n');
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM-DUR1', jsonlPath: jsonl });
+		expect(r.status, `exit (stderr: ${r.stderr})`).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'ace_search');
+		expect(step).toBeTruthy();
+		expect(step.start_ms).toBe(TS_MS);
+		expect(step.duration_ms).toBe(DUR);
+		expect(step.end_ms).toBe(TS_MS + DUR);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('JSONL-fallback step emits duration_ms but NO end_ms when timestamp absent but duration_ms present', () => {
+		const ctx = writeHelperWithStub();
+		const aceDir = path.join(ctx.tmpDir, '.cursor', 'ace');
+		fs.mkdirSync(aceDir, { recursive: true });
+		const jsonl = path.join(aceDir, 'mcp_trajectory.jsonl');
+		const DUR = 120;
+		// No timestamp → stepStartMs undefined; duration_ms still present.
+		fs.writeFileSync(jsonl, JSON.stringify({
+			conversation_id: 'CONV-TM-DUR2',
+			tool_name: 'ace_search',
+			tool_input: '{"query":"auth"}',
+			duration_ms: DUR,
+		}) + '\n');
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM-DUR2', jsonlPath: jsonl });
+		expect(r.status).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'ace_search');
+		expect(step).toBeTruthy();
+		// start_ms absent (no timestamp).
+		expect('start_ms' in step).toBe(false);
+		// duration_ms present from JSONL field.
+		expect(step.duration_ms).toBe(DUR);
+		// end_ms absent (cannot derive without start_ms).
+		expect('end_ms' in step).toBe(false);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('transcript MCP step emits duration_ms and end_ms when JSONL entry has timestamp + duration_ms', () => {
+		// Transcript carries the tool_use; JSONL carries the result + timing.
+		// pushMcpEntry must preserve duration_ms so the transcript-path step can use it.
+		const ctx = writeHelperWithStub();
+		const DUR = 200;
+		const aceDir = path.join(ctx.tmpDir, '.cursor', 'ace');
+		fs.mkdirSync(aceDir, { recursive: true });
+		// Write the JSONL with timing.
+		const jsonl = path.join(aceDir, 'mcp_trajectory.jsonl');
+		const inner = { results: [{ id: 'p1', content: 'x', confidence: 0.9 }], session_id: 'SID-T' };
+		const outer = { content: [{ type: 'text', text: JSON.stringify(inner) }], isError: false };
+		fs.writeFileSync(jsonl, JSON.stringify({
+			conversation_id: 'CONV-TM-MCP1',
+			tool_name: 'ace_search',
+			tool_input: '{"query":"jwt"}',
+			result_json: JSON.stringify(outer),
+			timestamp: TS_ISO,
+			duration_ms: DUR,
+		}) + '\n');
+		// Transcript entry with its OWN timestamp (different from JSONL timestamp).
+		// The step timing for an MCP tool should come from the JSONL entry (richer).
+		const TS_TRANSCRIPT_ISO = '2026-06-10T19:35:00.000Z'; // different from TS_ISO
+		const TS_TRANSCRIPT_MS = new Date(TS_TRANSCRIPT_ISO).getTime();
+		const transcript = writeCursorTranscript(ctx.tmpDir, [
+			{ role: 'user', message: { role: 'user', content: [{ type: 'text', text: 'help' }] }, timestamp: TS_TRANSCRIPT_ISO },
+			{ role: 'assistant', message: { role: 'assistant', content: [
+				{ type: 'tool_use', name: 'ace_search', input: { query: 'jwt' } },
+			] }, timestamp: TS_TRANSCRIPT_ISO },
+		]);
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM-MCP1', jsonlPath: jsonl, transcriptPath: transcript });
+		expect(r.status, `exit (stderr: ${r.stderr})`).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'ace_search');
+		expect(step).toBeTruthy();
+		// For MCP steps: timing should come from JSONL entry (it has richer timing data).
+		// The JSONL entry has timestamp=TS_ISO and duration_ms=DUR.
+		// JSONL start_ms must take precedence over transcript entry start_ms.
+		expect(step.start_ms).toBe(TS_MS);
+		expect(step.duration_ms).toBe(DUR);
+		expect(step.end_ms).toBe(TS_MS + DUR);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	// --- real Cursor `duration` field (float ms) — production shape (#8 fix) ---
+	// Cursor's afterMCPExecution hook delivers `duration` (a float in ms), NOT
+	// `duration_ms`. Verified against real .cursor/ace/.../mcp_trajectory.jsonl
+	// (sample values 902.27, 339.171, 70.608). Reading only duration_ms left
+	// production traces timing-less; these guard the real field name.
+
+	it('JSONL-fallback derives duration_ms from the real Cursor `duration` float (rounded)', () => {
+		const ctx = writeHelperWithStub();
+		const aceDir = path.join(ctx.tmpDir, '.cursor', 'ace');
+		fs.mkdirSync(aceDir, { recursive: true });
+		const jsonl = path.join(aceDir, 'mcp_trajectory.jsonl');
+		// Production shape: `duration` float, no duration_ms key.
+		fs.writeFileSync(jsonl, JSON.stringify({
+			conversation_id: 'CONV-TM-DURREAL',
+			tool_name: 'ace_search',
+			tool_input: '{"query":"auth"}',
+			timestamp: TS_ISO,
+			duration: 350.6,
+		}) + '\n');
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM-DURREAL', jsonlPath: jsonl });
+		expect(r.status, `exit (stderr: ${r.stderr})`).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'ace_search');
+		expect(step).toBeTruthy();
+		expect(step.duration_ms).toBe(351); // Math.round(350.6)
+		expect(step.end_ms).toBe(TS_MS + 351);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('transcript MCP step derives duration_ms from the JSONL `duration` float', () => {
+		const ctx = writeHelperWithStub();
+		const aceDir = path.join(ctx.tmpDir, '.cursor', 'ace');
+		fs.mkdirSync(aceDir, { recursive: true });
+		const jsonl = path.join(aceDir, 'mcp_trajectory.jsonl');
+		const inner = { results: [{ id: 'p1', content: 'x', confidence: 0.9 }], session_id: 'SID-D' };
+		const outer = { content: [{ type: 'text', text: JSON.stringify(inner) }], isError: false };
+		fs.writeFileSync(jsonl, JSON.stringify({
+			conversation_id: 'CONV-TM-MCPDUR',
+			tool_name: 'ace_search',
+			tool_input: '{"query":"jwt"}',
+			result_json: JSON.stringify(outer),
+			timestamp: TS_ISO,
+			duration: 200.4,
+		}) + '\n');
+		const transcript = writeCursorTranscript(ctx.tmpDir, [
+			{ role: 'user', message: { role: 'user', content: [{ type: 'text', text: 'help' }] }, timestamp: TS_ISO },
+			{ role: 'assistant', message: { role: 'assistant', content: [
+				{ type: 'tool_use', name: 'ace_search', input: { query: 'jwt' } },
+			] }, timestamp: TS_ISO },
+		]);
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM-MCPDUR', jsonlPath: jsonl, transcriptPath: transcript });
+		expect(r.status, `exit (stderr: ${r.stderr})`).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'ace_search');
+		expect(step).toBeTruthy();
+		expect(step.duration_ms).toBe(200); // Math.round(200.4)
+		expect(step.end_ms).toBe(TS_MS + 200);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('emits duration_ms:0 for a real `duration` of 0 (presence-not-truthiness)', () => {
+		const ctx = writeHelperWithStub();
+		const aceDir = path.join(ctx.tmpDir, '.cursor', 'ace');
+		fs.mkdirSync(aceDir, { recursive: true });
+		const jsonl = path.join(aceDir, 'mcp_trajectory.jsonl');
+		fs.writeFileSync(jsonl, JSON.stringify({
+			conversation_id: 'CONV-TM-DUR0',
+			tool_name: 'ace_search',
+			tool_input: '{"query":"auth"}',
+			timestamp: TS_ISO,
+			duration: 0,
+		}) + '\n');
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM-DUR0', jsonlPath: jsonl });
+		expect(r.status).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'ace_search');
+		expect(step).toBeTruthy();
+		expect(step.duration_ms).toBe(0);
+		expect(step.end_ms).toBe(TS_MS);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	// --- timestamp: 0 (Unix epoch) — presence-not-truthiness (finding 1) ---
+
+	it('transcript step treats timestamp:0 as a valid timestamp (Unix epoch → start_ms=0)', () => {
+		// timestamp: 0 is falsy in JS but IS a valid present value.
+		// The impl must use !== undefined, not truthy check.
+		const ctx = writeHelperWithStub();
+		const jsonl = writeTrajectory(ctx.tmpDir, { convId: 'CONV-TM-EPOCH1' });
+		const transcript = writeCursorTranscript(ctx.tmpDir, [
+			{ role: 'user', message: { role: 'user', content: [{ type: 'text', text: 'task' }] }, timestamp: 0 },
+			{ role: 'assistant', message: { role: 'assistant', content: [
+				{ type: 'tool_use', name: 'Shell', input: { command: 'date' } },
+			] }, timestamp: 0 },
+		]);
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM-EPOCH1', jsonlPath: jsonl, transcriptPath: transcript });
+		expect(r.status).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'Shell');
+		expect(step).toBeTruthy();
+		// timestamp:0 → new Date(0).getTime() = 0 — must be present, not absent.
+		expect('start_ms' in step).toBe(true);
+		expect(step.start_ms).toBe(0);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('JSONL-fallback step treats timestamp:0 as valid (Unix epoch → start_ms=0)', () => {
+		// timestamp: 0 is falsy — impl must use !== undefined, not truthy check.
+		const ctx = writeHelperWithStub();
+		const aceDir = path.join(ctx.tmpDir, '.cursor', 'ace');
+		fs.mkdirSync(aceDir, { recursive: true });
+		const jsonl = path.join(aceDir, 'mcp_trajectory.jsonl');
+		fs.writeFileSync(jsonl, JSON.stringify({
+			conversation_id: 'CONV-TM-EPOCH2',
+			tool_name: 'ace_search',
+			tool_input: '{"query":"epoch"}',
+			timestamp: 0,
+		}) + '\n');
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM-EPOCH2', jsonlPath: jsonl });
+		expect(r.status).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'ace_search');
+		expect(step).toBeTruthy();
+		expect('start_ms' in step).toBe(true);
+		expect(step.start_ms).toBe(0);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('JSONL-path MCP step treats timestamp:0 as valid when building mcpByFingerprint', () => {
+		// The JSONL pre-parse (entryStartMsForMcp) also has the same falsy bug on
+		// line ~302. Feed a JSONL+transcript pair with timestamp:0 and assert the
+		// transcript-path MCP step gets start_ms=0.
+		const ctx = writeHelperWithStub();
+		const aceDir = path.join(ctx.tmpDir, '.cursor', 'ace');
+		fs.mkdirSync(aceDir, { recursive: true });
+		const jsonl = path.join(aceDir, 'mcp_trajectory.jsonl');
+		const inner = { results: [{ id: 'p1', content: 'x', confidence: 0.9 }], session_id: 'SID-E0' };
+		const outer = { content: [{ type: 'text', text: JSON.stringify(inner) }], isError: false };
+		fs.writeFileSync(jsonl, JSON.stringify({
+			conversation_id: 'CONV-TM-EPOCH3',
+			tool_name: 'ace_search',
+			tool_input: '{"query":"epoch3"}',
+			result_json: JSON.stringify(outer),
+			timestamp: 0,
+		}) + '\n');
+		const transcript = writeCursorTranscript(ctx.tmpDir, [
+			{ role: 'user', message: { role: 'user', content: [{ type: 'text', text: 'help' }] } },
+			{ role: 'assistant', message: { role: 'assistant', content: [
+				{ type: 'tool_use', name: 'ace_search', input: { query: 'epoch3' } },
+			] } },
+		]);
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM-EPOCH3', jsonlPath: jsonl, transcriptPath: transcript });
+		expect(r.status, `exit (stderr: ${r.stderr})`).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'ace_search');
+		expect(step).toBeTruthy();
+		expect('start_ms' in step).toBe(true);
+		expect(step.start_ms).toBe(0);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	// --- step, action, args, result fields unchanged ---
+
+	it('base step fields (step, action, args, result) are unchanged when timing is present', () => {
+		const ctx = writeHelperWithStub();
+		const jsonl = writeTrajectory(ctx.tmpDir, { convId: 'CONV-TM7' });
+		const transcript = writeCursorTranscript(ctx.tmpDir, [
+			{ role: 'user', message: { role: 'user', content: [{ type: 'text', text: 'task' }] }, timestamp: TS_ISO },
+			{ role: 'assistant', message: { role: 'assistant', content: [
+				{ type: 'tool_use', name: 'Shell', input: { command: 'make' } },
+			] }, timestamp: TS_ISO },
+		]);
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-TM7', jsonlPath: jsonl, transcriptPath: transcript });
+		expect(r.status).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		const step = trace.trajectory.find((s: any) => s.action === 'Shell');
+		expect(step).toBeTruthy();
+		expect(step.step).toBe(1);
+		expect(step.action).toBe('Shell');
+		expect(step.args).toEqual({ command: 'make' });
+		expect(step.result).toBe('');
+		expect(step.start_ms).toBe(TS_MS);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+});
+
+// ===========================================================================
+// u05-retrievalid (#6) — F-080: retrieval_id + applied_log_ids (sidecar round-trip)
+// ===========================================================================
+
+/**
+ * Helpers to build trajectories and sidecars for u05 tests.
+ * Uses a per-conv path (.cursor/ace/tasks/<conv>/) which is the production path.
+ */
+function writePerConvTrajectoryWithRetrieval(tmpDir: string, opts: {
+	convId: string;
+	withSidecar?: {
+		retrievalId?: string | null;
+		logIdMap?: Record<string, number>;
+		genId?: string;
+	};
+	withSearchResults?: Array<{ id: string; retrieval_log_id: number | null }>;
+	multipleGens?: boolean;    // writes two gen sidecars, most-recent should win
+}): { jsonlPath: string; tasksDir: string } {
+	const tasksDir = path.join(tmpDir, '.cursor', 'ace', 'tasks', opts.convId);
+	fs.mkdirSync(tasksDir, { recursive: true });
+
+	const jsonlPath = path.join(tasksDir, 'mcp_trajectory.jsonl');
+	const lines: string[] = [];
+
+	if (opts.withSearchResults) {
+		const inner: any = {
+			session_id: 'SID-RETRIEVAL-1',
+			similar_patterns: opts.withSearchResults.map((p, i) => ({
+				id: p.id,
+				content: `content-${i}`,
+				confidence: 0.9,
+			})),
+		};
+		const outer = { content: [{ type: 'text', text: JSON.stringify(inner) }], isError: false };
+		lines.push(JSON.stringify({
+			conversation_id: opts.convId,
+			tool_name: 'ace_search',
+			tool_input: '{"query":"test"}',
+			result_json: JSON.stringify(outer),
+		}));
+	} else {
+		lines.push(JSON.stringify({
+			conversation_id: opts.convId, tool_name: 'Read', tool_input: '{"file":"a.ts"}',
+		}));
+	}
+	fs.writeFileSync(jsonlPath, lines.join('\n') + '\n');
+
+	if (opts.withSidecar !== undefined) {
+		const genId = opts.withSidecar.genId || 'gen-0001';
+		const sidecarPath = path.join(tasksDir, `${genId}.retrieval-ctx.json`);
+		fs.writeFileSync(sidecarPath, JSON.stringify({
+			retrieval_id: opts.withSidecar.retrievalId ?? null,
+			log_id_map: opts.withSidecar.logIdMap ?? {},
+		}));
+	}
+
+	if (opts.multipleGens) {
+		// Write two sidecars: gen-0001 (old) and gen-0002 (new). gen-0002 must win.
+		fs.writeFileSync(path.join(tasksDir, 'gen-0001.retrieval-ctx.json'), JSON.stringify({
+			retrieval_id: 'old-retrieval-id',
+			log_id_map: { 'p-old': 777 },
+		}));
+		fs.writeFileSync(path.join(tasksDir, 'gen-0002.retrieval-ctx.json'), JSON.stringify({
+			retrieval_id: 'new-retrieval-id',
+			log_id_map: { 'p-new': 999 },
+		}));
+		// JSONL has p-new in results so playbookUsed = {p-new}.
+		const inner2: any = {
+			session_id: 'SID-MULTI-GEN',
+			similar_patterns: [{ id: 'p-new', content: 'c', confidence: 0.9 }],
+		};
+		const outer2 = { content: [{ type: 'text', text: JSON.stringify(inner2) }], isError: false };
+		fs.writeFileSync(jsonlPath, JSON.stringify({
+			conversation_id: opts.convId,
+			tool_name: 'ace_search',
+			tool_input: '{"query":"multi"}',
+			result_json: JSON.stringify(outer2),
+		}) + '\n');
+	}
+
+	return { jsonlPath, tasksDir };
+}
+
+describe('u05-retrievalid — learn helper reads sidecar + populates F-080 trace fields', () => {
+	it('trace gets retrieval_id and applied_log_ids when sidecar + playbookUsed match', () => {
+		const ctx = writeHelperWithStub();
+		const { jsonlPath } = writePerConvTrajectoryWithRetrieval(ctx.tmpDir, {
+			convId: 'CONV-F080-1',
+			withSidecar: {
+				retrievalId: 'uuid-abc',
+				logIdMap: { 'p1': 42, 'p2': 99 },
+			},
+			withSearchResults: [
+				{ id: 'p1', retrieval_log_id: 42 },
+				{ id: 'p2', retrieval_log_id: 99 },
+			],
+		});
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-F080-1', jsonlPath });
+		expect(r.status, `helper exit (stderr: ${r.stderr})`).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		expect(trace.retrieval_id).toBe('uuid-abc');
+		expect(Array.isArray(trace.applied_log_ids)).toBe(true);
+		expect(trace.applied_log_ids).toContain(42);
+		expect(trace.applied_log_ids).toContain(99);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('applied_log_ids is the APPLIED SUBSET — pattern not in playbookUsed is excluded', () => {
+		const ctx = writeHelperWithStub();
+		// Only p2 is in the JSONL search results (playbookUsed). Sidecar has p1+p2.
+		const { tasksDir, jsonlPath } = writePerConvTrajectoryWithRetrieval(ctx.tmpDir, {
+			convId: 'CONV-F080-SUBSET',
+			withSearchResults: [{ id: 'p2', retrieval_log_id: 99 }],
+		});
+		fs.writeFileSync(path.join(tasksDir, 'gen-0001.retrieval-ctx.json'), JSON.stringify({
+			retrieval_id: 'uuid-subset',
+			log_id_map: { 'p1': 42, 'p2': 99 },
+		}));
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-F080-SUBSET', jsonlPath });
+		expect(r.status, `helper exit (stderr: ${r.stderr})`).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		expect(trace.retrieval_id).toBe('uuid-subset');
+		expect(trace.applied_log_ids).toEqual([99]);
+		expect(trace.applied_log_ids).not.toContain(42);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('applied_log_ids omitted when no playbookUsed pattern is in log_id_map', () => {
+		const ctx = writeHelperWithStub();
+		// playbookUsed has p-other; sidecar map only has p1→42.
+		const { tasksDir, jsonlPath } = writePerConvTrajectoryWithRetrieval(ctx.tmpDir, {
+			convId: 'CONV-F080-NOAPPLIED',
+			withSearchResults: [{ id: 'p-other', retrieval_log_id: 55 }],
+		});
+		fs.writeFileSync(path.join(tasksDir, 'gen-0001.retrieval-ctx.json'), JSON.stringify({
+			retrieval_id: 'uuid-noapp',
+			log_id_map: { 'p1': 42 },
+		}));
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-F080-NOAPPLIED', jsonlPath });
+		expect(r.status).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		expect(trace.retrieval_id).toBe('uuid-noapp');
+		// applied_log_ids OMITTED (no intersection).
+		expect('applied_log_ids' in trace).toBe(false);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('retrieval_log_id: null (cold LinUCB row) excluded — only numeric ids in applied_log_ids', () => {
+		const ctx = writeHelperWithStub();
+		// Sidecar was built without p1 (it had retrieval_log_id: null, excluded at write-time).
+		// Only p2→42 in log_id_map. playbookUsed = {p1, p2}.
+		const { tasksDir, jsonlPath } = writePerConvTrajectoryWithRetrieval(ctx.tmpDir, {
+			convId: 'CONV-F080-NULL',
+			withSearchResults: [
+				{ id: 'p1', retrieval_log_id: null },
+				{ id: 'p2', retrieval_log_id: 42 },
+			],
+		});
+		fs.writeFileSync(path.join(tasksDir, 'gen-0001.retrieval-ctx.json'), JSON.stringify({
+			retrieval_id: 'uuid-nullid',
+			log_id_map: { 'p2': 42 },   // p1 excluded (cold row)
+		}));
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-F080-NULL', jsonlPath });
+		expect(r.status).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		expect(trace.retrieval_id).toBe('uuid-nullid');
+		expect(trace.applied_log_ids).toEqual([42]);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('both fields omitted when sidecar is absent (search was skipped)', () => {
+		const ctx = writeHelperWithStub();
+		const { jsonlPath } = writePerConvTrajectoryWithRetrieval(ctx.tmpDir, {
+			convId: 'CONV-F080-NOSIDECAR',
+		});
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-F080-NOSIDECAR', jsonlPath });
+		expect(r.status).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		expect('retrieval_id' in trace).toBe(false);
+		expect('applied_log_ids' in trace).toBe(false);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('legacy sidecar with retrieval_id: null → retrieval_id and applied_log_ids both omitted', () => {
+		const ctx = writeHelperWithStub();
+		const { jsonlPath } = writePerConvTrajectoryWithRetrieval(ctx.tmpDir, {
+			convId: 'CONV-F080-LEGACY',
+			withSidecar: { retrievalId: null, logIdMap: {} },
+			withSearchResults: [{ id: 'p1', retrieval_log_id: 42 }],
+		});
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-F080-LEGACY', jsonlPath });
+		expect(r.status).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		// retrieval_id: null → OMIT (not emit null).
+		expect('retrieval_id' in trace).toBe(false);
+		// empty log_id_map → no applied_log_ids.
+		expect('applied_log_ids' in trace).toBe(false);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('most-recent gen sidecar wins when multiple exist', () => {
+		const ctx = writeHelperWithStub();
+		const { jsonlPath } = writePerConvTrajectoryWithRetrieval(ctx.tmpDir, {
+			convId: 'CONV-F080-MULTIGEN',
+			multipleGens: true,
+		});
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-F080-MULTIGEN', jsonlPath });
+		expect(r.status, `helper exit (stderr: ${r.stderr})`).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		expect(trace.retrieval_id).toBe('new-retrieval-id');
+		expect(trace.applied_log_ids).toContain(999);
+		expect(trace.applied_log_ids).not.toContain(777);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('retrieval_log_id: 0 (integer zero) is a valid 1.5 value — not excluded from applied_log_ids', () => {
+		// Zero is a valid LinUCB log row id. A truthiness check (if (n)) would
+		// incorrectly drop it. Only typeof n === 'number' admits it correctly.
+		const ctx = writeHelperWithStub();
+		const { tasksDir, jsonlPath } = writePerConvTrajectoryWithRetrieval(ctx.tmpDir, {
+			convId: 'CONV-F080-ZERO',
+			withSearchResults: [
+				{ id: 'p-zero', retrieval_log_id: 0 },
+				{ id: 'p-pos',  retrieval_log_id: 7 },
+			],
+		});
+		fs.writeFileSync(path.join(tasksDir, 'gen-0001.retrieval-ctx.json'), JSON.stringify({
+			retrieval_id: 'uuid-zero-test',
+			log_id_map: { 'p-zero': 0, 'p-pos': 7 },
+		}));
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-F080-ZERO', jsonlPath });
+		expect(r.status, `helper exit (stderr: ${r.stderr})`).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		expect(trace.retrieval_id).toBe('uuid-zero-test');
+		expect(Array.isArray(trace.applied_log_ids)).toBe(true);
+		// 0 must be present — a truthiness filter would silently drop it.
+		expect(trace.applied_log_ids).toContain(0);
+		expect(trace.applied_log_ids).toContain(7);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('retrieval_id falls back to JSONL result_json when sidecar is absent (MCP proxy path)', () => {
+		// Finding 1 fix: when the pre-tool-use hook never ran (non-Unix, cold start)
+		// but the MCP proxy path (Path B) populated retrieval_id inside result_json,
+		// the learn helper must use that value rather than silently dropping it.
+		const ctx = writeHelperWithStub();
+		const tasksDir = path.join(ctx.tmpDir, '.cursor', 'ace', 'tasks', 'CONV-F080-JSONLRID');
+		fs.mkdirSync(tasksDir, { recursive: true });
+		// JSONL with retrieval_id embedded directly in the result_json (flat shape,
+		// not MCP-wrapped — as the MCP proxy writes it).
+		const inner = {
+			session_id: 'SID-JSONLRID',
+			retrieval_id: 'uuid-from-jsonl',
+			results: [{ id: 'pJ', content: 'c', confidence: 0.9 }],
+		};
+		const jsonlPath = path.join(tasksDir, 'mcp_trajectory.jsonl');
+		fs.writeFileSync(jsonlPath, JSON.stringify({
+			conversation_id: 'CONV-F080-JSONLRID',
+			tool_name: 'ace_search',
+			tool_input: '{"query":"jsonl-rid"}',
+			result_json: JSON.stringify(inner),
+		}) + '\n');
+		// No sidecar file — hook never ran.
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-F080-JSONLRID', jsonlPath });
+		expect(r.status, `helper exit (stderr: ${r.stderr})`).toBe(0);
+		const trace = JSON.parse(fs.readFileSync(ctx.traceFile, 'utf-8'));
+		// Must surface retrieval_id from JSONL fallback, not silently drop it.
+		expect(trace.retrieval_id).toBe('uuid-from-jsonl');
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+});
+
+describe('u05-retrievalid — helper source-level assertions', () => {
+	it('helper source: unwrapAceSearchResultJson returns retrievalId', () => {
+		const src = getLearnHelperContent();
+		expect(src).toMatch(/retrievalId/);
+		expect(src).toMatch(/retrieval_id/);
+	});
+
+	it('helper source: reads sidecar .retrieval-ctx.json from per-conv dir', () => {
+		const src = getLearnHelperContent();
+		expect(src).toMatch(/retrieval-ctx\.json/);
+		expect(src).toMatch(/readdirSync|readdir/);
+	});
+
+	it('helper source: applied_log_ids built from playbookUsed intersection with log_id_map', () => {
+		const src = getLearnHelperContent();
+		expect(src).toMatch(/log_id_map/);
+		expect(src).toMatch(/applied_log_ids|appliedLogIds/);
+		expect(src).toMatch(/playbookUsed/);
+	});
+
+	it('helper source: null values excluded from applied_log_ids (typeof n === number)', () => {
+		const src = getLearnHelperContent();
+		expect(src).toMatch(/typeof.*number/);
+	});
+
+	it('helper source: retrieval_id and applied_log_ids use conditional spread (presence check)', () => {
+		const src = getLearnHelperContent();
+		expect(src).toMatch(/retrievalId\s*!==\s*undefined/);
+		expect(src).toMatch(/appliedLogIds\s*!==\s*undefined/);
+	});
+});
+
+// ===========================================================================
+// u09-rewardsignal — learn helper writes reward_delta/reward_tier/patterns_rewarded
+//                    to ace-review-result.json; falls back to helpful_pct for
+//                    1.0 servers that do not populate cumulative_v15_reward_delta.
+// ===========================================================================
+
+/**
+ * Variant helper stub that returns reward fields from storeExecutionTrace.
+ * Mirrors writeHelperWithStub but configures the return value.
+ */
+function writeHelperWithRewardStub(opts: {
+	returnReward?: { cumulative_v15_reward_delta: number; reward_tier: string; patterns_rewarded: number };
+	returnLegacy?: boolean; // returns { stored: true } with no reward fields
+	returnNull?: boolean;   // returns { stored: true, cumulative_v15_reward_delta: null } — error-path server
+	returnRewardPartial?: boolean; // numeric reward_delta but null reward_tier/patterns_rewarded — partial 1.5 response
+} = {}): { tmpDir: string; helperPath: string; traceFile: string; debugLogPath: string } {
+	const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-reward-'));
+	const aceDir = path.join(tmpDir, '.cursor', 'ace');
+	fs.mkdirSync(aceDir, { recursive: true });
+
+	const stubDir = path.join(tmpDir, 'node_modules', '@ace-sdk', 'core');
+	fs.mkdirSync(stubDir, { recursive: true });
+	const traceFile = path.join(tmpDir, 'sent-trace.json');
+
+	const returnVal = opts.returnReward
+		? JSON.stringify({ stored: true, cumulative_v15_reward_delta: opts.returnReward.cumulative_v15_reward_delta, reward_tier: opts.returnReward.reward_tier, patterns_rewarded: opts.returnReward.patterns_rewarded })
+		: opts.returnRewardPartial
+			? JSON.stringify({ stored: true, cumulative_v15_reward_delta: 0.5, reward_tier: null, patterns_rewarded: null })
+			: opts.returnNull
+				? JSON.stringify({ stored: true, cumulative_v15_reward_delta: null, reward_tier: 'cold' })
+				: 'JSON.stringify({ stored: true })';
+
+	const stubBody = `
+class AceApiError extends Error { constructor(m, status){ super(m); this.name='AceApiError'; this.status=status; } }
+class TokenExpiredError extends Error { constructor(m){ super(m); this.name='TokenExpiredError'; } }
+function isTokenExpiredError(e){ return e && e.name === 'TokenExpiredError'; }
+async function loadConfig(){
+  return { token:'t', orgId:'o', api_url:'http://x' };
+}
+class AceClient {
+  constructor(c){ this.c = c; }
+  async storeExecutionTrace(trace){
+    require('fs').writeFileSync(${JSON.stringify(traceFile)}, JSON.stringify(trace, null, 2));
+    return ${(opts.returnReward || opts.returnNull || opts.returnRewardPartial) ? returnVal : '{ stored: true }'};
+  }
+}
+module.exports = { loadConfig, AceClient, AceApiError, TokenExpiredError, isTokenExpiredError };
+`;
+	fs.writeFileSync(path.join(stubDir, 'index.js'), stubBody);
+	fs.writeFileSync(
+		path.join(stubDir, 'package.json'),
+		JSON.stringify({ name: '@ace-sdk/core', version: '0.0.0-stub', main: 'index.js' }),
+	);
+
+	const helperPath = path.join(tmpDir, 'helper.js');
+	fs.writeFileSync(helperPath, getLearnHelperContent(), { mode: 0o755 });
+
+	const debugLogPath = path.join(aceDir, 'ace-stop-debug.log');
+	return { tmpDir, helperPath, traceFile, debugLogPath };
+}
+
+function writeSimpleTrajectory(tmpDir: string, convId: string): string {
+	const aceDir = path.join(tmpDir, '.cursor', 'ace');
+	fs.mkdirSync(aceDir, { recursive: true });
+	const jsonl = path.join(aceDir, 'mcp_trajectory.jsonl');
+	fs.writeFileSync(jsonl, JSON.stringify({
+		conversation_id: convId, tool_name: 'Read', tool_input: '{"file":"a.ts"}',
+	}) + '\n');
+	return jsonl;
+}
+
+describe('u09-rewardsignal — learn helper writes reward fields to ace-review-result.json', () => {
+	it('writes reward_delta, reward_tier, patterns_rewarded (not helpful_pct) when server returns reward fields', () => {
+		const ctx = writeHelperWithRewardStub({
+			returnReward: { cumulative_v15_reward_delta: 0.8, reward_tier: 'hot', patterns_rewarded: 2 },
+		});
+		const jsonl = writeSimpleTrajectory(ctx.tmpDir, 'CONV-RW1');
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-RW1', jsonlPath: jsonl });
+		expect(r.status, `helper exit (stderr: ${r.stderr})`).toBe(0);
+
+		const reviewPath = path.join(ctx.tmpDir, '.cursor', 'ace', 'ace-review-result.json');
+		expect(fs.existsSync(reviewPath)).toBe(true);
+		const review = JSON.parse(fs.readFileSync(reviewPath, 'utf-8'));
+
+		expect(review.reward_delta).toBe(0.8);
+		expect(review.reward_tier).toBe('hot');
+		expect(review.patterns_rewarded).toBe(2);
+		// Must NOT contain helpful_pct when reward fields are present
+		expect('helpful_pct' in review).toBe(false);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('OMITS reward_tier/patterns_rewarded when server sends them as null (numeric reward_delta only)', () => {
+		// Partial 1.5 response: a valid numeric reward_delta but null sub-fields
+		// (error-shadow). The omit-on-emit contract forbids writing literal null.
+		const ctx = writeHelperWithRewardStub({ returnRewardPartial: true });
+		const jsonl = writeSimpleTrajectory(ctx.tmpDir, 'CONV-RW-PARTIAL');
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-RW-PARTIAL', jsonlPath: jsonl });
+		expect(r.status, `helper exit (stderr: ${r.stderr})`).toBe(0);
+		const review = JSON.parse(fs.readFileSync(path.join(ctx.tmpDir, '.cursor', 'ace', 'ace-review-result.json'), 'utf-8'));
+		expect(review.reward_delta).toBe(0.5);
+		// Null sub-fields must be OMITTED entirely, never written as null.
+		expect('reward_tier' in review).toBe(false);
+		expect('patterns_rewarded' in review).toBe(false);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('EDGE: reward_delta: 0 (valid 1.5 value) writes reward path, not helpful_pct', () => {
+		const ctx = writeHelperWithRewardStub({
+			returnReward: { cumulative_v15_reward_delta: 0, reward_tier: 'cold', patterns_rewarded: 0 },
+		});
+		const jsonl = writeSimpleTrajectory(ctx.tmpDir, 'CONV-RW-ZERO');
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-RW-ZERO', jsonlPath: jsonl });
+		expect(r.status, `helper exit (stderr: ${r.stderr})`).toBe(0);
+
+		const reviewPath = path.join(ctx.tmpDir, '.cursor', 'ace', 'ace-review-result.json');
+		const review = JSON.parse(fs.readFileSync(reviewPath, 'utf-8'));
+		// 0 !== undefined → reward path
+		expect(review.reward_delta).toBe(0);
+		expect('helpful_pct' in review).toBe(false);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('falls back to helpful_pct when server returns no reward fields (1.0 server / legacy)', () => {
+		// Default stub returns { stored: true } with no reward fields.
+		const ctx = writeHelperWithRewardStub({ returnLegacy: true });
+		const jsonl = writeSimpleTrajectory(ctx.tmpDir, 'CONV-RW-LEG');
+		// Give it a TIME_SAVED so helpful_pct > 0 to verify fallback writes correctly
+		// We write the output into the trajectory so the helper parses it as lastAssistant.
+		// Simpler: just verify helpful_pct is present (even if 0) and reward_delta absent.
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-RW-LEG', jsonlPath: jsonl });
+		expect(r.status, `helper exit (stderr: ${r.stderr})`).toBe(0);
+
+		const reviewPath = path.join(ctx.tmpDir, '.cursor', 'ace', 'ace-review-result.json');
+		expect(fs.existsSync(reviewPath)).toBe(true);
+		const review = JSON.parse(fs.readFileSync(reviewPath, 'utf-8'));
+		// Legacy path: helpful_pct present, reward_delta absent
+		expect('helpful_pct' in review).toBe(true);
+		expect('reward_delta' in review).toBe(false);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('helper source: dead stats.helpful_pct override is removed (field absent from LearningStatistics)', () => {
+		const src = getLearnHelperContent();
+		// The old dead-code override checked `typeof stats.helpful_pct === 'number'`.
+		// This must be gone from the source.
+		expect(src).not.toMatch(/stats\.helpful_pct/);
+	});
+
+	it('helper source: uses typeof === number guard for cumulative_v15_reward_delta (not !== undefined)', () => {
+		const src = getLearnHelperContent();
+		// Must use typeof === 'number' so that null (valid JSON from an error-path server)
+		// is correctly routed to the helpful_pct fallback branch.
+		// null !== undefined is true in JS, so the old !== undefined guard would write
+		// { reward_delta: null } and discard any helpful_pct value — violating the
+		// backward-compat contract ("absent fields OMITTED on emit; null takes fallback path").
+		expect(src).toMatch(/typeof\s+learning\.cumulative_v15_reward_delta\s*===\s*['"]number['"]/);
+	});
+
+	it('helper source: reward-first write includes reward_delta, reward_tier, patterns_rewarded', () => {
+		const src = getLearnHelperContent();
+		expect(src).toMatch(/reward_delta/);
+		expect(src).toMatch(/reward_tier/);
+		expect(src).toMatch(/patterns_rewarded/);
+	});
+
+	it('EDGE: server returns cumulative_v15_reward_delta: null → falls back to helpful_pct (not reward_delta: null)', () => {
+		// A partially-upgraded or error-path server may send { cumulative_v15_reward_delta: null }.
+		// null !== undefined is true in JS, so the old discriminator would write reward_delta: null
+		// and discard any TIME_SAVED-derived helpful_pct — violating the backward-compat contract.
+		// The correct discriminator (typeof === 'number') routes null to the fallback branch.
+		const ctx = writeHelperWithRewardStub({ returnNull: true });
+		const jsonl = writeSimpleTrajectory(ctx.tmpDir, 'CONV-RW-NULL');
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-RW-NULL', jsonlPath: jsonl });
+		expect(r.status, `helper exit (stderr: ${r.stderr})`).toBe(0);
+
+		const reviewPath = path.join(ctx.tmpDir, '.cursor', 'ace', 'ace-review-result.json');
+		expect(fs.existsSync(reviewPath)).toBe(true);
+		const review = JSON.parse(fs.readFileSync(reviewPath, 'utf-8'));
+		// null must route to fallback: helpful_pct present, reward_delta ABSENT (never null)
+		expect('helpful_pct' in review).toBe(true);
+		expect('reward_delta' in review).toBe(false);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+});

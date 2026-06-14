@@ -13,6 +13,20 @@ import type { UsageInfo, UsageMetric } from '@ace-sdk/core';
 import { getLastUsageInfo, getAceClient } from '../ace/client';
 
 /**
+ * Escape special HTML characters to prevent XSS injection in webview HTML.
+ * Applied to any server-supplied string fields (reward_tier, reason, etc.)
+ * before interpolation into HTML templates.
+ */
+export function escapeHtml(str: string): string {
+	return str
+		.replace(/&/g, '&amp;')
+		.replace(/</g, '&lt;')
+		.replace(/>/g, '&gt;')
+		.replace(/"/g, '&quot;')
+		.replace(/'/g, '&#039;');
+}
+
+/**
  * Format a numeric count for display in the status panel.
  *
  * Server-side aggregates (e.g. helpful_total) can arrive as noisy floats like
@@ -23,6 +37,225 @@ export function formatCount(n: number): string {
 	const rounded = Math.round(n * 10) / 10;
 	const s = rounded.toFixed(1);
 	return s.endsWith('.0') ? s.slice(0, -2) : s;
+}
+
+/**
+ * Normalized view of the quality/reward fields returned by /analytics.
+ *
+ * ACE 1.5 servers send `cumulative_reward_total` (and tier counters).
+ * ACE 1.0 servers send only `helpful_total` / `harmful_total`.
+ * Discriminator: presence of `cumulative_reward_total` (not truthiness —
+ * 0 is a valid 1.5 value and MUST take the 1.5 path).
+ */
+export interface NormalizedStats {
+	/** True when the payload carries ANY ACE 1.5 signal (numeric reward OR tier
+	 * counters). Drives 1.5-vs-1.0 card selection independently of rewardTotal,
+	 * so a null reward with present tiers still renders 1.5 tier cards. */
+	is15: boolean;
+	/** A number (incl. 0) when the 1.5 reward total is present; undefined when it
+	 * is absent OR null (server cold-shadow/error path) — render as "n/a". */
+	rewardTotal: number | undefined;
+	hotTotal: number;
+	warmTotal: number;
+	coldTotal: number;
+	atRiskCount: number;
+	/** ACE 1.0 legacy fields */
+	helpfulTotal: number;
+	harmfulTotal: number;
+	legacyTrustScore: number;
+}
+
+/**
+ * Pure adapter — extract reward/legacy fields from a raw analytics payload.
+ * Safe to call with any shape; missing fields default to 0.
+ */
+export function normalizeStats(stats: Record<string, any>): NormalizedStats {
+	// typeof-number check: 0 is a valid 1.5 value (kept), but a server `null`
+	// (cold-shadow row / error path) must route to the 1.0 fallback — `null !==
+	// undefined` is true, so a bare presence check would later throw on .toFixed().
+	const rewardTotal: number | undefined =
+		typeof stats.cumulative_reward_total === 'number' ? stats.cumulative_reward_total : undefined;
+	const hotTotal = stats.hot_total ?? 0;
+	const warmTotal = stats.warm_total ?? 0;
+	const coldTotal = stats.cold_total ?? 0;
+	const atRiskCount = stats.at_risk_count ?? 0;
+	// 1.5 detection is broader than rewardTotal: a 1.5 server may send tier
+	// counters with a null/absent reward total (cold-shadow / pre-aggregation).
+	// Treat ANY 1.5 signal as 1.5 so we keep the real tier cards instead of
+	// degrading to legacy 1.0 cards (which 1.5 servers don't populate).
+	const is15 =
+		typeof stats.cumulative_reward_total === 'number' ||
+		stats.hot_total !== undefined || stats.warm_total !== undefined ||
+		stats.cold_total !== undefined || stats.at_risk_count !== undefined;
+	// Legacy 1.0 fallback fields
+	const helpfulTotal = stats.helpful_total ?? 0;
+	const harmfulTotal = stats.harmful_total ?? 0;
+	const legacyTrustScore =
+		helpfulTotal + harmfulTotal > 0
+			? Math.round((helpfulTotal / (helpfulTotal + harmfulTotal)) * 100)
+			: 100;
+	return { is15, rewardTotal, hotTotal, warmTotal, coldTotal, atRiskCount, helpfulTotal, harmfulTotal, legacyTrustScore };
+}
+
+/**
+ * Pure renderer — produce the three quality-metric card HTML fragments.
+ *
+ * 1.5 path (ns.is15): cumulative reward + tier counters + at-risk. The reward
+ * value shows "n/a" when the total is null/absent but tier counters exist — we
+ * keep the real 1.5 tier cards rather than degrading to legacy 1.0 cards.
+ * 1.0 fallback (!ns.is15): legacy helpful / harmful / trust-score.
+ *
+ * rewardTotal is rendered with .toFixed(1) (NOT formatCount) because it is a
+ * raw float aggregate, not a rounded integer count.
+ */
+export function renderQualityCards(ns: NormalizedStats): string {
+	if (ns.is15) {
+		const rewardLabel = ns.rewardTotal !== undefined ? ns.rewardTotal.toFixed(1) : 'n/a';
+		return `<div class="quality-item">
+    <div class="quality-value">${rewardLabel}</div>
+    <div class="quality-label">Cumulative Reward</div>
+</div>
+<div class="quality-item">
+    <div class="quality-value">${ns.hotTotal} / ${ns.warmTotal} / ${ns.coldTotal}</div>
+    <div class="quality-label">Hot / Warm / Cold</div>
+</div>
+<div class="quality-item">
+    <div class="quality-value">${ns.atRiskCount}</div>
+    <div class="quality-label">At-Risk Patterns</div>
+</div>`;
+	}
+	// 1.0 server fallback — legacy cards unchanged
+	return `<div class="quality-item">
+    <div class="quality-value positive">${formatCount(ns.helpfulTotal)}</div>
+    <div class="quality-label">👍 Helpful</div>
+</div>
+<div class="quality-item">
+    <div class="quality-value negative">${formatCount(ns.harmfulTotal)}</div>
+    <div class="quality-label">👎 Harmful</div>
+</div>
+<div class="quality-item">
+    <div class="quality-value neutral">${ns.legacyTrustScore}%</div>
+    <div class="quality-label">🎯 Trust Score</div>
+</div>`;
+}
+
+// ---------------------------------------------------------------------------
+// ACE 1.5 — top-patterns vocab helpers (u07-toppatterns)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the URL for fetching top patterns from the ACE server.
+ *
+ * ACE 1.5 change: drop the legacy `min_helpful=1` filter (it excludes cold-tier
+ * 1.5 patterns) and fetch more items so client-side reward-sort can pick the
+ * best. The server `/top` path is unchanged (not /patterns/top — see issue #11).
+ * NOTE: `min_reward` is a CLI UX alias only; the server does NOT accept it.
+ */
+export function buildTopPatternsUrl(serverUrl: string, limit: number): string {
+	return `${serverUrl}/top?limit=${limit}`;
+}
+
+/**
+ * Sort an array of patterns by reward descending.
+ *
+ * 1.5 patterns carry `cumulative_v15_reward`; 1.0 patterns do not.
+ * Discriminator: `typeof === 'number'` — 0 is a valid 1.5 value, but a server
+ * `null` must fall back to `helpful` (a bare presence check would sort null as 0).
+ * Sort key: `cumulative_v15_reward ?? helpful ?? 0`.
+ * Returns a new array (does not mutate the input).
+ */
+export function sortTopPatternsByReward(patterns: Record<string, any>[]): Record<string, any>[] {
+	return [...patterns].sort((a, b) => {
+		const ra = typeof a.cumulative_v15_reward === 'number' ? a.cumulative_v15_reward : (a.helpful ?? 0);
+		const rb = typeof b.cumulative_v15_reward === 'number' ? b.cumulative_v15_reward : (b.helpful ?? 0);
+		return rb - ra;
+	});
+}
+
+/**
+ * Render the per-pattern reward/helpful badge.
+ *
+ * 1.5 reward present (number):       "Reward: 4.20"  (0 is valid)
+ * 1.5 pattern, reward null/pending:  "Reward: —"     (key present but not a number)
+ * 1.0 pattern (key absent):          "Helpful: N"
+ * Using typeof avoids `(null).toFixed(2)` (which throws); the `in` check keeps a
+ * null-reward 1.5 pattern from being mislabeled as a legacy "Helpful: 0".
+ */
+export function renderPatternRewardBadge(p: Record<string, any>): string {
+	if (typeof p.cumulative_v15_reward === 'number') {
+		return `<span>Reward: ${p.cumulative_v15_reward.toFixed(2)}</span>`;
+	}
+	if ('cumulative_v15_reward' in p) {
+		return `<span>Reward: —</span>`;
+	}
+	return `<span>Helpful: ${formatCount(p.helpful || 0)}</span>`;
+}
+
+/**
+ * Render the task-summary reward/helpful metric tile from an ace-review-result.json object.
+ *
+ * ACE 1.5: server populates `reward_delta` + `reward_tier` → renders "0.50 reward (warm)".
+ * ACE 1.0 / unpatched: only `helpful_pct` present → renders "30% helpful" (legacy fallback).
+ * Discriminator: presence of `reward_delta` (not truthiness — 0 is valid).
+ *
+ * Returns an empty string when there is no data to show.
+ */
+export function renderTaskSummaryReward(review: Record<string, any>): string {
+	// 1.5 path: reward_delta present and is a number (including 0 — valid reward value).
+	// Explicitly exclude null: JSON.parse of a server response can produce null for numeric
+	// fields, and null !== undefined evaluates true in JS, so without this guard
+	// (null).toFixed(2) would throw a TypeError at runtime.
+	if (typeof review.reward_delta === 'number') {
+		const delta = (review.reward_delta as number).toFixed(2);
+		// Escape tier: reward_tier is a free-form string from the server — no enum
+		// constraint in the ACE SDK. Escaping prevents tag/attribute injection in
+		// the webview (e.g. `<img src=x onerror=...>` → `&lt;img src=x onerror=...&gt;`).
+		const tier = escapeHtml(String(review.reward_tier || 'n/a'));
+		return `
+				<div class="task-metric">
+					<div class="task-metric-value">${delta}</div>
+					<div class="task-metric-label">reward (${tier})</div>
+				</div>`;
+	}
+	// 1.0 legacy fallback: helpful_pct > 0
+	const helpfulPct = review.helpful_pct || 0;
+	if (helpfulPct > 0) {
+		return `
+				<div class="task-metric">
+					<div class="task-metric-value">${helpfulPct}%</div>
+					<div class="task-metric-label">helpful</div>
+				</div>`;
+	}
+	return '';
+}
+
+/**
+ * Renders an org/project meta value: "Name (id)" when a display name exists,
+ * else the bare id, else "n/a". `name` and `id` are server-supplied strings
+ * and are HTML-escaped to prevent injection into the webview.
+ */
+export function renderMetaValue(name: any, id: any): string {
+	if (name) {
+		return `${escapeHtml(String(name))} <span class="meta-id">(${escapeHtml(String(id ?? ''))})</span>`;
+	}
+	return id ? escapeHtml(String(id)) : 'n/a';
+}
+
+/**
+ * Truncates a server-supplied pattern content string to `max` chars and
+ * HTML-escapes it for safe webview interpolation.
+ */
+export function formatPatternContent(content: any, max = 200): string {
+	const s = String(content ?? '');
+	return escapeHtml(s.substring(0, max)) + (s.length > max ? '...' : '');
+}
+
+/**
+ * Formats a server-supplied domain key for display ("foo-bar" -> "foo bar"),
+ * HTML-escaped.
+ */
+export function formatDomainName(domain: any): string {
+	return escapeHtml(String(domain ?? '').replace(/-/g, ' '));
 }
 
 export class StatusPanel {
@@ -169,7 +402,8 @@ export class StatusPanel {
 				headers: {
 					'Authorization': `Bearer ${token}`,
 					'Content-Type': 'application/json',
-					'X-ACE-Org': orgId
+					'X-ACE-Org': orgId,
+					'X-ACE-Project': ctx.projectId
 				}
 			});
 			if (verifyResponse.ok) {
@@ -187,9 +421,10 @@ export class StatusPanel {
 		}
 
 		// Fetch top patterns for display
+		// ACE 1.5: drop min_helpful filter; fetch more and sort client-side by reward
 		let topPatterns: any[] = [];
 		try {
-			const topUrl = `${config.serverUrl}/top?limit=5&min_helpful=1`;
+			const topUrl = buildTopPatternsUrl(config.serverUrl, 10);
 			const topResponse = await fetch(topUrl, {
 				headers: {
 					'Authorization': `Bearer ${token}`,
@@ -200,7 +435,8 @@ export class StatusPanel {
 			});
 			if (topResponse.ok) {
 				const topData = await topResponse.json() as Record<string, any>;
-				topPatterns = topData.bullets || topData.patterns || [];
+				const raw: any[] = topData.bullets || topData.patterns || [];
+				topPatterns = sortTopPatternsByReward(raw).slice(0, 5);
 			}
 		} catch {
 			// Ignore top patterns errors - optional display
@@ -361,15 +597,15 @@ export class StatusPanel {
 
 		const featuresHtml = featuresList.length > 0 ? `
 			<div class="usage-features">
-				${featuresList.map(f => `<span class="usage-feature-badge">${f}</span>`).join('')}
+				${featuresList.map(f => `<span class="usage-feature-badge">${escapeHtml(String(f))}</span>`).join('')}
 			</div>` : '';
 
 		return `
 		<div class="usage-section">
 			<h2>Organization Usage</h2>
 			<div class="usage-plan-row">
-				<span class="usage-plan-badge ${usage.planTier}">${planLabel}</span>
-				<span class="usage-status" style="color: ${statusColor}">${usage.status}</span>
+				<span class="usage-plan-badge ${escapeHtml(String(usage.planTier))}">${escapeHtml(String(planLabel))}</span>
+				<span class="usage-status" style="color: ${statusColor}">${escapeHtml(String(usage.status))}</span>
 			</div>
 			<div class="usage-bars">
 				${bars}
@@ -419,22 +655,24 @@ export class StatusPanel {
 		}
 
 		// Parse ace-review-result.json for self-eval
-		let helpfulPct = 0;
+		let reviewData: Record<string, any> = {};
 		let timeSaved = '';
 		let reason = '';
 		if (fs.existsSync(reviewFile)) {
 			try {
-				const review = JSON.parse(fs.readFileSync(reviewFile, 'utf8'));
-				helpfulPct = review.helpful_pct || 0;
-				timeSaved = review.time_saved || '';
-				reason = review.reason || '';
+				reviewData = JSON.parse(fs.readFileSync(reviewFile, 'utf8'));
+				timeSaved = reviewData.time_saved || '';
+				reason = reviewData.reason || '';
 			} catch {
 				// Ignore parse errors
 			}
 		}
 
+		const rewardMetricHtml = renderTaskSummaryReward(reviewData);
+		const hasRewardData = rewardMetricHtml.length > 0;
+
 		// Only show if there's data
-		if (patternsInjected === 0 && helpfulPct === 0) {
+		if (patternsInjected === 0 && !hasRewardData) {
 			return '';
 		}
 
@@ -442,12 +680,8 @@ export class StatusPanel {
 			avgRelevance >= 40 ? 'var(--vscode-inputValidation-warningBorder)' :
 			'var(--vscode-testing-iconFailed)';
 
-		const helpColor = helpfulPct >= 70 ? 'var(--vscode-testing-iconPassed)' :
-			helpfulPct >= 40 ? 'var(--vscode-inputValidation-warningBorder)' :
-			helpfulPct > 0 ? 'var(--vscode-testing-iconFailed)' : 'var(--vscode-descriptionForeground)';
-
-		const timeSavedHtml = timeSaved ? `<span class="task-time-saved">~${timeSaved} saved</span>` : '';
-		const reasonHtml = reason ? `<div class="task-reason">"${reason}"</div>` : '';
+		const timeSavedHtml = timeSaved ? `<span class="task-time-saved">~${escapeHtml(String(timeSaved))} saved</span>` : '';
+		const reasonHtml = reason ? `<div class="task-reason">"${escapeHtml(String(reason))}"</div>` : '';
 
 		return `
 		<div class="task-summary">
@@ -465,11 +699,7 @@ export class StatusPanel {
 					<div class="task-metric-value" style="color: ${relColor}">${avgRelevance}%</div>
 					<div class="task-metric-label">relevance</div>
 				</div>
-				${helpfulPct > 0 ? `
-				<div class="task-metric">
-					<div class="task-metric-value" style="color: ${helpColor}">${helpfulPct}%</div>
-					<div class="task-metric-label">helpful</div>
-				</div>` : ''}
+				${rewardMetricHtml}
 			</div>
 			${timeSaved || reason ? `
 			<div class="task-eval">
@@ -488,12 +718,8 @@ export class StatusPanel {
 
 		// Enhanced metrics
 		const topPatterns = stats.top_patterns || [];
-		const helpfulTotal = stats.helpful_total || 0;
-		const harmfulTotal = stats.harmful_total || 0;
 		const byDomain = stats.by_domain || {};
-		const trustScore = helpfulTotal + harmfulTotal > 0 
-			? Math.round((helpfulTotal / (helpfulTotal + harmfulTotal)) * 100) 
-			: 100;
+		const ns = normalizeStats(stats);
 
 		// Get hard cap info for session expiration display
 		const hardCap = getHardCapInfo();
@@ -1002,11 +1228,11 @@ export class StatusPanel {
 		<div class="meta">
 			<div class="meta-item">
 				<span class="meta-label">Organization:</span>
-				<span class="meta-value">${stats.org_name ? `${stats.org_name} <span class="meta-id">(${stats.org_id})</span>` : (stats.org_id || 'n/a')}</span>
+				<span class="meta-value">${renderMetaValue(stats.org_name, stats.org_id)}</span>
 			</div>
 			<div class="meta-item">
 				<span class="meta-label">Project:</span>
-				<span class="meta-value">${stats.project_name ? `${stats.project_name} <span class="meta-id">(${stats.project_id})</span>` : (stats.project_id || 'n/a')}</span>
+				<span class="meta-value">${renderMetaValue(stats.project_name, stats.project_id)}</span>
 			</div>
 		</div>
 	</div>
@@ -1053,18 +1279,7 @@ export class StatusPanel {
 
 	<!-- Quality Metrics -->
 	<div class="quality-metrics">
-		<div class="quality-item">
-			<div class="quality-value positive">${formatCount(helpfulTotal)}</div>
-			<div class="quality-label">👍 Helpful</div>
-		</div>
-		<div class="quality-item">
-			<div class="quality-value negative">${formatCount(harmfulTotal)}</div>
-			<div class="quality-label">👎 Harmful</div>
-		</div>
-		<div class="quality-item">
-			<div class="quality-value neutral">${trustScore}%</div>
-			<div class="quality-label">🎯 Trust Score</div>
-		</div>
+		${renderQualityCards(ns)}
 	</div>
 
 	<!-- Top Patterns -->
@@ -1073,12 +1288,12 @@ export class StatusPanel {
 		<h2>🏆 Top Performing Patterns</h2>
 		${topPatterns.slice(0, 5).map((p: any) => `
 			<div class="pattern-item">
-				${p.content?.substring(0, 200)}${p.content?.length > 200 ? '...' : ''}
+				${formatPatternContent(p.content)}
 				<div class="pattern-meta">
-					<span class="pattern-badge">${p.section?.replace(/_/g, ' ') || 'general'}</span>
-					<span>👍 ${formatCount(p.helpful || 0)}</span>
+					<span class="pattern-badge">${escapeHtml(p.section ? String(p.section).replace(/_/g, ' ') : 'general')}</span>
+					${renderPatternRewardBadge(p)}
 					<span>📊 ${Math.round((p.confidence || 0) * 100)}% confidence</span>
-					${p.domain ? `<span>🏷️ ${p.domain}</span>` : ''}
+					${p.domain ? `<span>🏷️ ${escapeHtml(String(p.domain))}</span>` : ''}
 				</div>
 			</div>
 		`).join('')}
@@ -1097,8 +1312,8 @@ export class StatusPanel {
 				.sort((a: [string, any], b: [string, any]) => (b[1] as number) - (a[1] as number))
 				.map(([domain, count]: [string, any]) => `
 				<div class="domain-item">
-					<div class="domain-name">${domain.replace(/-/g, ' ')}</div>
-					<div class="domain-count">${count}</div>
+					<div class="domain-name">${formatDomainName(domain)}</div>
+					<div class="domain-count">${Number.isFinite(Number(count)) ? Number(count) : 0}</div>
 				</div>
 			`).join('')}
 		</div>

@@ -421,24 +421,71 @@ fi
 helper="$ace_dir/../scripts/ace_search_helper.js"
 [ ! -f "$helper" ] && echo '{"permission":"allow"}' && exit 0
 
+# Heuristic: derive task_intent bucket from user prompt.
+task_intent=""
+lc_prompt=$(echo "$prompt" | tr '[:upper:]' '[:lower:]')
+if echo "$lc_prompt" | grep -qE '(refactor|rename|extract|restructure|move|reorganize)'; then
+  task_intent="refactor"
+elif echo "$lc_prompt" | grep -qE '(test|spec|coverage|assert|verify)'; then
+  task_intent="spec_strict"
+elif echo "$lc_prompt" | grep -qE '(explore|understand|explain|what does|how does|summarize)'; then
+  task_intent="explore"
+fi
+# routine is the catch-all; omit rather than guess — preserves server default.
+
 # Run helper, capture FULL SearchResponse JSON (not just patterns array).
+# Pass intent as second arg when non-empty.
 patterns=""
 if command -v node >/dev/null 2>&1; then
-  if command -v gtimeout >/dev/null 2>&1; then
-    patterns=$(gtimeout 8 node "$helper" "$prompt" 2>/dev/null)
-  elif command -v timeout >/dev/null 2>&1; then
-    patterns=$(timeout 8 node "$helper" "$prompt" 2>/dev/null)
+  if [ -n "$task_intent" ]; then
+    if command -v gtimeout >/dev/null 2>&1; then
+      patterns=$(gtimeout 8 node "$helper" "$prompt" "$task_intent" 2>/dev/null)
+    elif command -v timeout >/dev/null 2>&1; then
+      patterns=$(timeout 8 node "$helper" "$prompt" "$task_intent" 2>/dev/null)
+    else
+      patterns=$(perl -e 'alarm 8; exec @ARGV' -- node "$helper" "$prompt" "$task_intent" 2>/dev/null)
+    fi
   else
-    patterns=$(perl -e 'alarm 8; exec @ARGV' -- node "$helper" "$prompt" 2>/dev/null)
+    if command -v gtimeout >/dev/null 2>&1; then
+      patterns=$(gtimeout 8 node "$helper" "$prompt" 2>/dev/null)
+    elif command -v timeout >/dev/null 2>&1; then
+      patterns=$(timeout 8 node "$helper" "$prompt" 2>/dev/null)
+    else
+      patterns=$(perl -e 'alarm 8; exec @ARGV' -- node "$helper" "$prompt" 2>/dev/null)
+    fi
   fi
 fi
 
-# Empty/null/no-results → fail-open
+# Empty/null response → fail-open. No parseable search result means no
+# retrieval_id to anchor — correct to abstain (no server row was stamped that we
+# can see, or the helper errored).
 if [ -z "$patterns" ] || [ "$patterns" = "{}" ] || [ "$patterns" = "null" ]; then
   echo '{"permission":"allow"}'; exit 0
 fi
 
-# Sanity check: must have at least 1 similar_pattern.
+# F-080 — persist retrieval context BEFORE any pattern-count branching (invariant:
+# a search the server processed is stamped with a retrieval_id even when it
+# returns 0 patterns; the learn trace must still anchor to it, or the successful
+# retrieval is lost). Seed the sidecar UNCONDITIONALLY here, ahead of the
+# 0-pattern early-exit below.
+# Shape: { retrieval_id: string|null, log_id_map: { <patternId>: <retrieval_log_id> } }
+# Accepts both .similar_patterns (ACE 1.5 pre-tool-use path) and .results (MCP path).
+# Cold/shadow LinUCB rows (retrieval_log_id: null) are excluded from log_id_map.
+# Best-effort: || true prevents sidecar failure from blocking the hook.
+retrieval_file="$ace_dir/tasks/$conv_id/$gen_id.retrieval-ctx.json"
+mkdir -p "$ace_dir/tasks/$conv_id" 2>/dev/null || true
+echo "$patterns" | jq '{
+  retrieval_id: (.retrieval_id // null),
+  log_id_map: (
+    ((.similar_patterns // .results // [])
+    | map(select(.id != null and .match_factors.retrieval_log_id != null))
+    | map({ (.id): (.match_factors.retrieval_log_id) })
+    | add) // {}
+  )
+}' > "$retrieval_file" 2>/dev/null || true
+
+# Sanity check: must have at least 1 similar_pattern to INJECT (gate decision
+# only — the sidecar above is already persisted regardless of pattern count).
 n=$(echo "$patterns" | jq -r '(.similar_patterns // []) | length' 2>/dev/null || echo "0")
 if [ "$n" = "0" ] || [ -z "$n" ]; then
   echo '{"permission":"allow"}'; exit 0
@@ -530,6 +577,9 @@ export function getSearchHelperContent(): string {
   try {
     const query = String(process.argv[2] || '').slice(0, 500);
     if (!query) { process.stdout.write('{}'); process.exit(0); }
+    const rawIntent = String(process.argv[3] || '');
+    const VALID_INTENTS = ['refactor', 'routine', 'explore', 'spec_strict'];
+    const taskIntent = VALID_INTENTS.includes(rawIntent) ? rawIntent : undefined;
 
     const sdk = require('@ace-sdk/core');
     const { loadConfig, AceClient, isTokenExpiredError, AceApiError } = sdk;
@@ -559,6 +609,7 @@ export function getSearchHelperContent(): string {
       top_k,
       include_metadata: false,
       agent_type: 'cursor',
+      ...(taskIntent !== undefined ? { task_intent: taskIntent } : {}),
     });
 
     process.stdout.write(JSON.stringify(result || {}));

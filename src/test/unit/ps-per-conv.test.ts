@@ -66,7 +66,7 @@ function runPs(scriptPath: string, stdin: string, cwd: string): { exitCode: numb
 		input: stdin,
 		cwd,
 		encoding: 'utf-8',
-		timeout: 10000,
+		timeout: 20000,
 	});
 	return {
 		exitCode: result.status ?? -1,

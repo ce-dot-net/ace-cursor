@@ -94,8 +94,17 @@ export function packPatternsUntilSize<T>(patterns: T[], maxChars: number): T[] {
  * Forbidden tool names (ace_get_playbook, ace_learn) are NOT mentioned —
  * mentioning them by name causes the AI to explore filesystem instead of
  * calling tools. ace_search is the only tool the AI should call manually.
+ *
+ * ACE 1.5 additions (issue #14):
+ *  - session_id capture: ace_search returns a session_id; the AI must save it
+ *    and pass it to the feedback tool after the task completes (F-080 loop).
+ *  - task_intent: new optional param for server-side bandit routing.
+ *  - Reward vocabulary: prefer highly_reliable / high cumulative_v15_reward patterns.
+ * NOTE: ace_learn / ace_get_playbook are intentionally NOT named here — Cursor 3.7
+ * tool-reliability workaround (June 2026 web research); naming them in instructions
+ * triggers filesystem exploration instead of tool calls.
  */
-export const MCP_SERVER_INSTRUCTIONS = `Before responding to ANY user prompt — including questions, debugging, or implementation — call the ace_search tool with the user's prompt verbatim as the query parameter.
+export const MCP_SERVER_INSTRUCTIONS = `Before responding to ANY user prompt — including questions, debugging, or implementation — call the ace_search tool with the user's prompt verbatim as the query parameter. Save the returned session_id.
 
 This is a hard requirement. Retrieved patterns will guide your implementation. Skipping this step is an incomplete task.
 
@@ -103,8 +112,12 @@ Do NOT read AGENTS.md, INSTRUCTIONS.md, RULE files, or any project rule document
 
 Workflow:
 1. User prompt arrives → call ace_search(query="<user's prompt>")
+   - Optionally set task_intent: refactor | routine | explore | spec_strict
+   - Save the session_id from the response
 2. Apply returned patterns to your work
-3. Proceed with normal tools (Shell, ApplyPatch, ReadFile, etc.)`;
+   - Prefer patterns marked effectiveness="highly_reliable" or with high cumulative_v15_reward
+3. Proceed with normal tools (Shell, ApplyPatch, ReadFile, etc.)
+4. After completing the task → close the ACE feedback reward loop by calling the session feedback tool with session_id=<from step 1>`;
 
 /**
  * Returns the Node script that proxies the @ace-sdk/mcp server. Filters
@@ -166,7 +179,7 @@ function packPatternsUntilSize(patterns, maxChars) {
 const MCP_INSTRUCTIONS = ${instructions};
 
 // Spawn the real MCP server. ACE_* env vars come from Cursor MCP registration.
-const child = childProc.spawn('npx', ['-y', '@ace-sdk/mcp'], {
+const child = childProc.spawn('npx', ['-y', '@ace-sdk/mcp@^3.1.1'], {
   stdio: ['pipe', 'pipe', 'pipe'],
   env: process.env,
 });
@@ -301,39 +314,99 @@ function filterLine(line) {
       if (inner && typeof inner === 'object'
           && Array.isArray(inner.results)
           && typeof inner.query === 'string') {
-        const originalCount = (typeof inner.count === 'number') ? inner.count : inner.results.length;
-        // Smart-pack patterns to fit under the byte budget.
-        const packed = packPatternsUntilSize(inner.results, MAX_INLINE_PATTERN_BYTES);
-        if (packed.length >= inner.results.length) {
-          // Already small enough — nothing to do.
+        const originalResults = inner.results;
+        const originalCount = (typeof inner.count === 'number') ? inner.count : originalResults.length;
+        // Real constraint: the WHOLE JSON-RPC line (pretty-printed inner + envelope
+        // + expanded[] + notes) must stay under Cursor's ~8 KB macOS pipe limit.
+        // Budgeting only inner.results is insufficient (issue #13).
+        const WIRE_LIMIT = 7500; // BYTES — Cursor's macOS pipe limit is ~8 KB on the wire.
+        const byteLen = (s) => Buffer.byteLength(s, 'utf8');
+        // Coarse first cut on the results array. Issue #13: match_factors are kept
+        // inline, so the FULL patterns are counted here.
+        const packed = packPatternsUntilSize(originalResults, MAX_INLINE_PATTERN_BYTES);
+        // Feature-detect expanded[] neighbors: 1.0 (key absent) and 1.5-empty both
+        // produce nothing.
+        const expandedNote = (Array.isArray(inner.expanded) && inner.expanded.length > 0)
+          ? inner.expanded.length + ' 2-hop neighbor pattern(s) from local graph cache are in expanded[].' +
+            ' Cached stubs (cached:true) are already in ~/.ace-cache — call ace_batch_get([...pattern_ids]) to fetch their content.'
+          : undefined;
+        // Fast path: all results fit, no neighbors to annotate, and the incoming
+        // line is already wire-safe → pass through untouched (1.0 / small responses
+        // stay byte-identical).
+        if (packed.length >= originalResults.length && expandedNote === undefined && byteLen(line) <= WIRE_LIMIT) {
           return line;
         }
-        // Persist the FULL inner JSON to disk so the AI can Read all patterns
-        // when inline truncation drops something relevant. Failure is
-        // non-fatal — we still emit the truncated inline response.
+        // Build the inline view and enforce the wire limit by trimming whole
+        // patterns until the FULLY-annotated line fits.
+        inner.results = originalResults.slice(0, packed.length);
+        if (expandedNote !== undefined) inner.expanded_note = expandedNote;
         const sid = (typeof inner.session_id === 'string' && inner.session_id) ? inner.session_id : ('search-' + Date.now());
         const safeSid = String(sid).replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 200);
         const fullPath = path.join('.cursor', 'ace', 'searches', safeSid + '.json');
         let writtenPath = '';
-        try {
-          fs.mkdirSync(path.dirname(fullPath), { recursive: true });
-          fs.writeFileSync(fullPath, JSON.stringify(inner, null, 2));
-          writtenPath = fullPath;
-        } catch (writeErr) {
-          // Defensive: read-only fs / permission issues — passthrough with
-          // truncation but no full_results_path. AI still gets inline patterns.
-          process.stderr.write('[ace-mcp-proxy] full-results write failed: ' + (writeErr && writeErr.message || writeErr) + '\\n');
+        // Persist the COMPLETE record to disk once (idempotent) and point the inline
+        // view at it. Called before ANY data is dropped (results, expanded, or query)
+        // so nothing is ever lost.
+        const persist = () => {
+          if (!writtenPath) {
+            try {
+              fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+              fs.writeFileSync(fullPath, JSON.stringify(JSON.parse(innerText), null, 2));
+              writtenPath = fullPath;
+            } catch (writeErr) {
+              process.stderr.write('[ace-mcp-proxy] full-results write failed: ' + (writeErr && writeErr.message || writeErr) + '\\n');
+            }
+          }
+          if (writtenPath && inner.full_results_path === undefined) {
+            inner.full_results_path = writtenPath;
+            inner.full_results_note = 'FULL RESULTS: the complete record — full query, all ' + originalCount +
+              ' results, and expanded[] neighbors — is at ' + writtenPath +
+              '. The inline view is trimmed to fit Cursor\\'s ~8 KB wire limit; Read the file if the inline subset is insufficient.';
+          }
+        };
+        const rebuild = () => {
+          if (inner.results.length < originalResults.length) {
+            persist();
+            inner.original_count = originalCount;
+            inner.truncated_to = inner.results.length;
+          }
+          msg.result.content[0].text = JSON.stringify(inner, null, 2);
+          return JSON.stringify(msg);
+        };
+        let out = rebuild();
+        // 1. If a large expanded[] inflates the line, persist and drop the raw
+        //    stubs inline first — they're the least valuable inline (summary note +
+        //    disk copy keep them reachable), so we shed them before real patterns.
+        if (byteLen(out) > WIRE_LIMIT && inner.expanded !== undefined) {
+          persist();
+          delete inner.expanded;
+          out = rebuild();
         }
-        inner.original_count = originalCount;
-        inner.truncated_to = packed.length;
-        inner.results = packed;
-        if (writtenPath) {
-          inner.full_results_path = writtenPath;
-          inner.full_results_note = 'FULL RESULTS: Showing top ' + packed.length + ' of ' + originalCount + ' patterns inline. The complete result set is at ' + writtenPath + '. If patterns inline don\\'t fully address the task, Read the full file for the complete pattern library.';
+        // 2. Drop whole patterns until the line fits — down to zero (all on disk).
+        while (byteLen(out) > WIRE_LIMIT && inner.results.length > 0) {
+          inner.results = originalResults.slice(0, inner.results.length - 1);
+          out = rebuild();
         }
-        // Preserve inner.count as-is — AI knows there were more.
-        msg.result.content[0].text = JSON.stringify(inner, null, 2);
-        return JSON.stringify(msg);
+        // 3. Last resort → persist and truncate the echoed query inline (the full
+        //    query is on disk) so the frame is always wire-safe.
+        if (byteLen(out) > WIRE_LIMIT && typeof inner.query === 'string' && inner.query.length > 64) {
+          persist();
+          inner.query = inner.query.slice(0, 64) + '…';
+          out = rebuild();
+        }
+        // 4. The only remaining unbounded value is a server-assigned session_id
+        //    (normally a 36-char UUID). A pathologically long one cannot be echoed
+        //    inline AND stay under the wire limit, so we clamp it (the full value is
+        //    preserved on disk via persist()). This degrades the LEGACY inline
+        //    session_id attribution for that one response, but F-080 attribution
+        //    uses the separate retrieval_id sidecar and is unaffected. Real UUIDs
+        //    never reach this branch.
+        if (byteLen(out) > WIRE_LIMIT && typeof inner.session_id === 'string' && inner.session_id.length > 64) {
+          persist();
+          inner.session_id = inner.session_id.slice(0, 64) + '…';
+          out = rebuild();
+        }
+        return out;
       }
     }
   } catch (_) { /* fall through to passthrough */ }

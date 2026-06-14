@@ -81,31 +81,79 @@ function makeFilterLine(opts: { writeDir?: string; throwOnWrite?: boolean } = {}
 				if (inner && typeof inner === 'object'
 					&& Array.isArray(inner.results)
 					&& typeof inner.query === 'string') {
-					const originalCount = (typeof inner.count === 'number') ? inner.count : inner.results.length;
-					const packed = packPatternsUntilSize(inner.results, MAX_INLINE_PATTERN_BYTES);
-					if (packed.length >= inner.results.length) {
-						return line; // Nothing to truncate.
+					const originalResults = inner.results;
+					const originalCount = (typeof inner.count === 'number') ? inner.count : originalResults.length;
+					// Real constraint: the WHOLE JSON-RPC line (pretty inner + envelope +
+					// expanded[] + notes) must stay under Cursor's ~8 KB pipe limit, not
+					// just inner.results (issue #13).
+					const WIRE_LIMIT = 7500; // bytes
+					const byteLen = (s: string) => Buffer.byteLength(s, 'utf8');
+					const packed = packPatternsUntilSize(originalResults, MAX_INLINE_PATTERN_BYTES);
+					const expandedNoteValue = (Array.isArray(inner.expanded) && inner.expanded.length > 0)
+						? inner.expanded.length + ' 2-hop neighbor pattern(s) from local graph cache are in expanded[].' +
+							' Cached stubs (cached:true) are already in ~/.ace-cache — call ace_batch_get([...pattern_ids]) to fetch their content.'
+						: undefined;
+					// Fast path: all fit, no neighbors, already wire-safe → passthrough.
+					if (packed.length >= originalResults.length && expandedNoteValue === undefined && byteLen(line) <= WIRE_LIMIT) {
+						return line;
 					}
+					inner.results = originalResults.slice(0, packed.length);
+					if (expandedNoteValue !== undefined) inner.expanded_note = expandedNoteValue;
 					const sid = (typeof inner.session_id === 'string' && inner.session_id) ? inner.session_id : ('search-' + Date.now());
 					const safeSid = String(sid).replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 200);
 					const baseDir = opts.writeDir || process.cwd();
 					const fullPath = pathMod.join(baseDir, '.cursor', 'ace', 'searches', safeSid + '.json');
 					let writtenPath = '';
-					try {
-						if (opts.throwOnWrite) throw new Error('synthetic write failure');
-						fsMod.mkdirSync(pathMod.dirname(fullPath), { recursive: true });
-						fsMod.writeFileSync(fullPath, JSON.stringify(inner, null, 2));
-						writtenPath = fullPath;
-					} catch (_) { /* defensive — passthrough without full path */ }
-					inner.original_count = originalCount;
-					inner.truncated_to = packed.length;
-					inner.results = packed;
-					if (writtenPath) {
-						inner.full_results_path = writtenPath;
-						inner.full_results_note = 'FULL RESULTS: Showing top ' + packed.length + ' of ' + originalCount + ' patterns inline. The complete result set is at ' + writtenPath + '. If patterns inline don\'t fully address the task, Read the full file for the complete pattern library.';
+					const persist = () => {
+						if (!writtenPath) {
+							try {
+								if (opts.throwOnWrite) throw new Error('synthetic write failure');
+								fsMod.mkdirSync(pathMod.dirname(fullPath), { recursive: true });
+								fsMod.writeFileSync(fullPath, JSON.stringify(JSON.parse(innerText), null, 2));
+								writtenPath = fullPath;
+							} catch (_) { /* defensive — passthrough without full path */ }
+						}
+						if (writtenPath && inner.full_results_path === undefined) {
+							inner.full_results_path = writtenPath;
+							inner.full_results_note = 'FULL RESULTS: the complete record — full query, all ' + originalCount +
+								' results, and expanded[] neighbors — is at ' + writtenPath +
+								'. The inline view is trimmed to fit Cursor\'s ~8 KB wire limit; Read the file if the inline subset is insufficient.';
+						}
+					};
+					const rebuild = () => {
+						if (inner.results.length < originalResults.length) {
+							persist();
+							inner.original_count = originalCount;
+							inner.truncated_to = inner.results.length;
+						}
+						msg.result.content[0].text = JSON.stringify(inner, null, 2);
+						return JSON.stringify(msg);
+					};
+					let out = rebuild();
+					// 1. Drop a large expanded[] inline first (least valuable; on disk).
+					if (byteLen(out) > WIRE_LIMIT && inner.expanded !== undefined) {
+						persist();
+						delete inner.expanded;
+						out = rebuild();
 					}
-					msg.result.content[0].text = JSON.stringify(inner, null, 2);
-					return JSON.stringify(msg);
+					// 2. Drop whole patterns until it fits — down to zero (all on disk).
+					while (byteLen(out) > WIRE_LIMIT && inner.results.length > 0) {
+						inner.results = originalResults.slice(0, inner.results.length - 1);
+						out = rebuild();
+					}
+					// 3. Last resort → persist, then truncate the echoed query inline.
+					if (byteLen(out) > WIRE_LIMIT && typeof inner.query === 'string' && inner.query.length > 64) {
+						persist();
+						inner.query = inner.query.slice(0, 64) + '…';
+						out = rebuild();
+					}
+					// 4. Clamp a pathologically long session_id (only remaining unbounded value).
+					if (byteLen(out) > WIRE_LIMIT && typeof inner.session_id === 'string' && inner.session_id.length > 64) {
+						persist();
+						inner.session_id = inner.session_id.slice(0, 64) + '…';
+						out = rebuild();
+					}
+					return out;
 				}
 			}
 		} catch (_) { /* passthrough */ }
@@ -135,6 +183,16 @@ describe('ACE MCP proxy — content', () => {
 		const script = getAceMcpProxyContent();
 		expect(script).toContain('@ace-sdk/mcp');
 		expect(script).toMatch(/spawn\(['"]npx['"]/);
+	});
+
+	it('script uses pinned @ace-sdk/mcp@^3.1.1 (no bare unversioned @ace-sdk/mcp in spawn args)', () => {
+		const script = getAceMcpProxyContent();
+		// Must contain the pinned version string.
+		expect(script).toContain('@ace-sdk/mcp@^3.1.1');
+		// Must NOT contain the bare unversioned string as a standalone spawn argument.
+		// The bare string '@ace-sdk/mcp' followed by ']' or ',' (array element boundary)
+		// would indicate an unversioned arg. We check the spawn array specifically.
+		expect(script).not.toMatch(/['"]-y['"],\s*['"]@ace-sdk\/mcp['"]\s*[,\]]/);
 	});
 
 	it('script parses JSON line-by-line and re-emits filtered', () => {
@@ -305,6 +363,165 @@ EOF
 		} finally {
 			fs.rmSync(tmp, { recursive: true, force: true });
 		}
+	});
+
+	// issue #13: verify against the ACTUAL baked getAceMcpProxyContent() script
+	// (not the makeFilterLine re-implementation) that an ace_search response with
+	// match_factors keeps them inline. This is the drift-proof end-to-end guard.
+	it('baked proxy preserves match_factors inline for an ace_search response (#13)', () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-mcp-proxy-mf-'));
+		try {
+			const proxyPath = path.join(tmp, 'ace_mcp_proxy.js');
+			fs.writeFileSync(proxyPath, getAceMcpProxyContent(), { mode: 0o755 });
+
+			// Small ace_search result (1 pattern, no truncation, no expanded) carrying
+			// match_factors. Built in JS so the JSON escaping is correct.
+			const inner = {
+				query: 'auth', threshold: 0.7, count: 1, session_id: 'sid-e2e',
+				results: [{
+					id: 'p0', content: 'short content', confidence: 0.9,
+					match_factors: { semantic_score: 0.95, ucb_score: 0.97, retrieval_log_id: 11 },
+				}],
+			};
+			const searchLine = JSON.stringify({
+				jsonrpc: '2.0', id: 2,
+				result: { content: [{ type: 'text', text: JSON.stringify(inner) }] },
+			});
+
+			const binDir = path.join(tmp, 'bin');
+			fs.mkdirSync(binDir);
+			fs.writeFileSync(path.join(binDir, 'npx'), `#!/bin/bash
+cat <<'EOF'
+{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2024-11-05","serverInfo":{"name":"@ace-sdk/mcp","version":"3.1.1"},"capabilities":{"tools":{}}}}
+${searchLine}
+EOF
+`, { mode: 0o755 });
+
+			const proxyOut = spawnSync('node', [proxyPath], {
+				input: '', encoding: 'utf-8',
+				env: { ...process.env, PATH: `${binDir}:${process.env.PATH || ''}` },
+				timeout: 5000,
+			});
+			expect(proxyOut.status).toBe(0);
+
+			const outLines = proxyOut.stdout.split('\n').filter(l => l.trim().length > 0);
+			// Find the forwarded ace_search result line.
+			const searchOut = outLines
+				.map(l => { try { return JSON.parse(l); } catch { return null; } })
+				.find(m => m && m.result && Array.isArray(m.result.content)
+					&& typeof m.result.content[0]?.text === 'string'
+					&& m.result.content[0].text.includes('"results"'));
+			expect(searchOut, 'proxy should forward the ace_search result').toBeTruthy();
+			const outInner = JSON.parse(searchOut.result.content[0].text);
+			expect(outInner.results).toHaveLength(1);
+			// The whole point of #13: match_factors survive the real baked proxy.
+			expect(outInner.results[0]).toHaveProperty('match_factors');
+			expect(outInner.results[0].match_factors).toHaveProperty('retrieval_log_id', 11);
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	// Run the REAL baked getAceMcpProxyContent() against an ace_search response and
+	// return the forwarded line + parsed inner. cwd=tmp so disk writes (full_results)
+	// land in the temp dir, not the repo.
+	function runBakedProxy(tmp: string, inner: any): { rawLine: string; outInner: any } {
+		const proxyPath = path.join(tmp, 'ace_mcp_proxy.js');
+		fs.writeFileSync(proxyPath, getAceMcpProxyContent(), { mode: 0o755 });
+		const searchLine = JSON.stringify({ jsonrpc: '2.0', id: 2, result: { content: [{ type: 'text', text: JSON.stringify(inner) }] } });
+		const binDir = path.join(tmp, 'bin');
+		fs.mkdirSync(binDir);
+		fs.writeFileSync(path.join(binDir, 'npx'), `#!/bin/bash
+cat <<'EOF'
+{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2024-11-05","serverInfo":{"name":"@ace-sdk/mcp","version":"3.1.1"},"capabilities":{"tools":{}}}}
+${searchLine}
+EOF
+`, { mode: 0o755 });
+		const out = spawnSync('node', [proxyPath], {
+			input: '', encoding: 'utf-8', cwd: tmp,
+			env: { ...process.env, PATH: `${binDir}:${process.env.PATH || ''}` },
+			timeout: 5000,
+		});
+		if (out.status !== 0) throw new Error('proxy exit ' + out.status + ': ' + out.stderr);
+		const rawLine = (out.stdout.split('\n').filter(l => l.trim().length > 0).find(l => {
+			try { return JSON.parse(l)?.result?.content?.[0]?.text?.includes('"results"'); } catch { return false; }
+		})) || '';
+		return { rawLine, outInner: rawLine ? JSON.parse(JSON.parse(rawLine).result.content[0].text) : null };
+	}
+
+	it('baked proxy keeps a huge single pattern under 8 KB on the wire (0 inline, full set on disk)', () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-baked-huge-'));
+		try {
+			const inner = {
+				query: 'q', threshold: 0.7, count: 1, session_id: 'sid-huge',
+				results: [{ id: 'big', content: 'y'.repeat(10000), confidence: 0.9 }],
+			};
+			const { rawLine, outInner } = runBakedProxy(tmp, inner);
+			expect(Buffer.byteLength(rawLine, 'utf8')).toBeLessThanOrEqual(8192);
+			expect(outInner.results).toHaveLength(0);
+			expect(outInner.full_results_path).toBeTruthy();
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('baked proxy budgets a multibyte (emoji) query in BYTES → line ≤ 8 KB', () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-baked-utf8-'));
+		try {
+			const inner = {
+				query: '😀'.repeat(2200), threshold: 0.7, count: 1, session_id: 'sid-utf8',
+				results: [{ id: 'p', content: 'ok', confidence: 0.9 }],
+			};
+			const { rawLine } = runBakedProxy(tmp, inner);
+			expect(Buffer.byteLength(rawLine, 'utf8')).toBeLessThanOrEqual(8192);
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('baked proxy sheds a huge expanded[] but keeps real patterns, full set on disk', () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-baked-exp-'));
+		try {
+			const inner = {
+				query: 'q', threshold: 0.7, count: 2, session_id: 'sid-exp',
+				results: [{ id: 'a', content: 'short A', confidence: 0.9 }, { id: 'b', content: 'short B', confidence: 0.8 }],
+				expanded: Array.from({ length: 150 }, (_, i) => ({ pattern_id: 'n-' + 'x'.repeat(60) + i, cumulative_reward: 1.2, cached: true })),
+			};
+			const { rawLine, outInner } = runBakedProxy(tmp, inner);
+			expect(Buffer.byteLength(rawLine, 'utf8')).toBeLessThanOrEqual(8192);
+			expect(outInner.results).toHaveLength(2);
+			expect(outInner).not.toHaveProperty('expanded');
+			expect(outInner.full_results_path).toBeTruthy();
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('baked proxy preserves match_factors inline through the SLOW (truncation) path', () => {
+		// The fast-path test only proves passthrough; this drives real truncation so
+		// the baked script's slow-path match_factors preservation is exercised e2e.
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-baked-mf-slow-'));
+		try {
+			const inner = {
+				query: 'q', threshold: 0.7, count: 30, session_id: 'sid-mf-slow',
+				results: Array.from({ length: 30 }, (_, i) => ({
+					id: 'p' + i, content: 'x'.repeat(250), confidence: 0.9,
+					match_factors: { semantic_score: 0.9, ucb_score: 0.9, retrieval_log_id: i },
+				})),
+			};
+			const { rawLine, outInner } = runBakedProxy(tmp, inner);
+			expect(Buffer.byteLength(rawLine, 'utf8')).toBeLessThanOrEqual(8192);
+			expect(outInner.results.length).toBeGreaterThan(0);
+			expect(outInner.results.length).toBeLessThan(30); // truncated
+			expect(outInner.results[0]).toHaveProperty('match_factors'); // preserved on the slow path
+			expect(outInner.full_results_path).toBeTruthy();
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('baked proxy clamps a pathologically long session_id (line ≤ 8 KB)', () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-baked-sid-'));
+		try {
+			const inner = {
+				query: 'q', threshold: 0.7, count: 1, session_id: 'S'.repeat(8000),
+				results: [{ id: 'p', content: 'ok', confidence: 0.9 }],
+			};
+			const { rawLine } = runBakedProxy(tmp, inner);
+			expect(Buffer.byteLength(rawLine, 'utf8')).toBeLessThanOrEqual(8192);
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 	});
 });
 
@@ -524,7 +741,8 @@ describe('ACE MCP proxy — Fix B2 / Task B+D (smart-packed ace_search + full re
 			const filter = makeFilterLine({ writeDir: tmp });
 			const resp = buildSearchResponse(150, 500, 'sid-8k');
 			const filtered = filter(resp);
-			expect(filtered.length).toBeLessThan(8 * 1024);
+			// Byte count, not char count — the Cursor pipe limit is in bytes.
+			expect(Buffer.byteLength(filtered, 'utf8')).toBeLessThan(8 * 1024);
 		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 	});
 
@@ -671,6 +889,94 @@ describe('ACE MCP proxy — v0.5.0-dev.16 initialize.instructions injection', ()
 	});
 });
 
+describe('ACE MCP proxy — u11-mcpinstructions (ACE 1.5 vocab audit)', () => {
+	it('HIDDEN_MCP_TOOLS is exactly [ace_get_playbook] and every ACE 1.5 tool (ace_top_patterns, ace_batch_get, ace_delta, traces_list, traces_get) is NOT hidden', () => {
+		// REGRESSION GUARD: HIDDEN_MCP_TOOLS was already ['ace_get_playbook'] before
+		// commit 1f36aa0. This test CANNOT be a change-detection (TDD red-green) test
+		// because the audited value was pre-existing — #14 confirmed it correct and
+		// no change was required. The test's purpose is to prevent future regressions
+		// where a new SDK tool gets accidentally added to HIDDEN_MCP_TOOLS.
+		// (Not a TDD change-detection test — see FIX-PASS u11 blocking-1 resolution.)
+		expect(Array.from(HIDDEN_MCP_TOOLS)).toEqual(['ace_get_playbook']);
+		expect(HIDDEN_MCP_TOOLS).toHaveLength(1);
+		// ACE 1.5-new tools that were NOT on the pre-1.5 surface — must stay visible.
+		const hidden = Array.from(HIDDEN_MCP_TOOLS);
+		for (const tool of ['ace_top_patterns', 'ace_batch_get', 'ace_delta', 'traces_list', 'traces_get']) {
+			expect(hidden, `${tool} must NOT be hidden`).not.toContain(tool);
+		}
+		// Verify the baked proxy HIDDEN constant JSON matches HIDDEN_MCP_TOOLS exactly.
+		// This exercises the getAceMcpProxyContent() integration path. The baked
+		// constant must contain exactly "ace_get_playbook" and none of the ACE 1.5
+		// tools that must stay visible. Pre-commit ACE 1.5 tools were not in the
+		// baked HIDDEN set — this assertion is a regression guard for that contract.
+		const src = getAceMcpProxyContent();
+		expect(src).toContain('"ace_get_playbook"');
+		for (const tool of ['ace_top_patterns', 'ace_batch_get', 'ace_delta', 'traces_list', 'traces_get']) {
+			// Verify these tools are NOT in the HIDDEN Set literal in the baked script.
+			// The only JSON string containing them should not exist in the HIDDEN set.
+			const hiddenSetMatch = src.match(/const HIDDEN = new Set\((\[.*?\])\)/);
+			if (hiddenSetMatch) {
+				expect(hiddenSetMatch[1], `${tool} must NOT appear in baked HIDDEN set literal`).not.toContain(tool);
+			}
+		}
+	});
+
+	it('MCP_SERVER_INSTRUCTIONS contains session_id (ACE 1.5 F-080 feedback path)', () => {
+		// ACE 1.5 adds session_id to ace_search responses. The AI must capture it
+		// and pass it to the feedback tool to close the LinUCB reward loop.
+		expect(MCP_SERVER_INSTRUCTIONS).toContain('session_id');
+	});
+
+	it('MCP_SERVER_INSTRUCTIONS contains task_intent (ACE 1.5 bandit routing hint)', () => {
+		// ACE 1.5 adds task_intent param to ace_search for server-side bandit routing.
+		// Instructions should encourage the AI to set it when intent is clear.
+		expect(MCP_SERVER_INSTRUCTIONS).toContain('task_intent');
+	});
+
+	it('MCP_SERVER_INSTRUCTIONS describes feedback closure step with specific ACE 1.5 step-4 language', () => {
+		// The instructions must tell the AI to close the reward feedback loop after
+		// completing the task — but MUST NOT name ace_learn or ace_get_playbook
+		// literally (Cursor 3.7 tool-reliability workaround: naming hidden/feedback
+		// tools in instructions causes filesystem exploration instead of tool calls).
+		expect(MCP_SERVER_INSTRUCTIONS).not.toContain('ace_learn');
+		expect(MCP_SERVER_INSTRUCTIONS).not.toContain('ace_get_playbook');
+		// The NEW step-4 sentence added by u11 must be present.
+		// These phrases were NOT in the old instructions and would fail on pre-commit code.
+		expect(MCP_SERVER_INSTRUCTIONS).toContain('session feedback tool');
+		expect(MCP_SERVER_INSTRUCTIONS).toContain('ACE feedback reward loop');
+	});
+
+	it('MCP_SERVER_INSTRUCTIONS instructs AI to save session_id from ace_search response (new ACE 1.5 directive)', () => {
+		// The ACE 1.5 workflow requires capturing session_id from the ace_search
+		// result and passing it back to the feedback tool. The instructions must
+		// explicitly direct the AI to save it — this phrase was NOT in the old
+		// instructions and would fail on pre-commit code.
+		expect(MCP_SERVER_INSTRUCTIONS).toContain('Save the session_id');
+		// Core directive must remain unchanged: call ace_search before responding.
+		expect(MCP_SERVER_INSTRUCTIONS).toContain('ace_search');
+		expect(MCP_SERVER_INSTRUCTIONS).toMatch(/call ace_search.*query/is);
+	});
+
+	it('baked proxy script contains ACE 1.5 instruction phrases in MCP_INSTRUCTIONS constant', () => {
+		const src = getAceMcpProxyContent();
+		// The baked script's MCP_INSTRUCTIONS (JSON-stringified MCP_SERVER_INSTRUCTIONS)
+		// must propagate ACE 1.5-specific phrases to the initialize response.
+		//
+		// CHANGE-DETECTION: these phrases were NOT present in pre-commit baked output.
+		//   - 'Save the session_id': added by u11 (old instructions had no session_id
+		//     capture directive; the pre-commit baked script contained 'session_id' only
+		//     as a JS variable name, not as an instruction phrase).
+		//   - 'task_intent': wholly new ACE 1.5 bandit-routing param; absent pre-commit.
+		//
+		// Note: asserting just 'session_id' is insufficient — pre-commit baked output
+		// already contained that string as the JS variable `inner.session_id`. We must
+		// assert the instruction-specific phrase 'Save the session_id' to prove the
+		// MCP_INSTRUCTIONS constant (not the JS variable) was updated.
+		expect(src).toContain('Save the session_id');
+		expect(src).toContain('task_intent');
+	});
+});
+
 describe('ACE MCP proxy — Node syntax sanity', () => {
 	it('proxy script parses with `node --check` (no syntax errors)', () => {
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-mcp-proxy-syntax-'));
@@ -682,5 +988,388 @@ describe('ACE MCP proxy — Node syntax sanity', () => {
 		} finally {
 			fs.rmSync(tmp, { recursive: true, force: true });
 		}
+	});
+});
+
+// ─── u10-expanded: match_factors budget-stripping + expanded_note ─────────────
+
+describe('ACE MCP proxy — u10-expanded (match_factors + expanded neighbors)', () => {
+	/**
+	 * Build a search response where patterns carry match_factors (~200 bytes each).
+	 * When stripped, more patterns fit in the inline budget.
+	 */
+	function buildSearchResponseWithMatchFactors(
+		numResults: number,
+		sessionId?: string,
+		expanded?: Array<{ pattern_id: string; cumulative_reward: number; cached: boolean }>,
+	) {
+		// Each pattern is ~300 bytes of content + ~200 bytes of match_factors.
+		const filler = 'x'.repeat(250);
+		const results = Array.from({ length: numResults }, (_, i) => ({
+			id: `pat-${i}`,
+			name: `pattern-${i}`,
+			content: filler,
+			confidence: 0.9,
+			helpful: 5,
+			match_factors: {
+				semantic_score: 0.95 + i * 0.001,
+				domain_boost: false,
+				domain_relevance: 0,
+				error_context_boost: false,
+				formula_boost_applied: true,
+				ucb_score: 0.97,
+				bandit_rank: i + 1,
+				retrieval_log_id: 100000 + i,
+				retrieval_id: `uuid-${i}`,
+				shadow_mode: false,
+			},
+		}));
+		const inner: any = { query: 'foo', threshold: 0.7, results, count: numResults };
+		if (sessionId) inner.session_id = sessionId;
+		if (expanded !== undefined) inner.expanded = expanded;
+		return JSON.stringify({
+			jsonrpc: '2.0', id: 42,
+			result: { content: [{ type: 'text', text: JSON.stringify(inner) }] },
+		});
+	}
+
+	it('match_factors counted in byte budget: inline payload stays 8 KB-safe (issue #13)', () => {
+		// Issue #13 (revised): match_factors are PRESERVED inline, so they count
+		// against the budget — fewer patterns fit when match_factors are present,
+		// but the wire payload never overflows the 8 KB Cursor pipe limit.
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-mf-budget-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+
+			// With match_factors on each pattern.
+			const respWithMF = buildSearchResponseWithMatchFactors(30, 'sid-mf');
+			const filteredWithMF = JSON.parse(filter(respWithMF));
+			const innerWithMF = JSON.parse(filteredWithMF.result.content[0].text);
+			const countWithMF = innerWithMF.results.length;
+
+			// Without match_factors (same content volume, same budget).
+			const filler = 'x'.repeat(250);
+			const resultsNoMF = Array.from({ length: 30 }, (_, i) => ({
+				id: `pat-${i}`, name: `pattern-${i}`, content: filler, confidence: 0.9, helpful: 5,
+			}));
+			const innerNoMF: any = { query: 'foo', threshold: 0.7, results: resultsNoMF, count: 30, session_id: 'sid-nomf' };
+			const respNoMF = JSON.stringify({
+				jsonrpc: '2.0', id: 43,
+				result: { content: [{ type: 'text', text: JSON.stringify(innerNoMF) }] },
+			});
+			const filteredNoMF = JSON.parse(filter(respNoMF));
+			const innerNoMFOut = JSON.parse(filteredNoMF.result.content[0].text);
+			const countNoMF = innerNoMFOut.results.length;
+
+			// match_factors add bytes, so withMF packs no MORE patterns than withoutMF.
+			expect(countWithMF).toBeLessThanOrEqual(countNoMF);
+			// Critical (the reason for option C): the emitted inline results array —
+			// match_factors and all — stays within the byte budget → pipe-safe.
+			expect(JSON.stringify(innerWithMF.results).length).toBeLessThanOrEqual(MAX_INLINE_PATTERN_BYTES);
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('match_factors PRESERVED inline (issue #13), wire stays 8 KB-safe', () => {
+		// Issue #13: match_factors stay in the inline output. They count against the
+		// budget, so the patterns that fit keep their match_factors AND the inline
+		// payload stays within MAX_INLINE_PATTERN_BYTES. Disk holds the full set.
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-mf-preserve-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			const resp = buildSearchResponseWithMatchFactors(30, 'sid-preserve');
+			const filtered = JSON.parse(filter(resp));
+			const inner = JSON.parse(filtered.result.content[0].text);
+			expect(inner.results.length).toBeGreaterThan(0);
+			// 30 patterns overflow the budget → truncation happened.
+			expect(inner.truncated_to).toBe(inner.results.length);
+			expect(inner.results.length).toBeLessThan(30);
+			// Inline patterns KEEP their match_factors (preserved, not stripped).
+			expect(inner.results[0]).toHaveProperty('match_factors');
+			expect(inner.results[0].match_factors).toHaveProperty('semantic_score');
+			// Pipe safety: the emitted inline results stay within the byte budget.
+			expect(JSON.stringify(inner.results).length).toBeLessThanOrEqual(MAX_INLINE_PATTERN_BYTES);
+			// Disk: full result set also preserves match_factors.
+			expect(inner.full_results_path).toBeTruthy();
+			const onDisk = JSON.parse(fs.readFileSync(inner.full_results_path, 'utf-8'));
+			expect(onDisk.results[0]).toHaveProperty('match_factors');
+			expect(onDisk.results[0].match_factors).toHaveProperty('semantic_score');
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('full JSON-RPC line stays under Cursor 8 KB pipe limit with match_factors + expanded (Codex P1)', () => {
+		// The exact failure Codex flagged: a normal 1.5 response (match_factors on
+		// every result + expanded neighbors + long session_id + truncation notes)
+		// must not emit a line over ~8 KB. The wire-trim budgets the WHOLE line.
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-wire-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			const expanded = Array.from({ length: 20 }, (_, i) => ({ pattern_id: `exp-${i}`, cumulative_reward: 1.2, cached: true }));
+			const resp = buildSearchResponseWithMatchFactors(40, 'x'.repeat(200), expanded);
+			const lineOut = filter(resp);
+			// The whole emitted JSON-RPC line — not just inner.results — fits the pipe
+			// (measured in BYTES, the actual transport limit).
+			expect(Buffer.byteLength(lineOut, 'utf8')).toBeLessThanOrEqual(8192);
+			const inner = JSON.parse(JSON.parse(lineOut).result.content[0].text);
+			// match_factors are still preserved on the inline patterns (issue #13).
+			expect(inner.results.length).toBeGreaterThan(0);
+			expect(inner.results[0]).toHaveProperty('match_factors');
+			// Truncated → the complete set (incl. expanded) is on disk.
+			expect(inner.full_results_path).toBeTruthy();
+			expect(inner.expanded_note).toBeTruthy();
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('one oversized pattern alone → trims to zero inline, full set on disk, line ≤ 8 KB (Codex P1)', () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-wire-huge-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			// A single ~10 KB pattern — bigger than the whole wire budget by itself.
+			const huge = { id: 'big', name: 'big', content: 'y'.repeat(10000), confidence: 0.9, helpful: 9 };
+			const innerRaw = { query: 'q', threshold: 0.7, results: [huge], count: 1, session_id: 'sid-huge' };
+			const resp = JSON.stringify({ jsonrpc: '2.0', id: 7, result: { content: [{ type: 'text', text: JSON.stringify(innerRaw) }] } });
+			const lineOut = filter(resp);
+			expect(Buffer.byteLength(lineOut, 'utf8')).toBeLessThanOrEqual(8192);
+			const inner = JSON.parse(JSON.parse(lineOut).result.content[0].text);
+			// No room for even one pattern inline → zero inline, everything on disk.
+			expect(inner.results).toHaveLength(0);
+			expect(inner.full_results_path).toBeTruthy();
+			const onDisk = JSON.parse(fs.readFileSync(inner.full_results_path, 'utf-8'));
+			expect(onDisk.results[0].content.length).toBe(10000);
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('multibyte UTF-8 query is budgeted in bytes, not chars (Codex P2)', () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-wire-utf8-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			// ~2200 emoji: char length ~4600 but ~9000 bytes on the wire.
+			const innerRaw = { query: '😀'.repeat(2200), threshold: 0.7, results: [{ id: 'p', name: 'n', content: 'ok' }], count: 1, session_id: 'sid-utf8' };
+			const resp = JSON.stringify({ jsonrpc: '2.0', id: 8, result: { content: [{ type: 'text', text: JSON.stringify(innerRaw) }] } });
+			const lineOut = filter(resp);
+			expect(Buffer.byteLength(lineOut, 'utf8')).toBeLessThanOrEqual(8192);
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('clamps a pathologically long session_id so the line stays ≤ 8 KB (provably bounded)', () => {
+		// session_id is the only other unbounded server value; a short query means
+		// the query-trim step never fires, so step 4 must clamp the session_id.
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-wire-sid-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			const innerRaw = { query: 'q', threshold: 0.7, results: [{ id: 'p', content: 'ok' }], count: 1, session_id: 'S'.repeat(8000) };
+			const resp = JSON.stringify({ jsonrpc: '2.0', id: 12, result: { content: [{ type: 'text', text: JSON.stringify(innerRaw) }] } });
+			const lineOut = filter(resp);
+			expect(Buffer.byteLength(lineOut, 'utf8')).toBeLessThanOrEqual(8192);
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('oversize from a huge expanded[] (results fit) → persists full set, drops expanded inline, keeps results (Codex P1)', () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-wire-exp-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			const results = [
+				{ id: 'a', name: 'a', content: 'short A', confidence: 0.9 },
+				{ id: 'b', name: 'b', content: 'short B', confidence: 0.8 },
+			];
+			// ~150 fat neighbor stubs → expanded alone blows the wire budget while the
+			// two real results fit easily.
+			const expanded = Array.from({ length: 150 }, (_, i) => ({ pattern_id: 'neighbor-' + 'x'.repeat(60) + i, cumulative_reward: 1.2, cached: true }));
+			const innerRaw = { query: 'q', threshold: 0.7, results, count: 2, expanded, session_id: 'sid-exp' };
+			const resp = JSON.stringify({ jsonrpc: '2.0', id: 9, result: { content: [{ type: 'text', text: JSON.stringify(innerRaw) }] } });
+			const lineOut = filter(resp);
+			expect(Buffer.byteLength(lineOut, 'utf8')).toBeLessThanOrEqual(8192);
+			const inner = JSON.parse(JSON.parse(lineOut).result.content[0].text);
+			// Real patterns are kept (expanded shed first); expanded is gone inline.
+			expect(inner.results).toHaveLength(2);
+			expect(inner).not.toHaveProperty('expanded');
+			// Nothing lost: the full record (incl. all 150 neighbors) is on disk.
+			expect(inner.full_results_path).toBeTruthy();
+			const onDisk = JSON.parse(fs.readFileSync(inner.full_results_path, 'utf-8'));
+			expect(onDisk.expanded).toHaveLength(150);
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('expanded_note emitted for small response that fits without truncation (early-return bug)', () => {
+		// Codex-review finding 2: the early-return path fires before expanded_note
+		// is injected.  A response small enough to not need truncation but that
+		// still carries expanded[] must emit expanded_note.
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-notrunc-expnote-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			// Use just 2 short patterns — easily fits the 5 000-byte budget with
+			// no truncation needed.
+			const shortFiller = 'y'.repeat(50);
+			const results = [
+				{ id: 'p0', name: 'pat-0', content: shortFiller, confidence: 0.9, helpful: 5 },
+				{ id: 'p1', name: 'pat-1', content: shortFiller, confidence: 0.8, helpful: 4 },
+			];
+			const expanded = [
+				{ pattern_id: 'nbr-small', cumulative_reward: 1.1, cached: true },
+			];
+			const innerRaw: any = { query: 'q', threshold: 0.7, results, count: 2, session_id: 'sid-notrunc', expanded };
+			const resp = JSON.stringify({
+				jsonrpc: '2.0', id: 77,
+				result: { content: [{ type: 'text', text: JSON.stringify(innerRaw) }] },
+			});
+			const filtered = JSON.parse(filter(resp));
+			const inner = JSON.parse(filtered.result.content[0].text);
+			// expanded_note must be present even when no truncation was needed.
+			expect(inner).toHaveProperty('expanded_note');
+			expect(inner.expanded_note).toContain('ace_batch_get');
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('expanded_note emitted when neighbor has cumulative_reward: 0 (zero is valid)', () => {
+		// Codex-review finding 3: a 0-reward neighbor must still trigger expanded_note.
+		// The guard uses Array.isArray + .length — 0-reward value is irrelevant.
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-zero-reward-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			const expanded = [{ pattern_id: 'zero-reward', cumulative_reward: 0, cached: false }];
+			const resp = buildSearchResponseWithMatchFactors(30, 'sid-zero-reward', expanded);
+			const filtered = JSON.parse(filter(resp));
+			const inner = JSON.parse(filtered.result.content[0].text);
+			expect(inner).toHaveProperty('expanded_note');
+			expect(inner.expanded_note).toContain('ace_batch_get');
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('expanded_note emitted when inner.expanded is non-empty array', () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-expanded-note-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			const expanded = [
+				{ pattern_id: 'nbr-1', cumulative_reward: 1.2, cached: true },
+				{ pattern_id: 'nbr-2', cumulative_reward: 0.8, cached: false },
+			];
+			const resp = buildSearchResponseWithMatchFactors(30, 'sid-expnote', expanded);
+			const filtered = JSON.parse(filter(resp));
+			const inner = JSON.parse(filtered.result.content[0].text);
+			// expanded_note must be present and mention ace_batch_get.
+			expect(inner).toHaveProperty('expanded_note');
+			expect(typeof inner.expanded_note).toBe('string');
+			expect(inner.expanded_note).toContain('ace_batch_get');
+			expect(inner.expanded_note).toContain('expanded[]');
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('expanded_note absent when inner.expanded is empty array (1.5-empty → no-op)', () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-expanded-empty-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			const resp = buildSearchResponseWithMatchFactors(30, 'sid-expempty', []);
+			const filtered = JSON.parse(filter(resp));
+			const inner = JSON.parse(filtered.result.content[0].text);
+			// Empty expanded array → no expanded_note.
+			expect(inner).not.toHaveProperty('expanded_note');
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('expanded_note absent when inner.expanded key is missing (1.0 input → byte-identical behavior)', () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-expanded-absent-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			// 1.0 response: no expanded key at all.
+			const resp = buildSearchResponseWithMatchFactors(30, 'sid-exp10');
+			// Verify no expanded key in the raw input.
+			const rawInner = JSON.parse(JSON.parse(resp).result.content[0].text);
+			expect(rawInner).not.toHaveProperty('expanded');
+			const filtered = JSON.parse(filter(resp));
+			const inner = JSON.parse(filtered.result.content[0].text);
+			expect(inner).not.toHaveProperty('expanded_note');
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('full_results_note mentions expanded[] neighbors', () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-frnote-expanded-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			const expanded = [{ pattern_id: 'n1', cumulative_reward: 0.9, cached: true }];
+			const resp = buildSearchResponseWithMatchFactors(30, 'sid-frnote', expanded);
+			const filtered = JSON.parse(filter(resp));
+			const inner = JSON.parse(filtered.result.content[0].text);
+			// full_results_note must mention expanded.
+			expect(inner.full_results_note).toContain('expanded');
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('disk file contains both results and expanded keys', () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-disk-expanded-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			const expanded = [{ pattern_id: 'nbr-disk', cumulative_reward: 1.5, cached: true }];
+			const resp = buildSearchResponseWithMatchFactors(30, 'sid-disk-exp', expanded);
+			const filtered = JSON.parse(filter(resp));
+			const inner = JSON.parse(filtered.result.content[0].text);
+			expect(inner.full_results_path).toBeTruthy();
+			const onDisk = JSON.parse(fs.readFileSync(inner.full_results_path, 'utf-8'));
+			expect(Array.isArray(onDisk.results)).toBe(true);
+			expect(Array.isArray(onDisk.expanded)).toBe(true);
+			expect(onDisk.expanded[0].pattern_id).toBe('nbr-disk');
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('1.0 input (no match_factors, no expanded) stays byte-identical to previous behavior', () => {
+		// A 1.0-format search response with no match_factors and no expanded.
+		// After the change the output must be identical to what the old code produced.
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-1dot0-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			const filler = 'x'.repeat(250);
+			const results = Array.from({ length: 30 }, (_, i) => ({
+				id: `pat-${i}`, name: `pattern-${i}`, content: filler, confidence: 0.9, helpful: 5,
+			}));
+			const innerRaw: any = { query: 'bar', threshold: 0.7, results, count: 30, session_id: 'sid-1dot0' };
+			const resp = JSON.stringify({
+				jsonrpc: '2.0', id: 55,
+				result: { content: [{ type: 'text', text: JSON.stringify(innerRaw) }] },
+			});
+			const out = JSON.parse(filter(resp));
+			const inner = JSON.parse(out.result.content[0].text);
+			// No new fields injected for 1.0 input.
+			expect(inner).not.toHaveProperty('expanded_note');
+			// match_factors absent on patterns (1.0 input, nothing to strip).
+			inner.results.forEach((p: any) => expect(p).not.toHaveProperty('match_factors'));
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('no-truncation + match_factors-only: match_factors PRESERVED inline, no full_results_path, no expanded_note', () => {
+		// Issue #13: a small response (all patterns fit the stripped budget) with
+		// match_factors present and no expanded[] must pass through UNMODIFIED —
+		// match_factors stay inline, nothing is stripped, no annotations added.
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-notrunc-mfonly-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			// 2 very short patterns — easily under the 5000-byte budget.
+			const results = [
+				{
+					id: 'p0', name: 'pat-0', content: 'short content A', confidence: 0.9, helpful: 5,
+					match_factors: { semantic_score: 0.95, ucb_score: 0.97, bandit_rank: 1, retrieval_id: 'uuid-0' },
+				},
+				{
+					id: 'p1', name: 'pat-1', content: 'short content B', confidence: 0.8, helpful: 4,
+					match_factors: { semantic_score: 0.88, ucb_score: 0.90, bandit_rank: 2, retrieval_id: 'uuid-1' },
+				},
+				{
+					id: 'p2', name: 'pat-2', content: 'short content C', confidence: 0.75, helpful: 3,
+					match_factors: { semantic_score: 0.80, ucb_score: 0.82, bandit_rank: 3, retrieval_id: 'uuid-2' },
+				},
+			];
+			const innerRaw: any = { query: 'q', threshold: 0.7, results, count: 3, session_id: 'sid-notrunc-mf' };
+			// No expanded key — ACE 1.0 compatible input with 1.5 match_factors added.
+			const resp = JSON.stringify({
+				jsonrpc: '2.0', id: 99,
+				result: { content: [{ type: 'text', text: JSON.stringify(innerRaw) }] },
+			});
+			const filtered = JSON.parse(filter(resp));
+			const inner = JSON.parse(filtered.result.content[0].text);
+			// (a) No truncation: no full_results_path (all 3 patterns fit inline).
+			expect(inner).not.toHaveProperty('full_results_path');
+			expect(inner.results).toHaveLength(3);
+			// (b) match_factors PRESERVED on every inline result (issue #13).
+			inner.results.forEach((p: any) => expect(p).toHaveProperty('match_factors'));
+			// (c) No expanded_note (no expanded key in input).
+			expect(inner).not.toHaveProperty('expanded_note');
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 	});
 });

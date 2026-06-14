@@ -26,15 +26,17 @@
  *   4  network/timeout/other recoverable
  *   5  unknown
  *
- * Side effect: writes .cursor/ace/ace-review-result.json with
- *   { helpful_pct, time_saved_min, reason, timestamp }
+ * Side effect: writes .cursor/ace/ace-review-result.json with either:
+ *   ACE 1.5: { reward_delta, reward_tier, patterns_rewarded, time_saved_min, reason, timestamp }
+ *   ACE 1.0: { helpful_pct, time_saved_min, reason, timestamp }
  * so the next prompt's pre-tool-use hook can render <ace-roi/>.
  */
 export function getLearnHelperContent(): string {
 	return `#!/usr/bin/env node
 // ACE learn helper (v0.5.0) — in-process @ace-sdk/core storeExecutionTrace.
 // Spawned by Stop hook with: node helper.js <conv_id> <jsonl_path> [transcript]
-// Writes ace-review-result.json with helpful_pct + time_saved_min for next-prompt ROI.
+// Writes ace-review-result.json with reward_delta/reward_tier (ACE 1.5) or
+// helpful_pct (ACE 1.0 fallback) + time_saved_min for next-prompt ROI.
 // Stable exit codes: 0 ok, 2 token-expired, 3 api-5xx, 4 network/other, 5 unknown.
 //
 // v0.5.0-dev.14 fixes — RICH trajectory data:
@@ -118,18 +120,22 @@ function gitInfo() {
   return { hash, branch };
 }
 
-// Caveman: parse the MCP-wrapped result_json. Returns { results, sessionId }.
+// Caveman: parse the MCP-wrapped result_json.
+// Returns { results, sessionId, retrievalId }.
 // Two layers: result_json is { content: [{ type:'text', text:'<inner-json>' }], isError:false }
 // and the inner JSON has the actual { results, session_id, query, ... }.
+// retrievalId: top-level .retrieval_id from the SearchResponseWithMetadata (ACE 1.5 SDK 3.2.0).
+// Backward compat: 1.0 responses lack retrieval_id → returns retrievalId: undefined.
 function unwrapAceSearchResultJson(rawResultJson) {
   try {
     const outer = typeof rawResultJson === 'string' ? JSON.parse(rawResultJson) : rawResultJson;
-    if (!outer) return { results: [], sessionId: '' };
+    if (!outer) return { results: [], sessionId: '', retrievalId: undefined };
     // Legacy / direct shape — try .similar_patterns / .results at top level.
     if (Array.isArray(outer.results) || Array.isArray(outer.similar_patterns)) {
       return {
         results: outer.results || outer.similar_patterns || [],
         sessionId: String(outer.session_id || ''),
+        retrievalId: outer.retrieval_id !== undefined ? outer.retrieval_id : undefined,
       };
     }
     // MCP wrapper shape.
@@ -142,12 +148,13 @@ function unwrapAceSearchResultJson(rawResultJson) {
           return {
             results: Array.isArray(inner.results) ? inner.results : (inner.similar_patterns || []),
             sessionId: String(inner.session_id || ''),
+            retrievalId: inner.retrieval_id !== undefined ? inner.retrieval_id : undefined,
           };
         } catch (_) { /* not JSON-in-text — fall through */ }
       }
     }
   } catch (_) {}
-  return { results: [], sessionId: '' };
+  return { results: [], sessionId: '', retrievalId: undefined };
 }
 
 (async () => {
@@ -245,6 +252,9 @@ function unwrapAceSearchResultJson(rawResultJson) {
     const playbookUsed = new Set();
     let serverSessionId = '';
     let lastReceivedPatterns = [];
+    // F-080 JSONL fallback: retrieval_id extracted from the MCP result_json when
+    // the pre-tool-use sidecar was not written (hook absent / non-Unix path).
+    let jsonlRetrievalId = undefined;
 
     // mcpByFingerprint: key = tool_name + '\\u0001' + canonical(args)
     //   → array of { result, raw } in insertion order. We POP from the front
@@ -266,13 +276,25 @@ function unwrapAceSearchResultJson(rawResultJson) {
       } catch (_) { return ''; }
     }
 
-    function pushMcpEntry(toolName, argsObj, resultStr) {
+    function pushMcpEntry(toolName, argsObj, resultStr, durMs, entryStartMs) {
       const fp = String(toolName) + '\\u0001' + canonicalArgs(argsObj);
       if (!mcpByFingerprint.has(fp)) mcpByFingerprint.set(fp, []);
-      mcpByFingerprint.get(fp).push({ result: resultStr });
+      mcpByFingerprint.get(fp).push({ result: resultStr, duration_ms: durMs, entry_start_ms: entryStartMs });
       const tk = String(toolName);
       if (!mcpByTool.has(tk)) mcpByTool.set(tk, []);
-      mcpByTool.get(tk).push({ result: resultStr });
+      mcpByTool.get(tk).push({ result: resultStr, duration_ms: durMs, entry_start_ms: entryStartMs });
+    }
+
+    // Cursor's afterMCPExecution hook delivers the per-call duration as
+    // \`duration\` (a float in ms; verified against real mcp_trajectory.jsonl,
+    // e.g. 902.27). Forward-compat shapes may use \`duration_ms\`. Presence-not-
+    // truthiness: duration:0 is a valid value and is still emitted.
+    function durMsFromEntry(entry) {
+      let d;
+      if (typeof entry.duration === 'number' && Number.isFinite(entry.duration)) d = entry.duration;
+      else if (typeof entry.duration_ms === 'number' && Number.isFinite(entry.duration_ms)) d = entry.duration_ms;
+      else return undefined;
+      return Math.round(d);
     }
 
     if (fs.existsSync(jsonlPath)) {
@@ -294,14 +316,24 @@ function unwrapAceSearchResultJson(rawResultJson) {
             resultStr = entry.tool_output;
           }
           if (resultStr.length > 2000) resultStr = resultStr.slice(0, 2000) + '…';
-          pushMcpEntry(entry.tool_name, argsObj, resultStr);
+          // Carry the per-call duration (ms) from the JSONL entry. Cursor's
+          // afterMCPExecution hook writes it as \`duration\` (float ms).
+          const entryDurMs = durMsFromEntry(entry);
+          // Also carry the JSONL-entry start timestamp for MCP steps.
+          // Use presence check (not truthiness) — timestamp:0 is a valid Unix epoch.
+          const entryStartMsForMcp = (() => {
+            if (entry.timestamp === undefined || entry.timestamp === null) return undefined;
+            const t = new Date(entry.timestamp).getTime();
+            return Number.isFinite(t) ? t : undefined;
+          })();
+          pushMcpEntry(entry.tool_name, argsObj, resultStr, entryDurMs, entryStartMsForMcp);
         }
 
         // Detect ace_search calls — extract returned pattern IDs + server
         // session_id from the (MCP-wrapped) result_json. Latest call wins.
         const tn = String(entry.tool_name || '');
         if (/ace_search/i.test(tn) && entry.result_json) {
-          const { results, sessionId } = unwrapAceSearchResultJson(entry.result_json);
+          const { results, sessionId, retrievalId: rid } = unwrapAceSearchResultJson(entry.result_json);
           if (Array.isArray(results) && results.length > 0) {
             for (const p of results) { if (p && p.id) playbookUsed.add(String(p.id)); }
             // Truncate content to keep payload reasonable.
@@ -314,6 +346,11 @@ function unwrapAceSearchResultJson(rawResultJson) {
             });
           }
           if (sessionId) serverSessionId = sessionId;
+          // F-080 fallback: persist retrieval_id from JSONL (MCP proxy path B)
+          // so it is available when the pre-tool-use sidecar was never written
+          // (non-Unix, cold start, or hook not registered).
+          // Presence check — undefined means 1.0/absent; null means legacy cold.
+          if (rid !== undefined && rid !== null) jsonlRetrievalId = rid;
         }
       }
     }
@@ -327,14 +364,14 @@ function unwrapAceSearchResultJson(rawResultJson) {
     function popMcpResult(toolName, argsObj) {
       const fp = String(toolName) + '\\u0001' + canonicalArgs(argsObj);
       const arr = mcpByFingerprint.get(fp);
-      if (arr && arr.length > 0) return arr.shift().result;
+      if (arr && arr.length > 0) return arr.shift();
       // Fallback: same tool name, args may differ slightly between transcript
       // and mcp_trajectory (e.g. Cursor reformats nested objects). Take the
       // next un-matched call for that tool.
       const tk = String(toolName);
       const byTool = mcpByTool.get(tk);
-      if (byTool && byTool.length > 0) return byTool.shift().result;
-      return '';
+      if (byTool && byTool.length > 0) return byTool.shift();
+      return { result: '', duration_ms: undefined, entry_start_ms: undefined };
     }
 
     function isMcpToolName(name) {
@@ -350,7 +387,6 @@ function unwrapAceSearchResultJson(rawResultJson) {
         const lines = raw.split('\\n').filter(l => l.trim().length > 0);
         let firstUser = '';
         let stepNum = 0;
-        const nowMs = Date.now();
         for (const line of lines) {
           let entry;
           try { entry = JSON.parse(line); } catch (_) { continue; }
@@ -371,6 +407,26 @@ function unwrapAceSearchResultJson(rawResultJson) {
           }
           if (role === 'user' && !firstUser) firstUser = textContent;
           if (role === 'assistant' && textContent) lastAssistant = textContent;
+
+          // Derive per-entry start_ms from ISO timestamp field (multi-key fallback).
+          // OMIT entirely when no timestamp is present — Date.now() would make
+          // all steps appear instantaneous and is not a valid substitute.
+          // Use presence checks (not truthiness) — 0 is a valid Unix epoch value.
+          let entryStartMs;
+          if (entry) {
+            const entryTsRaw = ('timestamp' in entry && entry.timestamp !== undefined && entry.timestamp !== null)
+              ? entry.timestamp
+              : ('created_at' in entry && entry.created_at !== undefined && entry.created_at !== null)
+              ? entry.created_at
+              : ('ts' in entry && entry.ts !== undefined && entry.ts !== null)
+              ? entry.ts
+              : undefined;
+            if (entryTsRaw !== undefined) {
+              const t = new Date(entryTsRaw).getTime();
+              if (Number.isFinite(t)) entryStartMs = t;
+            }
+          }
+          const stepTiming = entryStartMs !== undefined ? { start_ms: entryStartMs } : {};
 
           // Walk every content block — multiple tool_use per message allowed.
           if (Array.isArray(content)) {
@@ -394,14 +450,26 @@ function unwrapAceSearchResultJson(rawResultJson) {
                   }
                 }
               } catch (_) {}
-              const result = isMcpToolName(tname) ? popMcpResult(tname, argsObj) : '';
+              const mcpEntry = isMcpToolName(tname) ? popMcpResult(tname, argsObj) : null;
+              const result = mcpEntry ? (mcpEntry.result || '') : '';
+              // For MCP steps: if the JSONL entry carried timing, prefer it over
+              // the transcript entry timestamp (JSONL has richer per-call data).
+              let resolvedStepTiming = stepTiming;
+              if (mcpEntry && (mcpEntry.entry_start_ms !== undefined || mcpEntry.duration_ms !== undefined)) {
+                const mStartMs = mcpEntry.entry_start_ms !== undefined ? mcpEntry.entry_start_ms : stepTiming.start_ms;
+                const mDurMs = mcpEntry.duration_ms;
+                resolvedStepTiming = {
+                  ...(mStartMs !== undefined ? { start_ms: mStartMs } : {}),
+                  ...(mDurMs !== undefined ? { duration_ms: mDurMs } : {}),
+                  ...(mStartMs !== undefined && mDurMs !== undefined ? { end_ms: mStartMs + mDurMs } : {}),
+                };
+              }
               trajectory.push({
                 step: stepNum,
                 action: tname,
                 args: truncatedArgs,
-                result: result || '',
-                start_ms: nowMs,
-                end_ms: nowMs,
+                result,
+                ...resolvedStepTiming,
               });
             }
           }
@@ -419,7 +487,6 @@ function unwrapAceSearchResultJson(rawResultJson) {
       const raw = fs.readFileSync(jsonlPath, 'utf-8');
       const lines = raw.split('\\n').filter(l => l.trim().length > 0);
       let stepNum = 0;
-      const nowMs = Date.now();
       for (const line of lines) {
         let entry;
         try { entry = JSON.parse(line); } catch (_) { continue; }
@@ -435,18 +502,64 @@ function unwrapAceSearchResultJson(rawResultJson) {
           resultStr = entry.tool_output;
         }
         if (resultStr.length > 2000) resultStr = resultStr.slice(0, 2000) + '…';
+        // Derive start_ms from entry.timestamp when present; OMIT when absent.
+        // Use presence check (not truthiness) — timestamp:0 is a valid Unix epoch.
+        let stepStartMs;
+        if (entry.timestamp !== undefined && entry.timestamp !== null) {
+          const t = new Date(entry.timestamp).getTime();
+          if (Number.isFinite(t)) stepStartMs = t;
+        }
+        // Derive duration_ms from the entry's \`duration\` (float ms) field,
+        // independently of timestamp.
+        const stepDurMs = durMsFromEntry(entry);
         trajectory.push({
           step: stepNum,
           action: String(entry.tool_name).slice(0, 200),
           args: argsObj,
           result: resultStr,
-          start_ms: nowMs,
-          end_ms: nowMs,
+          ...(stepStartMs !== undefined ? { start_ms: stepStartMs } : {}),
+          ...(stepDurMs !== undefined ? { duration_ms: stepDurMs } : {}),
+          ...(stepStartMs !== undefined && stepDurMs !== undefined ? { end_ms: stepStartMs + stepDurMs } : {}),
         });
       }
     }
 
     if (!task) task = 'cursor-task-' + convId.slice(0, 8);
+
+    // ----- F-080: read retrieval sidecar for retrieval_id + applied_log_ids -----
+    // The pre-tool-use bash hook writes <gen_id>.retrieval-ctx.json to the
+    // per-conv tasks dir after each search. We read the most-recent one here
+    // (sorted alphabetically → lexicographic gen_id order, most recent last).
+    // retrievalId: undefined → omitted from trace (NEVER emit null/undefined).
+    // appliedLogIds: intersection of playbookUsed pattern ids with the log_id_map,
+    //   mapped to retrieval_log_id ints, excluding null (cold/shadow LinUCB rows).
+    let retrievalId = undefined;
+    let appliedLogIds = undefined;
+    try {
+      const convDir = path.dirname(jsonlPath);
+      const ctxFiles = fs.readdirSync(convDir)
+        .filter(function(f) { return f.endsWith('.retrieval-ctx.json'); })
+        .sort()
+        .reverse();  // most-recent gen_id first (lexicographic)
+      if (ctxFiles.length > 0) {
+        const ctx = JSON.parse(fs.readFileSync(path.join(convDir, ctxFiles[0]), 'utf-8'));
+        // Presence check — ctx.retrieval_id may be null (legacy/cold) → omit.
+        if (ctx.retrieval_id !== undefined && ctx.retrieval_id !== null) {
+          retrievalId = ctx.retrieval_id;
+        }
+        if (ctx.log_id_map && playbookUsed.size > 0) {
+          const ids = Array.from(playbookUsed)
+            .map(function(id) { return ctx.log_id_map[id]; })
+            .filter(function(n) { return typeof n === 'number'; });
+          if (ids.length > 0) appliedLogIds = ids;
+        }
+      } else if (jsonlRetrievalId !== undefined) {
+        // Sidecar absent (hook never ran) — fall back to retrieval_id captured
+        // from the JSONL result_json (MCP proxy path B). No log_id_map available
+        // so applied_log_ids stays undefined (omitted from trace).
+        retrievalId = jsonlRetrievalId;
+      }
+    } catch (_) { /* best-effort — sidecar absent or unreadable */ }
 
     // ----- Git context (best-effort) -----
     const git = gitInfo();
@@ -469,6 +582,10 @@ function unwrapAceSearchResultJson(rawResultJson) {
       // v0.5.0-dev.14: full pattern payload for server-side helpfulness scoring.
       received_patterns: lastReceivedPatterns,
       git: { branch: git.branch, commit_hash: git.hash, isRepo: git.hash !== 'unknown' },
+      // F-080: retrieval attribution fields (ACE 1.5 SDK 3.2.0).
+      // Conditionally spread — fields OMITTED entirely when absent (not null/undefined).
+      ...(retrievalId !== undefined ? { retrieval_id: retrievalId } : {}),
+      ...(appliedLogIds !== undefined ? { applied_log_ids: appliedLogIds } : {}),
     };
 
     debugLog(jsonlPath, 'trace_built session_id=' + sessionId.slice(0, 8) +
@@ -490,18 +607,17 @@ function unwrapAceSearchResultJson(rawResultJson) {
       time_saved_min = parseInt(m[1], 10) || 0;
       reason = String(m[2] || '').trim().slice(0, 200);
     }
-    // Map minutes → helpful_pct buckets.
+    // Map minutes → helpful_pct buckets (legacy fallback for 1.0 servers).
     if (time_saved_min >= 30) helpful_pct = 80;
     else if (time_saved_min >= 15) helpful_pct = 60;
     else if (time_saved_min >= 5) helpful_pct = 30;
     else if (time_saved_min > 0) helpful_pct = 15;
 
-    // Server learning_statistics override if provided.
-    if (learning && learning.learning_statistics) {
-      const stats = learning.learning_statistics;
-      if (typeof stats.helpful_pct === 'number') helpful_pct = stats.helpful_pct;
-    }
-
+    // v0.5.0-dev.25 (ACE 1.5): prefer reward fields from LearningResponse
+    // (cumulative_v15_reward_delta, reward_tier, patterns_rewarded) when the
+    // server populates them. Use presence check (not truthiness) — 0 is a
+    // valid reward value and MUST take the 1.5 path.
+    // Fall back to helpful_pct bucket for 1.0 servers / unpatched server.
     // v0.5.0-dev.19 Task A: walk up from tasks/<conv>/ (or legacy sessions/
     // <conv>/) if needed so the ROI marker lives at the top-level
     // .cursor/ace/ (next prompt's pre-tool hook reads it from there).
@@ -512,12 +628,22 @@ function unwrapAceSearchResultJson(rawResultJson) {
       aceDir = path.dirname(path.dirname(aceDir));
     }
     const reviewPath = path.join(aceDir, 'ace-review-result.json');
-    const review = {
-      helpful_pct,
-      time_saved_min,
-      reason,
-      timestamp: new Date().toISOString(),
-    };
+    const reviewBase = { time_saved_min, reason, timestamp: new Date().toISOString() };
+    // Use typeof === 'number' (not !== undefined) so a server error-path response
+    // that sends cumulative_v15_reward_delta: null correctly routes to the helpful_pct
+    // fallback branch. null !== undefined is true in JS, so the looser check would
+    // write { reward_delta: null } and discard any TIME_SAVED-derived helpful_pct —
+    // violating the backward-compat contract ("absent/null OMITTED on emit").
+    // reward_delta is guaranteed a number by the branch guard. reward_tier and
+    // patterns_rewarded are conditionally merged — a 1.5 server may send a numeric
+    // reward_delta but null/absent sub-fields (error-shadow / partial response);
+    // the loose null-check omits them entirely so we never emit literal null.
+    const review = (learning && typeof learning.cumulative_v15_reward_delta === 'number')
+      ? Object.assign({}, reviewBase,
+          { reward_delta: learning.cumulative_v15_reward_delta },
+          learning.reward_tier != null ? { reward_tier: learning.reward_tier } : {},
+          learning.patterns_rewarded != null ? { patterns_rewarded: learning.patterns_rewarded } : {})
+      : Object.assign({}, reviewBase, { helpful_pct });
     try { fs.writeFileSync(reviewPath, JSON.stringify(review, null, 2), 'utf-8'); } catch (_) {}
 
     debugLog(jsonlPath, 'exit_0 stored=' + !!(learning && learning.stored) + ' time_saved=' + time_saved_min);

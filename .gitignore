@@ -28,6 +28,9 @@ Thumbs.db
 # Cursor user data (may contain tokens)
 .cursor/
 
+# Codex review artifacts (created by `codex exec review`)
+.codex/
+
 # Environment files
 .env
 .env.*

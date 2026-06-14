@@ -16,7 +16,7 @@
  *  8. Bash hardening preserved (jq char-truncation, sync timeout, flag-after-success).
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -25,6 +25,8 @@ import {
 	getMcpTrackScriptContent,
 	getAcePatternsRuleContent,
 	getDomainSearchRuleContent,
+	getPreToolUseScriptContent,
+	getSearchHelperContent,
 } from '../../ace/hookScripts';
 
 /** Read the bash postToolUse hook script content out of extension.ts.
@@ -128,10 +130,13 @@ describe('v0.4.1 helper.js (in-process @ace-sdk/core) approach', () => {
 		expect(helper).toMatch(/searchPatterns/);
 	});
 
-	it('getSearchHelperContent calls ensureValidToken pre-flight (per SDK contract)', async () => {
+	it('getSearchHelperContent does NOT call the removed ensureValidToken (not on AceClient prototype)', async () => {
 		const mod = await import('../../ace/hookScripts');
 		const helper = (mod as any).getSearchHelperContent() as string;
-		expect(helper).toMatch(/ensureValidToken/);
+		// ensureValidToken was removed in v0.5.0-dev.6 — it is not a real AceClient
+		// method, so a live call would throw at runtime. An explanatory comment may
+		// still mention the name; what must never reappear is an actual `.ensureValidToken(` call.
+		expect(helper).not.toMatch(/\.ensureValidToken\s*\(/);
 	});
 
 	it('getSearchHelperContent maps errors to stable exit codes (2/3/4 or 5)', async () => {
@@ -180,6 +185,24 @@ describe('v0.4.1 helper.js (in-process @ace-sdk/core) approach', () => {
 		const pkgPath = path.resolve(__dirname, '../../../package.json');
 		const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
 		expect(pkg.dependencies['@ace-sdk/core']).toBeDefined();
+	});
+
+	it('@ace-sdk/core version starts with ^3 (ACE 1.5 requirement)', () => {
+		const pkgPath = path.resolve(__dirname, '../../../package.json');
+		const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+		const ver: string = pkg.dependencies['@ace-sdk/core'];
+		expect(ver, '@ace-sdk/core must be pinned to ^3.x.x').toMatch(/^\^3\./);
+	});
+
+	it('@ace-sdk/mcp is NOT a declared dependency in package.json (npx-fetched at runtime)', () => {
+		const pkgPath = path.resolve(__dirname, '../../../package.json');
+		const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+		const allDeps = {
+			...(pkg.dependencies || {}),
+			...(pkg.devDependencies || {}),
+			...(pkg.peerDependencies || {}),
+		};
+		expect(allDeps['@ace-sdk/mcp']).toBeUndefined();
 	});
 
 	it('package.json version is at least 0.4.1 (v0.4.1+ contract)', () => {
@@ -441,6 +464,122 @@ describe('v0.4.1 postToolUse hook script — syntax + smoke', () => {
 });
 
 // ============================================================================
+// F-080: --task-intent passed from bash heuristic into searchPatterns()
+// ============================================================================
+
+describe('F-080 search helper: VALID_INTENTS allowlist + conditional spread', () => {
+	it('getSearchHelperContent reads process.argv[3] as rawIntent', () => {
+		const helper = getSearchHelperContent();
+		expect(helper).toMatch(/process\.argv\[3\]/);
+	});
+
+	it('pre-tool-use heuristic maps real prompts to the correct task_intent bucket (behavioral)', () => {
+		// Extract the ACTUAL heuristic block from the generated pre-tool-use script
+		// and run it in isolation, so we exercise the real regexes end-to-end (a
+		// typo'd alternation that still parses would be caught here).
+		const script = getPreToolUseScriptContent();
+		const start = script.indexOf('# Heuristic: derive task_intent');
+		const end = script.indexOf('# routine is the catch-all');
+		expect(start).toBeGreaterThan(-1);
+		expect(end).toBeGreaterThan(start);
+		const heuristic = script.slice(start, end);
+
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-intent-'));
+		try {
+			const runner = path.join(tmp, 'intent.sh');
+			fs.writeFileSync(runner, `#!/bin/bash\nprompt="$1"\n${heuristic}\nprintf '%s' "$task_intent"\n`, { mode: 0o755 });
+			const intentFor = (p: string) => spawnSync('bash', [runner, p], { encoding: 'utf-8' }).stdout;
+
+			expect(intentFor('Please refactor the auth module')).toBe('refactor');
+			expect(intentFor('rename the helper and extract a function')).toBe('refactor');
+			expect(intentFor('write a test that verifies coverage')).toBe('spec_strict');
+			expect(intentFor('explain how does the cache work')).toBe('explore');
+			// catch-all → omitted entirely (server default preserved)
+			expect(intentFor('add a shiny new button to the page')).toBe('');
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('getSearchHelperContent defines VALID_INTENTS allowlist containing the four union literals', () => {
+		const helper = getSearchHelperContent();
+		expect(helper).toMatch(/VALID_INTENTS/);
+		expect(helper).toMatch(/refactor/);
+		expect(helper).toMatch(/routine/);
+		expect(helper).toMatch(/explore/);
+		expect(helper).toMatch(/spec_strict/);
+	});
+
+	it('getSearchHelperContent validates rawIntent against VALID_INTENTS (includes check)', () => {
+		const helper = getSearchHelperContent();
+		// Must use .includes() to gate the raw value
+		expect(helper).toMatch(/VALID_INTENTS\.includes/);
+	});
+
+	it('getSearchHelperContent conditionally spreads task_intent (omits when absent)', () => {
+		const helper = getSearchHelperContent();
+		// Conditional spread pattern: ...(taskIntent ? { task_intent: taskIntent } : {})
+		expect(helper).toMatch(/task_intent.*taskIntent|taskIntent.*task_intent/);
+		// Must NOT have a bare `task_intent: undefined` or always-present assignment
+		expect(helper).not.toMatch(/task_intent\s*:\s*undefined/);
+	});
+
+	it('getSearchHelperContent passes task_intent to searchPatterns call site', () => {
+		const helper = getSearchHelperContent();
+		// The searchPatterns call must reference task_intent (via spread)
+		const searchBlock = helper.slice(helper.indexOf('searchPatterns('));
+		expect(searchBlock).toMatch(/task_intent/);
+	});
+});
+
+describe('F-080 bash heuristic: intent bucket derivation in getPreToolUseScriptContent', () => {
+	it('bash hook contains a task_intent variable assignment', () => {
+		const script = getPreToolUseScriptContent();
+		expect(script).toMatch(/task_intent=/);
+	});
+
+	it('bash hook heuristic matches refactor keywords (refactor|rename|extract|restructure|move|reorganize)', () => {
+		const script = getPreToolUseScriptContent();
+		expect(script).toMatch(/refactor.*rename.*extract|refactor|rename|extract|restructure|move|reorganize/);
+		// The bucket assigned for those keywords must be "refactor"
+		expect(script).toMatch(/task_intent="refactor"/);
+	});
+
+	it('bash hook heuristic matches spec_strict keywords (test|spec|coverage|assert|verify)', () => {
+		const script = getPreToolUseScriptContent();
+		expect(script).toMatch(/spec_strict/);
+		expect(script).toMatch(/task_intent="spec_strict"/);
+	});
+
+	it('bash hook heuristic matches explore keywords (explore|understand|explain|what does|how does|summarize)', () => {
+		const script = getPreToolUseScriptContent();
+		expect(script).toMatch(/explore/);
+		expect(script).toMatch(/task_intent="explore"/);
+	});
+
+	it('bash hook passes task_intent as second arg to node helper when non-empty', () => {
+		const script = getPreToolUseScriptContent();
+		// Must pass "$task_intent" as second positional arg to node "$helper"
+		expect(script).toMatch(/node\s+"?\$helper"?\s+"?\$prompt"?[\s\S]{0,100}\$task_intent/);
+	});
+
+	it('bash hook omits task_intent arg when variable is empty (conditional invocation)', () => {
+		const script = getPreToolUseScriptContent();
+		// Must have an if/else or [ -n "$task_intent" ] guard before node call
+		expect(script).toMatch(/\[\s*-n\s+"?\$task_intent"?\s*\]|\[\s*-z\s+"?\$task_intent"?\s*\]/);
+	});
+
+	it('bash hook passes bash -n syntax check after heuristic addition', () => {
+		const script = getPreToolUseScriptContent();
+		const tmp = path.join(os.tmpdir(), `ace-ptu-intent-${Date.now()}.sh`);
+		fs.writeFileSync(tmp, script, { mode: 0o755 });
+		try {
+			execFileSync('bash', ['-n', tmp], { stdio: 'pipe' });
+		} finally {
+			fs.unlinkSync(tmp);
+		}
+	});
+});
+
+// ============================================================================
 // Bonus: stale-test sanity (caveman-comment intent, see test plan §5.4)
 // ============================================================================
 
@@ -454,5 +593,46 @@ describe('v0.4.1 rule getters still produce non-empty content (no regression)', 
 	it('ace_track_mcp.sh still writes search-done flag for ace_search', () => {
 		const script = getMcpTrackScriptContent();
 		expect(script).toContain('search-done');
+	});
+});
+
+// ============================================================================
+// u12-release: version + dep lock regression guards
+// ============================================================================
+
+describe('u12-release: package.json version + dep lock guards', () => {
+	const pkgPath = path.resolve(__dirname, '../../../package.json');
+	let pkg: any;
+	beforeAll(() => { pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8')); });
+
+	it('package.json version is exactly 0.6.0 (ACE 1.5 release)', () => {
+		// This is the unique assertion for u12-release: version was 0.5.2 before this commit.
+		expect(pkg.version).toBe('0.6.0');
+	});
+
+	// NOTE: @ace-sdk/core ^3.2.0 and better-sqlite3 ^12.8.0 were already at these
+	// values in HEAD~1 (pinned by prior migration units). Asserting their exact values
+	// here would be a tautology — those tests are omitted; they are covered by the
+	// dep-lock unit that set them.
+
+	it('CHANGELOG.md contains the 0.6.0 entry header', () => {
+		const changelogPath = path.resolve(__dirname, '../../../CHANGELOG.md');
+		const changelog = fs.readFileSync(changelogPath, 'utf-8');
+		expect(changelog).toContain('## [0.6.0]');
+	});
+
+	it('CHANGELOG.md 0.6.0 section mentions ACE 1.5 native migration and backward-compat receive path', () => {
+		const changelogPath = path.resolve(__dirname, '../../../CHANGELOG.md');
+		const changelog = fs.readFileSync(changelogPath, 'utf-8');
+		// Extract only the 0.6.0 section (text between '## [0.6.0]' and the next '## [').
+		const sectionMatch = changelog.match(/## \[0\.6\.0\]([\s\S]*?)(?=\n## \[)/);
+		expect(sectionMatch, '## [0.6.0] section not found in CHANGELOG').not.toBeNull();
+		const section060 = sectionMatch![1];
+		// Must state ACE 1.5 migration within the 0.6.0 section.
+		expect(section060).toMatch(/ACE 1\.5.*[Mm]igration|[Mm]igration.*ACE 1\.5/);
+		// Must explicitly mention the receive/accept path for 1.0 backward compat — anchored
+		// to the 0.6.0 section so older entries (e.g. "All hooks receive Cursor's common schema")
+		// cannot produce a false pass.
+		expect(section060).toMatch(/receive path.*1\.0|1\.0.*receive path|accept.*1\.0.*receive|receive.*accept.*1\.0/i);
 	});
 });

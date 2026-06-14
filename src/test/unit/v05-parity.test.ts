@@ -212,3 +212,53 @@ describe('v0.5.0 TASK 6 — runtime-settings.json privacy toggle', () => {
 		expect(script).toContain('shareRawPromptsForRetrievalAnalysis');
 	});
 });
+
+// ===========================================================================
+// u09-rewardsignal — v05-parity source assertions
+// ===========================================================================
+
+describe('u09-rewardsignal — learn helper source assertions', () => {
+	it('helper source references reward_delta (ACE 1.5 reward vocabulary)', () => {
+		const helper = getLearnHelperContent();
+		expect(helper).toContain('reward_delta');
+	});
+
+	it('helper source references reward_tier', () => {
+		const helper = getLearnHelperContent();
+		expect(helper).toContain('reward_tier');
+	});
+
+	it('helper source references patterns_rewarded', () => {
+		const helper = getLearnHelperContent();
+		expect(helper).toContain('patterns_rewarded');
+	});
+
+	it('helper source still contains helpful_pct (fallback for 1.0 servers)', () => {
+		const helper = getLearnHelperContent();
+		// helpful_pct is the TIME_SAVED bucket fallback — must still be present
+		expect(helper).toContain('helpful_pct');
+	});
+
+	it('helper source uses cumulative_v15_reward_delta for 1.5 detection (NOT stats.helpful_pct)', () => {
+		const helper = getLearnHelperContent();
+		// Must reference the actual 1.5 field from LearningResponse
+		expect(helper).toContain('cumulative_v15_reward_delta');
+		// Dead override path (helpful_pct not in LearningStatistics) must be gone
+		expect(helper).not.toMatch(/stats\.helpful_pct/);
+	});
+
+	it('legacy similar_patterns is still parsed (backward compat for 1.0 server ace_search)', () => {
+		const helper = getLearnHelperContent();
+		// unwrapAceSearchResultJson must still handle similar_patterns key
+		expect(helper).toContain('similar_patterns');
+	});
+
+	it('expanded stubs (inner.expanded) are NOT forwarded to received_patterns', () => {
+		const helper = getLearnHelperContent();
+		// The helper must NOT reference inner.expanded as a source for lastReceivedPatterns.
+		// Only inner.results / inner.similar_patterns are valid pattern sources.
+		// Regression guard for issue #12 (graph-cache neighbor stubs).
+		expect(helper).not.toMatch(/lastReceivedPatterns\s*=.*expanded/);
+		expect(helper).not.toMatch(/inner\.expanded/);
+	});
+});

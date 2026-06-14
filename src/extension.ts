@@ -835,7 +835,8 @@ async function initializeWorkspaceForFolder(
 	forceUpdate: boolean = false
 ): Promise<InitSummary> {
 	// v0.5.0-dev.22 — capture pre-init version so we can report from→to.
-	const versionFrom = readWorkspaceVersion(folder);
+	// readWorkspaceVersion returns string|null; InitSummary.versionFrom is string|undefined.
+	const versionFrom = readWorkspaceVersion(folder) ?? undefined;
 
 	const summary: InitSummary = {
 		migrated: [],
@@ -1077,7 +1078,7 @@ async function registerMcpServer(context: vscode.ExtensionContext): Promise<void
 	// `npx @ace-sdk/mcp`. Proxy filters tools/list to hide ace_get_playbook +
 	// ace_learn from the AI's tool list. AI no see, AI no call.
 	let mcpCommand = 'npx';
-	let mcpArgs: string[] = ['-y', '@ace-sdk/mcp'];
+	let mcpArgs: string[] = ['-y', '@ace-sdk/mcp@^3.1.1'];
 	try {
 		const helperDir = path.join(context.extensionPath, 'scripts');
 		fs.mkdirSync(helperDir, { recursive: true });
@@ -1405,7 +1406,11 @@ if ($toolName -match "ace_learn") {
         $timeSaved = $Matches[1].Trim()
         $reason = if ($Matches[2]) { $Matches[2].Trim().Substring(0, [Math]::Min(200, $Matches[2].Trim().Length)) } else { "" }
 
-        # Extract numeric minutes for helpful_pct
+        # Extract numeric minutes for initial helpful_pct estimate.
+        # Note: ace_learn_helper.js overwrites this file after the /traces call
+        # with reward fields (reward_delta, reward_tier, patterns_rewarded) when
+        # the ACE 1.5 server populates cumulative_v15_reward_delta in its response.
+        # This initial write is the legacy-compatible fallback for ACE 1.0 servers.
         if ($timeSaved -match "(\\d+)") {
             $minutes = [int]$Matches[1]
         } else {
@@ -1418,7 +1423,7 @@ if ($toolName -match "ace_learn") {
         elseif ($minutes -gt 0) { $helpfulPct = 15 }
         else { $helpfulPct = 0 }
 
-        # Write review result (overwrites previous)
+        # Write initial review result (may be overwritten by ace_learn_helper.js)
         $reviewResult = @{
             helpful_pct = $helpfulPct
             time_saved = $timeSaved
