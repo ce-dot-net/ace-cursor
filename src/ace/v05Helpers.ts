@@ -634,12 +634,15 @@ function unwrapAceSearchResultJson(rawResultJson) {
     // fallback branch. null !== undefined is true in JS, so the looser check would
     // write { reward_delta: null } and discard any TIME_SAVED-derived helpful_pct —
     // violating the backward-compat contract ("absent/null OMITTED on emit").
+    // reward_delta is guaranteed a number by the branch guard. reward_tier and
+    // patterns_rewarded are conditionally merged — a 1.5 server may send a numeric
+    // reward_delta but null/absent sub-fields (error-shadow / partial response);
+    // the loose null-check omits them entirely so we never emit literal null.
     const review = (learning && typeof learning.cumulative_v15_reward_delta === 'number')
-      ? Object.assign({}, reviewBase, {
-          reward_delta: learning.cumulative_v15_reward_delta,
-          reward_tier: learning.reward_tier,
-          patterns_rewarded: learning.patterns_rewarded,
-        })
+      ? Object.assign({}, reviewBase,
+          { reward_delta: learning.cumulative_v15_reward_delta },
+          learning.reward_tier != null ? { reward_tier: learning.reward_tier } : {},
+          learning.patterns_rewarded != null ? { patterns_rewarded: learning.patterns_rewarded } : {})
       : Object.assign({}, reviewBase, { helpful_pct });
     try { fs.writeFileSync(reviewPath, JSON.stringify(review, null, 2), 'utf-8'); } catch (_) {}
 

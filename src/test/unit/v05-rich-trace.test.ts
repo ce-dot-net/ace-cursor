@@ -2007,6 +2007,7 @@ function writeHelperWithRewardStub(opts: {
 	returnReward?: { cumulative_v15_reward_delta: number; reward_tier: string; patterns_rewarded: number };
 	returnLegacy?: boolean; // returns { stored: true } with no reward fields
 	returnNull?: boolean;   // returns { stored: true, cumulative_v15_reward_delta: null } — error-path server
+	returnRewardPartial?: boolean; // numeric reward_delta but null reward_tier/patterns_rewarded — partial 1.5 response
 } = {}): { tmpDir: string; helperPath: string; traceFile: string; debugLogPath: string } {
 	const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-reward-'));
 	const aceDir = path.join(tmpDir, '.cursor', 'ace');
@@ -2018,9 +2019,11 @@ function writeHelperWithRewardStub(opts: {
 
 	const returnVal = opts.returnReward
 		? JSON.stringify({ stored: true, cumulative_v15_reward_delta: opts.returnReward.cumulative_v15_reward_delta, reward_tier: opts.returnReward.reward_tier, patterns_rewarded: opts.returnReward.patterns_rewarded })
-		: opts.returnNull
-			? JSON.stringify({ stored: true, cumulative_v15_reward_delta: null, reward_tier: 'cold' })
-			: 'JSON.stringify({ stored: true })';
+		: opts.returnRewardPartial
+			? JSON.stringify({ stored: true, cumulative_v15_reward_delta: 0.5, reward_tier: null, patterns_rewarded: null })
+			: opts.returnNull
+				? JSON.stringify({ stored: true, cumulative_v15_reward_delta: null, reward_tier: 'cold' })
+				: 'JSON.stringify({ stored: true })';
 
 	const stubBody = `
 class AceApiError extends Error { constructor(m, status){ super(m); this.name='AceApiError'; this.status=status; } }
@@ -2033,7 +2036,7 @@ class AceClient {
   constructor(c){ this.c = c; }
   async storeExecutionTrace(trace){
     require('fs').writeFileSync(${JSON.stringify(traceFile)}, JSON.stringify(trace, null, 2));
-    return ${(opts.returnReward || opts.returnNull) ? returnVal : '{ stored: true }'};
+    return ${(opts.returnReward || opts.returnNull || opts.returnRewardPartial) ? returnVal : '{ stored: true }'};
   }
 }
 module.exports = { loadConfig, AceClient, AceApiError, TokenExpiredError, isTokenExpiredError };
@@ -2079,6 +2082,21 @@ describe('u09-rewardsignal — learn helper writes reward fields to ace-review-r
 		expect(review.patterns_rewarded).toBe(2);
 		// Must NOT contain helpful_pct when reward fields are present
 		expect('helpful_pct' in review).toBe(false);
+		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
+	});
+
+	it('OMITS reward_tier/patterns_rewarded when server sends them as null (numeric reward_delta only)', () => {
+		// Partial 1.5 response: a valid numeric reward_delta but null sub-fields
+		// (error-shadow). The omit-on-emit contract forbids writing literal null.
+		const ctx = writeHelperWithRewardStub({ returnRewardPartial: true });
+		const jsonl = writeSimpleTrajectory(ctx.tmpDir, 'CONV-RW-PARTIAL');
+		const r = runHelper({ tmpDir: ctx.tmpDir, helperPath: ctx.helperPath, convId: 'CONV-RW-PARTIAL', jsonlPath: jsonl });
+		expect(r.status, `helper exit (stderr: ${r.stderr})`).toBe(0);
+		const review = JSON.parse(fs.readFileSync(path.join(ctx.tmpDir, '.cursor', 'ace', 'ace-review-result.json'), 'utf-8'));
+		expect(review.reward_delta).toBe(0.5);
+		// Null sub-fields must be OMITTED entirely, never written as null.
+		expect('reward_tier' in review).toBe(false);
+		expect('patterns_rewarded' in review).toBe(false);
 		fs.rmSync(ctx.tmpDir, { recursive: true, force: true });
 	});
 

@@ -1313,7 +1313,7 @@ export class StatusPanel {
 				.map(([domain, count]: [string, any]) => `
 				<div class="domain-item">
 					<div class="domain-name">${formatDomainName(domain)}</div>
-					<div class="domain-count">${count}</div>
+					<div class="domain-count">${Number.isFinite(Number(count)) ? Number(count) : 0}</div>
 				</div>
 			`).join('')}
 		</div>

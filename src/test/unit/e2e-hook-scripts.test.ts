@@ -43,7 +43,7 @@ function runBashScript(scriptPath: string, stdin: string = '', cwd?: string): { 
 		input: stdin,
 		cwd: cwd || path.dirname(scriptPath),
 		encoding: 'utf-8',
-		timeout: 10000,
+		timeout: 20000,
 		env: { ...process.env, PATH: process.env.PATH },
 	});
 	return {
@@ -58,7 +58,7 @@ function runPwshScript(scriptPath: string, stdin: string = '', cwd?: string): { 
 		input: stdin,
 		cwd: cwd || path.dirname(scriptPath),
 		encoding: 'utf-8',
-		timeout: 10000,
+		timeout: 20000,
 		env: { ...process.env, PATH: process.env.PATH },
 	});
 	return {

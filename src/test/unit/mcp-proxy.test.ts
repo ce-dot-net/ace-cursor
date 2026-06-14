@@ -147,6 +147,12 @@ function makeFilterLine(opts: { writeDir?: string; throwOnWrite?: boolean } = {}
 						inner.query = inner.query.slice(0, 64) + '…';
 						out = rebuild();
 					}
+					// 4. Clamp a pathologically long session_id (only remaining unbounded value).
+					if (byteLen(out) > WIRE_LIMIT && typeof inner.session_id === 'string' && inner.session_id.length > 64) {
+						persist();
+						inner.session_id = inner.session_id.slice(0, 64) + '…';
+						out = rebuild();
+					}
 					return out;
 				}
 			}
@@ -482,6 +488,39 @@ EOF
 			expect(outInner.results).toHaveLength(2);
 			expect(outInner).not.toHaveProperty('expanded');
 			expect(outInner.full_results_path).toBeTruthy();
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('baked proxy preserves match_factors inline through the SLOW (truncation) path', () => {
+		// The fast-path test only proves passthrough; this drives real truncation so
+		// the baked script's slow-path match_factors preservation is exercised e2e.
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-baked-mf-slow-'));
+		try {
+			const inner = {
+				query: 'q', threshold: 0.7, count: 30, session_id: 'sid-mf-slow',
+				results: Array.from({ length: 30 }, (_, i) => ({
+					id: 'p' + i, content: 'x'.repeat(250), confidence: 0.9,
+					match_factors: { semantic_score: 0.9, ucb_score: 0.9, retrieval_log_id: i },
+				})),
+			};
+			const { rawLine, outInner } = runBakedProxy(tmp, inner);
+			expect(Buffer.byteLength(rawLine, 'utf8')).toBeLessThanOrEqual(8192);
+			expect(outInner.results.length).toBeGreaterThan(0);
+			expect(outInner.results.length).toBeLessThan(30); // truncated
+			expect(outInner.results[0]).toHaveProperty('match_factors'); // preserved on the slow path
+			expect(outInner.full_results_path).toBeTruthy();
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('baked proxy clamps a pathologically long session_id (line ≤ 8 KB)', () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-baked-sid-'));
+		try {
+			const inner = {
+				query: 'q', threshold: 0.7, count: 1, session_id: 'S'.repeat(8000),
+				results: [{ id: 'p', content: 'ok', confidence: 0.9 }],
+			};
+			const { rawLine } = runBakedProxy(tmp, inner);
+			expect(Buffer.byteLength(rawLine, 'utf8')).toBeLessThanOrEqual(8192);
 		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 	});
 });
@@ -1106,6 +1145,19 @@ describe('ACE MCP proxy — u10-expanded (match_factors + expanded neighbors)', 
 			// ~2200 emoji: char length ~4600 but ~9000 bytes on the wire.
 			const innerRaw = { query: '😀'.repeat(2200), threshold: 0.7, results: [{ id: 'p', name: 'n', content: 'ok' }], count: 1, session_id: 'sid-utf8' };
 			const resp = JSON.stringify({ jsonrpc: '2.0', id: 8, result: { content: [{ type: 'text', text: JSON.stringify(innerRaw) }] } });
+			const lineOut = filter(resp);
+			expect(Buffer.byteLength(lineOut, 'utf8')).toBeLessThanOrEqual(8192);
+		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+	});
+
+	it('clamps a pathologically long session_id so the line stays ≤ 8 KB (provably bounded)', () => {
+		// session_id is the only other unbounded server value; a short query means
+		// the query-trim step never fires, so step 4 must clamp the session_id.
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ace-wire-sid-'));
+		try {
+			const filter = makeFilterLine({ writeDir: tmp });
+			const innerRaw = { query: 'q', threshold: 0.7, results: [{ id: 'p', content: 'ok' }], count: 1, session_id: 'S'.repeat(8000) };
+			const resp = JSON.stringify({ jsonrpc: '2.0', id: 12, result: { content: [{ type: 'text', text: JSON.stringify(innerRaw) }] } });
 			const lineOut = filter(resp);
 			expect(Buffer.byteLength(lineOut, 'utf8')).toBeLessThanOrEqual(8192);
 		} finally { fs.rmSync(tmp, { recursive: true, force: true }); }

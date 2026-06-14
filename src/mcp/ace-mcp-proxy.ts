@@ -394,6 +394,14 @@ function filterLine(line) {
           inner.query = inner.query.slice(0, 64) + '…';
           out = rebuild();
         }
+        // 4. The only remaining unbounded value is a server-assigned session_id
+        //    (normally a 36-char UUID). Persist + clamp it inline so the frame is
+        //    provably bounded even for a pathologically long session_id.
+        if (byteLen(out) > WIRE_LIMIT && typeof inner.session_id === 'string' && inner.session_id.length > 64) {
+          persist();
+          inner.session_id = inner.session_id.slice(0, 64) + '…';
+          out = rebuild();
+        }
         return out;
       }
     }
